@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "gen:types": "supabase gen types typescript --db-url \"$SUPABASE_DB_URL\" --schema public > src/types/database.ts"
+    "gen:types": "supabase gen types typescript --db-url \"$SUPABASE_DB_URL\" --schema public > src/types/database.ts",
+    "test:source-filters": "tsx --test src/lib/stages/source/filters.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.1",

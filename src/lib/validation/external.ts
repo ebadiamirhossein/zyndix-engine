@@ -8,26 +8,27 @@ export const apolloOrgSchema = z
   .object({
     id: z.string(),
     name: z.string(),
-    primary_domain: z.string().optional(),
-    website_url: z.string().optional(),
-    industry: z.string().optional(),
-    estimated_num_employees: z.number().optional(),
-    country: z.string().optional(),
-    city: z.string().optional(),
-    linkedin_url: z.string().optional(),
+    primary_domain: z.string().optional().nullable(),
+    website_url: z.string().optional().nullable(),
+    industry: z.string().optional().nullable(),
+    estimated_num_employees: z.number().optional().nullable(),
+    country: z.string().optional().nullable(),
+    city: z.string().optional().nullable(),
+    linkedin_url: z.string().optional().nullable(),
   })
   .passthrough();
 
 export const apolloPersonSchema = z
   .object({
     id: z.string(),
-    first_name: z.string().optional(),
-    last_name: z.string().optional(),
-    title: z.string().optional(),
-    email: z.string().optional(),
-    linkedin_url: z.string().optional(),
-    organization_id: z.string().optional(),
-    organization: apolloOrgSchema.optional(),
+    first_name: z.string().optional().nullable(),
+    last_name: z.string().optional().nullable(),
+    last_name_obfuscated: z.string().optional().nullable(),
+    title: z.string().optional().nullable(),
+    email: z.string().optional().nullable(),
+    linkedin_url: z.string().optional().nullable(),
+    organization_id: z.string().optional().nullable(),
+    organization: apolloOrgSchema.optional().nullable(),
   })
   .passthrough();
 
@@ -49,8 +50,8 @@ export const apifyRunResultSchema = z
       "ABORTED",
     ]),
     defaultDatasetId: z.string().optional(),
-    startedAt: z.string().optional(),
-    finishedAt: z.string().optional(),
+    startedAt: z.string().optional().nullable(),
+    finishedAt: z.string().optional().nullable(),
   })
   .passthrough();
 

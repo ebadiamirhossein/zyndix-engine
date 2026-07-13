@@ -87,7 +87,7 @@ Index: `(state, next_action_at)` — the scheduler's main query.
 | column | type | notes |
 |---|---|---|
 | company_id / lead_id | uuid fk (either) | |
-| source | text | `apollo_org / apollo_person / apify_site / apify_li_posts / apify_jobs` |
+| source | text | `apollo_org / apollo_person / apify_site / apify_tech / apify_li_posts` |
 | payload | jsonb | raw response |
 | fetched_at | timestamptz | |
 Retention: raw payloads prunable after 180 days (keep qualification).

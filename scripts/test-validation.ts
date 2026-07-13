@@ -43,6 +43,14 @@ assert(
 );
 
 assert(
+  'visible_tools with "none_detected" plus other tools FAILS',
+  !qualifierOutputSchema.safeParse({
+    ...validQualifier,
+    visible_tools: ["gtm", "none_detected"],
+  }).success,
+);
+
+assert(
   "qualifier with disqualify_reason and no hypothesis PASSES",
   qualifierOutputSchema.safeParse({
     fit_score: 20,
@@ -53,6 +61,20 @@ assert(
     visible_tools: ["none_detected"],
     recommended_angle: "speed-to-lead",
     disqualify_reason: "Enterprise — 250+ employees",
+  }).success,
+);
+
+assert(
+  "qualifier evidence citing UNAVAILABLE/failed fetch FAILS",
+  !qualifierOutputSchema.safeParse({
+    ...validQualifier,
+    evidence: [
+      {
+        source: "website",
+        observation:
+          "UNAVAILABLE — we failed to fetch tech stack; therefore no CRM tools detected.",
+      },
+    ],
   }).success,
 );
 

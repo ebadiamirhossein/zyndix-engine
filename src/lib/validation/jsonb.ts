@@ -23,7 +23,16 @@ export const evidenceArraySchema = z.array(evidenceItemSchema).min(1);
 
 export const triggersSchema = z.array(z.string().min(1));
 
-export const visibleToolsSchema = z.array(z.string().min(1));
+export const visibleToolsSchema = z
+  .array(z.string().min(1))
+  .superRefine((tools, ctx) => {
+    if (tools.length > 1 && tools.includes("none_detected")) {
+      ctx.addIssue({
+        code: "custom",
+        message: '"none_detected" must be mutually exclusive with other tools',
+      });
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // ads_attribution.utm (doc 02 §4.5)
@@ -158,6 +167,27 @@ export const settingsValueSchema = z.union([
   capacityDefaultsSchema,
   sendWindowsSchema,
 ]);
+
+// ---------------------------------------------------------------------------
+// apify_actor_templates (step 6 — doc 03 §4)
+// ---------------------------------------------------------------------------
+
+export const apifyActorTemplateSchema = z
+  .object({
+    actor_id: z.string().min(1),
+    input: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
+export const apifyActorTemplatesSchema = z
+  .object({
+    site: apifyActorTemplateSchema,
+    tech: apifyActorTemplateSchema,
+    li_posts: apifyActorTemplateSchema,
+  })
+  .strict();
+
+export type ApifyActorTemplates = z.infer<typeof apifyActorTemplatesSchema>;
 
 // ---------------------------------------------------------------------------
 // lead_events.detail — permissive record for audit payloads

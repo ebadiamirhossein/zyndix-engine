@@ -141,9 +141,9 @@ export const replyClassificationSchema = z.enum(REPLY_CLASSIFICATIONS);
 // ---------------------------------------------------------------------------
 
 export const LEAD_STATE_TRANSITIONS: Record<LeadState, LeadState[]> = {
-  sourced: ["enriching", "suppressed", "manual_hold"],
+  sourced: ["enriching", "parked", "suppressed", "manual_hold"],
   enriching: ["qualifying", "parked", "suppressed", "manual_hold"],
-  qualifying: ["parked", "qualified", "suppressed", "manual_hold"],
+  qualifying: ["enriching", "parked", "qualified", "suppressed", "manual_hold"],
   qualified: ["verifying", "parked", "suppressed", "manual_hold"],
   verifying: ["parked", "drafting", "suppressed", "manual_hold"],
   drafting: ["pending_approval", "parked", "suppressed", "manual_hold"],
@@ -172,7 +172,7 @@ export const LEAD_STATE_TRANSITIONS: Record<LeadState, LeadState[]> = {
   sequence_done: ["suppressed", "manual_hold"],
   meeting_booked: ["handed_off", "suppressed", "manual_hold"],
   handed_off: ["suppressed", "manual_hold"],
-  parked: ["suppressed", "manual_hold"],
+  parked: ["enriching", "suppressed", "manual_hold"],
   suppressed: [],
   manual_hold: [
     "sourced",

@@ -42,6 +42,24 @@ export const qualifierOutputSchema = z
   })
   .strict()
   .superRefine((data, ctx) => {
+    for (const [idx, item] of data.evidence.entries()) {
+      const obs = item.observation.toLowerCase();
+      if (
+        obs.includes("unavailable") ||
+        obs.includes("failed to fetch") ||
+        obs.includes("fetch failed") ||
+        obs.includes("failed fetch") ||
+        obs.includes("we failed to fetch")
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "evidence may not cite failed fetches / UNAVAILABLE sources (absence of data is not evidence of absence)",
+          path: ["evidence", idx, "observation"],
+        });
+      }
+    }
+
     if (data.disqualify_reason === null) {
       if (!data.problem_hypothesis || data.problem_hypothesis.trim().length === 0) {
         ctx.addIssue({

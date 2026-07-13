@@ -83,7 +83,7 @@ Sourcing itself runs inside the daily cron (not every 10 min): pulls N new compa
 | Service | Used for | Notes |
 |---|---|---|
 | **Apollo** | org/person search + firmographics | REST; respect export credits; store apollo ids for dedupe |
-| **Apify** | site crawl, LI posts, job listings | run actors via API, poll for finish, store raw payloads; per-actor input templates in settings |
+| **Apify** | site crawl, tech stack, LI posts | run actors via API (batched), poll for finish, store raw payloads; actor templates in `apify_actor_templates` settings key |
 | **Anthropic** | qualify / draft / classify / digest narrative | model from settings (default claude-sonnet-4-6); zod-validated JSON outputs; temperature low for qualify/classify, higher for draft |
 | **NeverBounce** | email verification | single-check API at verify stage |
 | **Instantly** | cold email send + webhooks + inbox health | leads pushed per-campaign OR direct send API; webhooks: reply, bounce, open, complaint |

@@ -41,9 +41,9 @@ DoD: unit-style script proves legal path and rejects an illegal jump.
 `integrations/apollo.ts` (typed search + person fetch), `stages/source.ts`: pull N companies for active segment, dedupe on domain/apollo ids, create companies+leads in `sourced`, suppression check.
 DoD: `scripts/test-source.ts` pulls 5 real us-realestate companies into Supabase, re-run creates zero duplicates.
 
-**Step 6 — Apify integration + enrich stage**
-`integrations/apify.ts` (run actor, poll, fetch dataset) with input templates from settings; `stages/enrich.ts`: site crawl + LI posts + job listings per lead, payloads → enrichment_payloads, state → qualifying-ready.
-DoD: one real company fully enriched; payload rows visible; failures retry then flag.
+**Step 6 — Apify integration + enrich stage** ✅
+`integrations/apify.ts` (run actor, poll, fetch dataset); `apify_actor_templates` settings key (seeded v1); `stages/enrich.ts`: batched site crawl + tech stack + LI posts per lead batch → `enrichment_payloads`, state → `qualifying`. Site crawler covers `/careers`/`/jobs` (no separate jobs actor).
+DoD: `scripts/test-enrich.ts --limit 3` enriches real leads; payload rows visible; failures retry then flag.
 
 **Step 7 — Anthropic integration + qualify stage**
 `integrations/anthropic.ts` (JSON-mode helper + zod parse + one retry); `stages/qualify.ts`: build context from payloads, run qualifier_prompt, write qualification (+history), route: score/evidence rules → qualified or parked. Records prompt_version + model.
@@ -101,6 +101,9 @@ DoD: quota change from UI affects next ledger day; prompt edit from UI creates n
 - Slack mirror of Telegram alerts (if team grows)
 - skills.sh utility skills evaluation during Cursor sessions (email-sequence scaffolds)
 - Auto-send graduation tooling (edit-rate report per segment → one-click enable)
+- Add `us-commercial` as a separate segment (commercial/industrial brokerages) with its own qualifier angle. Lee & Associates produced an excellent hypothesis but was correctly parked as out-of-ICP. Do NOT widen us-realestate — a vaguer ICP means a vaguer message.
+- Qualification rate is ~20% (1 of 5). To hit 25 contacts/week, source ~125 leads/week. Monitor and revisit QUALIFY_MIN_SCORE (currently 50; Stephan Group scored 52 — a threshold of 60 would have qualified nobody).
+- Revisit crawler: fantasticfrank.co (Astro/Vercel) returned no pages to `website-content-crawler` in cheerio mode. JS-rendered sites may need `crawlerType: playwright`. Test before assuming the site is uncrawlable.
 
 ## 5. Working agreement (Cursor discipline)
 - One step per prompt; Cursor reads 01–04 docs first (they live in the repo `/docs`).
