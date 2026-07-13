@@ -32,7 +32,7 @@
 | 5 | Apollo + source stage | ⬜ | | |
 | 6 | Apify + enrich stage | ⬜ | | |
 | 7 | Anthropic + qualify stage | ⬜ | | |
-| 8 | Attio sync | ⬜ | | |
+| 8 | Attio sync | ⛔ blocked | 2026-07-13 | Deferred (read-only human window; no email send dependency). Proceeding to step 9 per operator decision. |
 | 9 | Verification stage | ⬜ | | |
 | 10 | Writer + Telegram approval | ⬜ | | |
 | 11 | Instantly send + ledger + windows | ⬜ | | |
