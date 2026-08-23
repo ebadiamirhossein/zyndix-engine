@@ -14,7 +14,7 @@ Filled Session 1 from `.env.local` **key presence only** — no value was read, 
 | Item | Status | Notes |
 |---|---|---|
 | Supabase project `zyndix-engine` created | ✅ | `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` present; migrations verified applied via `show-settings.ts` |
-| Anthropic API key | ⛔ | `ANTHROPIC_API_KEY` **present but invalid** — API returns `401 authentication_error`. Blocks steps 7, 10, 13, 14 |
+| Anthropic API key | ✅ | Replaced 2026-08-23 after the old key returned `401`. Verified by a live qualifier call. **Vercel env still needs the new value** |
 | Apollo API key + credits confirmed | 🟨 | `APOLLO_API_KEY` present; plan/tier and remaining credits not verified this session |
 | Apify account + token | 🟨 | `APIFY_TOKEN` present; balance not verified |
 | NeverBounce / MillionVerifier key | ✅ | **MillionVerifier chosen.** `MILLIONVERIFIER_API_KEY` present. `NEVERBOUNCE_API_KEY` absent and superseded — docs 01–05 still say "neverbounce" |
@@ -39,10 +39,10 @@ Reconciled against the repo on 2026-08-23. Evidence column says what the status 
 | 4 | State machine | ✅ | `test-state.ts` | 11/11 PASS. Legal hops, illegal jump throws `IllegalTransitionError` with no state change and no event row, stale-transition guard fires |
 | 5 | Apollo + source stage | 🟨 | files only | `integrations/apollo.ts` (389) + `apollo-types.ts`, `stages/source/` (399 + 120 filters + 40 cursor). `test-source.ts` withheld — Apollo quota. `pnpm test:source-filters` passes 9/9 (name-guard unit tests only) |
 | 6 | Apify + enrich stage | 🟨 | files only | `integrations/apify.ts` (295), `stages/enrich/core.ts` (540), `apify_actor_templates` live at **v3** (crawler switched to `playwright:adaptive`). `test-enrich.ts` withheld — real Apify actor spend |
-| 7 | Anthropic + qualify stage | 🟨 ⛔ | DoD attempted, failed on credential | `integrations/anthropic.ts` (167), `stages/qualify/core.ts` (661), `qualifier_prompt` live at **v4**. `test-qualify.ts --limit 1` ran: **2/3 PASS, 1 FAIL — `Anthropic API error (401): API key is invalid`**. Zero tokens, zero cost. Not a code defect: the 3-strike path behaved correctly (lead held in `qualifying`, `qualify_failed` attempt 1/3 logged with retry time). Cannot pass until the key is replaced |
+| 7 | Anthropic + qualify stage | ✅ | `test-qualify.ts` | `integrations/anthropic.ts` (167), `stages/qualify/core.ts` (661), `qualifier_prompt` live at **v4**. **Anthropic key replaced 2026-08-23**; `test-qualify.ts --limit 1` re-run **3/3 PASS**, 2,520 tokens, **$0.0093**. Lead `200c7e06` correctly **parked with a `disqualify_reason`** (site returned 404 — no evidence, so no hypothesis). That is the evidence-required rule working, not a miss |
 | 8 | Attio sync | ⛔ deferred | operator decision 2026-07-13 | Deliberately deferred (read-only human window; no send dependency). `integrations/attio.ts` and `/api/attio/sync` are placeholders. Not an oversight |
 | 9 | Verification stage | 🟨 | files only | `integrations/millionverifier.ts` (149), `stages/verify/core.ts` (418). `test-verify.ts` withheld — spends **Apollo reveal credits** + MillionVerifier credits |
-| 10 | Writer + Telegram approval | 🟨 | files only | `stages/draft/core.ts` (542) + `guard.ts` (325), `telegram/handler.ts` (643), `integrations/telegram{,-approval,-format}.ts`, `sequences/default.ts`, `/api/webhooks/telegram/route.ts`. `writer_prompt_email` live at **v7**. Was entirely uncommitted until Session 1; now at `0e772ab`. `test-draft.ts` **not run** — it destroys real data (see §6) and the Anthropic key is dead. Webhook route unreachable without `TELEGRAM_WEBHOOK_SECRET` |
+| 10 | Writer + Telegram approval | 🟨 | files only | `stages/draft/core.ts` (542) + `guard.ts` (325), `telegram/handler.ts` (643), `integrations/telegram{,-approval,-format}.ts`, `sequences/default.ts`, `/api/webhooks/telegram/route.ts`. `writer_prompt_email` live at **v7**. Was entirely uncommitted until Session 1; now at `0e772ab`. `test-draft.ts` **not run** — it destroys real data (see §6). The Anthropic key is no longer a reason; the destructive reset block still is. Webhook route unreachable without `TELEGRAM_WEBHOOK_SECRET` |
 | 11 | Instantly send + ledger + windows | ⬜ | absence confirmed | No `src/lib/scheduler/` (no `ledger.ts`, no `windows.ts`), no `stages/send.ts`, no `integrations/instantly.ts`. **The zyndix.com send guard does not exist yet** — it arrives with `stages/send.ts`. Blocked on `STEP-11-RUNBOOK.md` Day 0 (domains, Instantly, 4 mailboxes, 14-day warmup) |
 | 12 | Webhooks: Instantly + Calendly | ⬜ | absence confirmed | `/api/webhooks/instantly` and `/api/webhooks/calendly` are `.gitkeep` placeholders |
 | 13 | Reply classifier + routing | ⬜ | absence confirmed | No `stages/classify.ts`. `reply_classifier_prompt` seeded at v1 and its zod schema is tested by `test-validation.ts`, but no stage consumes it |
@@ -50,7 +50,7 @@ Reconciled against the repo on 2026-08-23. Evidence column says what the status 
 | 15 | Dashboard v0 | ⬜ | absence confirmed | `src/app/dashboard/.gitkeep` only |
 | — | **v1 gate:** 10 leads end-to-end, 1 clean week | ⬜ | | 0 leads have reached `sent` |
 
-**Live pipeline as of 2026-08-23:** 34 companies · 34 leads — `parked` 18, `qualifying` 11, `pending_approval` 3, `approved` 1, `enriching` 1 · 16 qualification rows · 4 touches · **0 send_accounts**.
+**Live pipeline as of 2026-08-23 (after the step 7 re-run):** 34 companies · 34 leads — `parked` 19, `qualifying` 10, `pending_approval` 3, `approved` 1, `enriching` 1 · 17 qualification rows · 4 touches · **0 send_accounts**.
 
 ## 3. Phase 2 / 3 tracker
 
@@ -105,9 +105,9 @@ Reconciled against the repo on 2026-08-23. Evidence column says what the status 
 
 | Date | Issue | Status | Resolution |
 |---|---|---|---|
-| 2026-08-23 | **`ANTHROPIC_API_KEY` returns `401 authentication_error`.** Proven by `test-qualify.ts --limit 1`. Blocks steps 7, 10, 13, 14 — every Claude call in the engine | ⛔ open | Replace the key in `.env.local` and in Vercel env. Then re-run `test-qualify.ts --limit 1` |
+| 2026-08-23 | **`ANTHROPIC_API_KEY` returned `401 authentication_error`.** Proven by `test-qualify.ts --limit 1`. Blocked steps 7, 10, 13, 14 — every Claude call in the engine | ✅ resolved 2026-08-23 | Key replaced in `.env.local`. `test-qualify.ts --limit 1` re-run: 3/3 PASS, 2,520 tokens, $0.0093. **Still to do: replace it in the Vercel env too** — the fix so far is local only |
 | 2026-08-23 | **`scripts/test-draft.ts` destroys real data.** Lines 91–103 take the `limit * 2` oldest leads in `pending_approval`/`parked`, `DELETE` their `touches` rows, and force-write `leads.state = 'drafting'` directly — bypassing `lib/state.ts`, writing no `lead_events`. Reverses real parking decisions silently | ⛔ open | Do not run until fixed. Rewrite to seed its own throwaway lead and route every state change through `lib/state.ts` |
-| 2026-08-23 | Lead `200c7e06` sits at `qualify_failed` attempt **1/3**. Two more failures send it to `manual_hold` | 🟨 open | Do not re-run qualify against it until the Anthropic key is valid |
+| 2026-08-23 | Lead `200c7e06` sat at `qualify_failed` attempt **1/3** after the 401 | ✅ resolved 2026-08-23 | Cleared by the successful re-run. Lead is now `parked` with a `disqualify_reason` (site 404) |
 | 2026-08-23 | `scripts/ping.ts` does not exist, but `CLAUDE.md` and step 1's DoD both name it | 🟨 open | Either write it (5 lines against `_ping`) or drop it from the docs. Not fixed in Session 1 — reconcile-only scope |
 | 2026-08-23 | `TELEGRAM_WEBHOOK_SECRET` unset → `/api/webhooks/telegram` returns 500 on every request | 🟨 open | Set the secret and register the webhook, or keep using `telegram-poll.ts` until step 14 |
 | 2026-08-23 | `source_cursors` (migration `0004`) is not documented in `02-database-schema.md` | 🟨 open | Add it to the schema doc |
@@ -140,4 +140,4 @@ Reconciled against the repo on 2026-08-23. Evidence column says what the status 
 
 | Week | Sourced | Qualified | Parked | Sent | Reply % | Meetings | Inbox health |
 |---|---|---|---|---|---|---|---|
-| — | 34 | 16 scored | 18 | 0 | — | 0 | no inboxes yet |
+| — | 34 | 17 scored | 19 | 0 | — | 0 | no inboxes yet |

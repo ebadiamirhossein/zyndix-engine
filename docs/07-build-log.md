@@ -58,6 +58,50 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-08-23 — Session 2 — Anthropic key replaced, step 7 DoD verified
+
+**Step:** 7 — Anthropic integration + qualify stage
+**Status at end:** ✅ DoD passed
+
+**Did**
+- Diagnosed the Session 1 `401` with a direct `curl` against the Anthropic API, isolating the fault to the credential rather than to `integrations/anthropic.ts` or the qualify stage.
+- Replaced `ANTHROPIC_API_KEY` in `.env.local`.
+- Re-ran the step 7 DoD. It passed.
+- Updated `06-build-progress.md`: step 7 → ✅, dead-key blocker → resolved, strike-count issue on lead `200c7e06` → resolved, pipeline counts refreshed.
+
+**Files touched**
+- `docs/06-build-progress.md` — step 7 row, §1 Anthropic row, two §6 rows, pipeline snapshot, §8
+- `docs/07-build-log.md` — this entry
+
+No code changed.
+
+**Verification**
+
+```
+$ pnpm tsx scripts/test-qualify.ts --limit 1
+=== 3/3 PASS ===
+Tokens: 2520 total | Est. cost: $0.0093 total
+```
+Result: **pass** — step 7 DoD
+
+Lead `200c7e06` (Jimmy Stt, Realty ONE Group Prime, `myrealtyonegroup.com`) was **parked with a `disqualify_reason`**: the site returned 404, so there was no evidence, so no `problem_hypothesis` was produced. That is the evidence-required rule doing its job, not a miss. A parked lead with a stated reason is the correct outcome for a company we cannot see.
+
+**Decisions**
+- **Diagnose the credential with `curl` before touching the code.** — A `401` from an SDK wrapper could be the wrapper, the env loading, or the key. One curl separates the three in ten seconds and stops you rewriting a working integration.
+
+**Correction to Session 1**
+- Session 1 recorded the failing assertion in `test-qualify.ts` as a fail without questioning it, and separately noted the stage's 3-strike path had behaved correctly. Worth stating plainly now that both readings were right and neither was a script defect: **`FAIL: lead 200c7e06 not left in qualifying` was a true failure.** The `401` meant no qualification was written, so the lead really was still sitting in `qualifying` at the end of the run — exactly what the assertion exists to catch. The script was correct, the stage's error handling was correct, and the credential was the only thing broken. Nothing in `test-qualify.ts` needs changing.
+
+**Problems hit**
+- None new. The one carried item is that the replacement key is in `.env.local` only — **Vercel's env still holds the dead key**, so anything deployed will keep returning `401`. Logged in `06-build-progress.md` §1 and §6.
+
+**Next action**
+- **Put the new `ANTHROPIC_API_KEY` into the Vercel project env.** The local fix does nothing for a deployed cron.
+- Then `STEP-11-RUNBOOK.md` Day 0 — two sending domains, Instantly Hypergrowth, four mailboxes, MillionVerifier credits. That starts the 14-day warmup clock, and step 11 cannot be tested until it finishes.
+- Steps 5, 6, 9 and 10 remain 🟨 built-but-unverified. Steps 5 and 6 clear cheaply once you are willing to spend Apollo and Apify credits; step 10 needs the destructive reset block in `scripts/test-draft.ts` fixed first (`06-build-progress.md` §6).
+
+---
+
 ### 2026-08-23 — Session 1 — Reconcile tracker against repo
 
 **Step:** docs / reconciliation — no features written
