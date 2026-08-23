@@ -123,6 +123,34 @@ export const cadenceDefaultSchema = z
   })
   .strict();
 
+export const ctaVariantSchema = z
+  .object({
+    id: z.enum(["link", "reply"]),
+    active: z.boolean(),
+    text: z.string().min(1),
+  })
+  .strict();
+
+export const ctaVariantsSchema = z
+  .object({
+    variants: z.array(ctaVariantSchema).min(1),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    const activeCount = data.variants.filter((variant) => variant.active).length;
+    if (activeCount !== 1) {
+      ctx.addIssue({
+        code: "custom",
+        message: "cta_variants must have exactly one active variant",
+        path: ["variants"],
+      });
+    }
+  });
+
+export const proofPointsSchema = z.record(z.string(), z.string().nullable());
+
+export const complianceFooterSchema = z.string().min(1);
+
 export const capacityDefaultsSchema = z
   .object({
     email_inbox: z
@@ -164,6 +192,9 @@ export const settingsValueSchema = z.union([
   z.string(),
   segmentsSettingsSchema,
   cadenceDefaultSchema,
+  ctaVariantsSchema,
+  proofPointsSchema,
+  complianceFooterSchema,
   capacityDefaultsSchema,
   sendWindowsSchema,
 ]);

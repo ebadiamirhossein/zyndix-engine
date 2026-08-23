@@ -6,6 +6,9 @@ import {
   apifyActorTemplatesSchema,
   cadenceDefaultSchema,
   capacityDefaultsSchema,
+  ctaVariantsSchema,
+  proofPointsSchema,
+  complianceFooterSchema,
   segmentsSettingsSchema,
   sendWindowsSchema,
 } from "@/lib/validation/jsonb";
@@ -20,6 +23,9 @@ export const SETTING_KEYS = [
   "writer_prompt_linkedin",
   "reply_classifier_prompt",
   "cadence_default",
+  "cta_variants",
+  "proof_points",
+  "compliance_footer",
   "capacity_defaults",
   "send_windows",
 ] as const;
@@ -54,6 +60,12 @@ function schemaForKey(key: string): z.ZodType {
       return segmentsSettingsSchema;
     case "cadence_default":
       return cadenceDefaultSchema;
+    case "cta_variants":
+      return ctaVariantsSchema;
+    case "proof_points":
+      return proofPointsSchema;
+    case "compliance_footer":
+      return complianceFooterSchema;
     case "capacity_defaults":
       return capacityDefaultsSchema;
     case "send_windows":
