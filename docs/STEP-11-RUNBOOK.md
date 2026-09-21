@@ -1,6 +1,6 @@
 # Sending Infrastructure Runbook
 
-**Owner:** Amir · **Created:** 2026-08-23 · **Rewritten:** 2026-09-21 (Session 3)
+**Owner:** Amir · **Created:** 2026-08-23 · **Rewritten:** 2026-09-21 (Session 3) · **Revised:** 2026-09-21 (Session 4)
 **Type:** manual setup task — not a Claude Code unit.
 **Implements the purchase side of:** `09-build-plan-v2.md` §4.
 
@@ -8,20 +8,24 @@
 
 **The one thing that matters:** warmup is a calendar clock, not an effort clock. Nothing here shortens it.
 
-**What changed in this rewrite:** Day 0 used to be a single shopping trip. It is now **two clocks**, because they have different optimal timing. Buying the domains early is free upside; buying Instantly early just burns subscription on idle inboxes.
+**What changed in the Session 3 rewrite:** Day 0 used to be a single shopping trip. It is now **two clocks**, because they have different optimal timing. Buying the domains early is free upside; buying Instantly early just burns subscription on idle inboxes.
+
+**What changed in the Session 4 revision:** the domains were bought on 2026-09-21, but only registration and the 301 redirects were done. That turned out not to be a shortcut — **clock A asked for DKIM, and DKIM is generated in Google Workspace Admin, which clock B buys.** Clock A could never have delivered "full DNS". So all DNS authentication moved to clock B, and clock B moved **one unit earlier, to the start of U2**, to pay for it. Arithmetic in `09-build-plan-v2.md` §2.
 
 | Clock | What | When |
 |---|---|---|
-| **A** | Two sending domains + full DNS | **Now** |
-| **B** | Instantly + four mailboxes + MillionVerifier credits | **Start of U3** (≈ day 11) |
+| **A** | Two sending domains + 301 redirects | ✅ **Done 2026-09-21** |
+| **B** | Instantly + four mailboxes + MillionVerifier credits **+ all DNS authentication** | **Start of U2** (≈ day 7) |
 
 ---
 
-## A. Now — domains and DNS
+## A. ✅ Done 2026-09-21 — domains and redirects
 
-Domains are cheap, and domain age is a deliberability input that only accrues with time. Doing the DNS now is also what lets clock B wait until U3 and still finish warmup on schedule: on purchase day only the mailboxes and the Instantly connection remain.
+Domains are cheap, and domain age is a deliverability input that only accrues with time — so they were bought first, and their age is already accruing.
 
-### A.1 Buy two sending domains
+What was **not** done here, and could not have been: the DNS authentication records. DKIM comes out of Google Workspace Admin, and Google Workspace is bought in clock B. Those records live in §B now.
+
+### A.1 The two sending domains
 
 Registrar: Namecheap (already in use).
 
@@ -29,13 +33,36 @@ Registrar: Namecheap (already in use).
 >
 > ⚠️ **Correction to the previous version of this file**, which said the rule was "already enforced by a code guard in `stages/send.ts`". **It is not. There is no `stages/send.ts`.** The normalized guard, its explicit allowed-sender list and its no-override rule all arrive at **U5**, and U5's DoD is what verifies them — including rejecting `zyndix.com`, `mail.zyndix.com`, `ZYNDIX.COM`, a trailing-dot form, a deep subdomain and a whitespace-padded form. Until U5 ships, the rule is enforced by you, not by code.
 
-Criteria: `.com` only, pronounceable, obviously related to Zyndix but not identical, no hyphens, no numbers.
+Criteria used: `.com` only, pronounceable, obviously related to Zyndix but not identical, no hyphens, no numbers.
 
-Candidates (check availability, pick two): `zyndixhq.com` · `getzyndix.com` · `tryzyndix.com` · `zyndixagency.com` · `zyndixteam.com`
+| # | Domain | 301 → `zyndix.com` |
+|---|---|---|
+| 1 | ⬜ **record the domain name** | ✅ live |
+| 2 | ⬜ **record the domain name** | ✅ live |
 
-Record the two you buy in `06-build-progress.md` §1. They go into U5's allowed-sender list.
+> ⬜ **Open:** the two purchased domain names are not yet written down anywhere. Fill this table and the matching row in `06-build-progress.md` §1. They are the literal contents of U5's allowed-sender list, and U5's DoD asserts that list, so this cannot stay blank past U5.
 
-### A.2 DNS and authentication — both domains
+### A.2 Root redirect — done
+
+Each sending domain's root 301s to `https://zyndix.com`. A domain that sends mail but resolves to nothing is a recognised spam pattern.
+
+---
+
+## A-deferred. DNS and authentication — moved to §B.0
+
+Everything below was in §A.2 until 2026-09-21. It is now **§B.0**, executed on purchase day, because DKIM cannot be generated before Google Workspace exists.
+
+One piece of free margin if you want it: **MX, SPF and DMARC do not need Workspace** and could be set today at zero cost. Only DKIM and the tracking CNAME are genuinely blocked. Doing them early buys nothing but slack against a propagation surprise — the operator's call, not a requirement.
+
+---
+
+## B. At the start of U2 (≈ day 7) — Instantly, mailboxes, credits, DNS
+
+**Why this timing.** FIRST SEND READY is the end of U6, ≈ day 33. Warmup wants 14 days minimum, 21 better. Buying at the start of U2 puts warmup at ≈ **days 9–33 — about 24 days**. Purchase day now carries the DNS work as well as the mailboxes and the Instantly connection, so budget about two days for it, including DKIM propagation and clicking *Start authentication*. Buying earlier wastes subscription on idle inboxes; buying later leaves finished code waiting on a clock nothing can shorten. Full arithmetic in `09-build-plan-v2.md` §2.
+
+### B.0 DNS and authentication — both domains *(do this first)*
+
+Do this **first on purchase day**, as soon as the Workspace mailboxes exist. Everything else here can wait; the DKIM clock cannot.
 
 DNS at Cloudflare (consistent with `zyndix.com`) or Namecheap. Be consistent.
 
@@ -69,13 +96,7 @@ dig +short TXT   google._domainkey.$DOMAIN
 dig +short TXT   _dmarc.$DOMAIN
 ```
 
-The tracking CNAME cannot be added yet — its target comes from Instantly, so it belongs to clock B.
-
----
-
-## B. At the start of U3 (≈ day 11) — Instantly, mailboxes, credits
-
-**Why this timing.** FIRST SEND READY is the end of U6, ≈ day 33. Warmup wants 14 days minimum, 21 better. Buying at the start of U3 puts warmup at ≈ days 12–33 — about 21 days, landing exactly on U6's DoD. Buying earlier wastes subscription on idle inboxes; buying later leaves finished code waiting on a clock nothing can shorten. Full arithmetic in `09-build-plan-v2.md` §2.
+The tracking CNAME comes last — its target is shown by Instantly, so it waits for §B.4.
 
 ### B.1 Instantly — Hypergrowth ($97/mo)
 
@@ -126,7 +147,7 @@ Send one email from each of the four mailboxes to the address at **mail-tester.c
 | Reply rate | 30% |
 | Weekend activity | ON (warmup only) |
 | **Daily send limit** | **0 until U6** |
-| Duration | 14 days minimum, ~21 as scheduled here |
+| Duration | 14 days minimum, **~24 as scheduled here** (≈ days 9–33) |
 
 Checking it daily changes nothing. Re-run mail-tester on all four around day 28 (≈ U5): any score that dropped during warmup means something is wrong, and you want to find it before U6's live drill, not during it.
 
@@ -134,7 +155,7 @@ Checking it daily changes nothing. Re-run mail-tester on all four around day 28 
 
 ## C. While it warms — the work that does not depend on it
 
-U3 through U6 are being built in this window, so the engine side is covered. These are the non-code items that are pure upside:
+U2 through U6 are being built in this window, so the engine side is covered. These are the non-code items that are pure upside:
 
 1. **Phase 0 — 20 manual warm Lithuanian messages, sent by hand.** The highest-value item in the project that depends on nothing. The writer prompt has zero few-shot examples, which means plausible-but-generic copy is its default failure mode. Twenty real messages produce twenty real hypothesis/evidence pairs and real replies; the best five get promoted into `writer_prompt_email` as v8 before the engine ever sends.
 2. **Send the four testimonial requests** — Fonderis, ScholarCert, PulseConf, Loveko. Drafts exist. Fifteen minutes, pending since late July.
@@ -161,12 +182,13 @@ U6's DoD requires the live drill to send to an **operator-owned mailbox, never a
 
 ## E. Definition of done
 
-**Clock A — now**
-- [ ] Two sending domains purchased and recorded in `06-build-progress.md` §1
-- [ ] MX, SPF, DKIM (authentication *started*), DMARC verified by `dig` on both domains
-- [ ] Both domains 301 to `zyndix.com`
+**Clock A — done 2026-09-21**
+- [x] Two sending domains purchased
+- [x] Both domains 301 to `zyndix.com`
+- [ ] ⬜ Domain names recorded in §A.1 above and in `06-build-progress.md` §1
 
-**Clock B — at U3**
+**Clock B — at U2 (≈ day 7)**
+- [ ] MX, SPF, DKIM (authentication *started*), DMARC verified by `dig` on both domains — §B.0
 - [ ] Instantly Hypergrowth active
 - [ ] Four mailboxes live with photos and signatures
 - [ ] MillionVerifier credits topped up

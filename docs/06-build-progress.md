@@ -27,13 +27,17 @@ Filled from `.env.local` **key presence only** — no value was read, printed or
 | Anthropic API key | ✅ ready | — | Replaced 2026-08-23 after a `401`. Verified live. **Vercel env still holds the dead key** |
 | Apollo API key + credits | 🟨 present, unverified | U15 | Plan/tier and remaining credits not confirmed |
 | Apify account + token | 🟨 present, unverified | U15 | Balance not confirmed |
-| MillionVerifier key | ✅ ready | U3 (credits) | `MILLIONVERIFIER_API_KEY` present. `NEVERBOUNCE_API_KEY` absent and superseded |
+| MillionVerifier key | ✅ ready | U2 (credits) | `MILLIONVERIFIER_API_KEY` present. `NEVERBOUNCE_API_KEY` absent and superseded |
 | Telegram bot + user IDs | ✅ ready | — | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ALLOWED_USER_IDS` present; approve path exercised 2026-09-21 |
-| **Two sending domains** + full DNS | ⬜ **buy now** | U5 | Cheap, and domain age only accrues with time. See `STEP-11-RUNBOOK.md` §A |
-| **Instantly Hypergrowth + 4 mailboxes** | ⬜ **buy at U3** | U4 | 🛒 purchase trigger. ~21 days of warmup lands on FIRST SEND READY at U6. `STEP-11-RUNBOOK.md` §B |
+| **Two sending domains** | ✅ **bought 2026-09-21** | U5 | 301 → `zyndix.com` live on both. ⬜ **Names not yet recorded** — they are U5's allowed-sender list. `STEP-11-RUNBOOK.md` §A.1 |
+| DNS authentication (MX, SPF, DKIM, DMARC) | ⬜ **at U2** | U4 | Moved out of clock A: DKIM is generated in Google Workspace Admin, which U2 buys. `STEP-11-RUNBOOK.md` §B.0 |
+| **Instantly Hypergrowth + 4 mailboxes** | ⬜ **buy at U2** (≈ day 7) | U4 | 🛒 purchase trigger, moved from U3 on 2026-09-21. ~24 days of warmup lands on FIRST SEND READY at U6. `STEP-11-RUNBOOK.md` §B |
 | Mailboxes pass mail-tester ≥9/10 | ⬜ | U4 | Nothing to test yet; `send_accounts` has 0 rows |
 | `TELEGRAM_WEBHOOK_SECRET` | ⬜ | U9 | Unset → `/api/webhooks/telegram` 500s on every request. Approvals run via `scripts/telegram-poll.ts` |
-| `DASHBOARD_ALLOWED_EMAILS` | ⬜ | U1 | Needed for the auth allow-list |
+| `DASHBOARD_ALLOWED_EMAILS` | ⬜ | U1 | Gates who may sign in, and the role each is provisioned with. Format `email:role`, comma-separated; bare email = `viewer` |
+| `SUPABASE_ANON_KEY` | ⬜ | U1 | Added by U1. Anon key, **not** service-role, and deliberately not `NEXT_PUBLIC_` |
+| Supabase Auth email provider + redirect URL | ⬜ | U1 | Enable Email provider; allow-list `/api/auth/callback` |
+| Migration `0005_app_users_roles.sql` applied | ⬜ | U1 | Written; awaiting manual apply in the SQL editor |
 | Calendly webhook signing key | ⬜ | U8 | `CALENDLY_WEBHOOK_SIGNING_KEY` absent |
 | Attio API key | ⬜ | U19 | Deliberately deferred 2026-07-13; nothing before U19 needs it |
 | Heyreach account | ⬜ | U18 | External execution stays **off**; adapter completes without it |
@@ -51,18 +55,19 @@ Units run in execution order. Phase 4 precedes Phase 2 by operator decision (§5
 | Unit | Name | Status | Evidence |
 |---|---|---|---|
 | — | Repair + adopt brief *(Session 3)* | ✅ **tested locally** | `test-draft.ts` rewritten against fixtures, 32/32 pass, non-fixture counts identical. `ping.ts` added, 3/3 pass. Docs realigned |
-| U1 | Auth, roles, dashboard shell | ⬜ not started | Migration `0005` also fixes `source_cursors` RLS |
-| U2 | Durable job system | ⬜ not started | |
+| U1 | Auth, roles, dashboard shell | 🟨 **implemented** — DoD partly blocked | Code, migration `0005` and `scripts/test-u1-auth.ts` all written. 29/29 runnable checks pass; 19 more are gated on `0005` being applied. See §6 |
+| U2 | Durable job system 🛒 | ⬜ not started | 🛒 **Instantly purchase trigger** moved here from U3 on 2026-09-21 |
 
-### Phase 4 (early) — Campaign execution *(16 sessions)*
+### Phase 4 (early) — Campaign execution *(18 sessions, incl. UD)*
 
 | Unit | Name | Status | Evidence |
 |---|---|---|---|
-| U3 | Scheduler: ledger + send windows 🛒 | ⬜ not started | `capacity_defaults` / `send_windows` seeded, consumed by nothing |
+| U3 | Scheduler: ledger + send windows | ⬜ not started | `capacity_defaults` / `send_windows` seeded, consumed by nothing |
 | U4 | Instantly adapter | ⬜ not started | `integrations/instantly.ts` does not exist |
 | U5 | Send stage, preflight, guards | ⬜ not started | **The `zyndix.com` guard does not exist yet** — it arrives here |
 | U6 | Webhooks, reply freeze, suppression 🚩 | ⬜ not started | 🚩 **FIRST SEND READY.** `instantlyWebhookSchema` written, unconsumed |
 | U7 | Reply classifier + routing | ⬜ not started | `reply_classifier_prompt` v1 seeded; schema written; no stage consumes it |
+| **UD** | **Apply design system** 🎨 | ⬜ not started | Added 2026-09-21. U1 ships the shell unstyled; the system is authored in Claude Design. Sits before U8, the first unit that renders real data |
 | U8 | Calendly, meetings, booking stop | ⬜ not started | route is a `.gitkeep` |
 | U9 | Orchestrator, crons, pause | ⬜ not started | both cron routes are `.gitkeep`; `lib/auth/cron.ts` exists |
 
@@ -171,7 +176,11 @@ This depends on nothing in the build and is the cheapest source of real hypothes
 | **2026-09-21** | **`08-complete-build-brief.md` adopted as scope authority** | It supersedes docs 01–05 wherever they conflict. Docs 01–05 keep a banner saying so rather than being deleted — they remain the record of how existing code was built |
 | **2026-09-21** | **Build runs in Claude Code (desktop app), not Cursor** | Decided 2026-08-23, now in force. The remaining DoDs are script-based; Claude Code closes the run-read-fix loop without a human relay |
 | **2026-09-21** | **Phase 4 executes before Phase 2** | Every first touch is operator-approved in Telegram and the proof line is operator-written, so the approval gate covers the generic-copy risk. The binding constraint on revenue is that `stages/send.ts` does not exist, not that a library does not exist. First send runs on the existing draft stage with a minimal single-campaign config; U14/U17 migrate it onto campaigns and matching |
-| **2026-09-21** | **Sending domains bought now; Instantly bought at U3** | Two clocks, not one. Domains are cheap and only benefit from age, and doing their DNS now is what lets the Instantly purchase wait until U3 and still give ~21 days of warmup before FIRST SEND READY at U6 |
+| ~~2026-09-21~~ | ~~Sending domains bought now; Instantly bought at U3~~ | **Superseded the same day — see the next row.** The premise (that the domains' DNS could be completed immediately) was wrong |
+| **2026-09-21** | **Domains bought; DNS and the Instantly purchase both move to U2** | Domains were bought and 301'd to `zyndix.com`; the rest of their DNS was deferred. That deferral was not optional: **DKIM is generated in Google Workspace Admin, and Workspace is part of the Instantly/mailbox purchase**, so clock A could never have delivered "full DNS". Moving the purchase from U3 (≈ day 11) to U2 (≈ day 7) buys four days, which is what funds the DNS work on purchase day. Warmup goes from ~21 to **~24 days** before FIRST SEND READY at U6 (≈ day 33) |
+| **2026-09-21** | **The dashboard ships unstyled; the design system lands at UD** | The design system is being authored in Claude Design, outside the repo. Styling U1's shell in code before it exists would be thrown away. U1 therefore ships plain semantic HTML — no colour, no spacing scale, no components — and new unit **UD** applies the system just before U8, the first unit that renders real data. Styling earlier means styling empty pages; later means restyling |
+| **2026-09-21** | **Dashboard roles bootstrap from `DASHBOARD_ALLOWED_EMAILS`, then the DB is authority** | The env gates who may sign in and what role they are *provisioned* with (`email:role`, bare email = `viewer`). After first login `app_users.role` wins and is never overwritten from the env, so changing someone's role is a DB update, not a redeploy. Rejected "first user wins admin" — privilege should not depend on who clicks first |
+| **2026-09-21** | **`app_users.role` carries a `check` constraint — the schema's first** | The repo enforces state legality in application code and has no other check constraints. A role is a privilege boundary, so an unrecognised value must not be insertable at all. Recorded as a deliberate exception, not drift |
 | **2026-09-21** | **MillionVerifier replaces NeverBounce — docs corrected, not just contradicted** | The 2026-07-13 decision was real but docs 01–05 kept saying "NeverBounce" for two months. They now carry an explicit drift note |
 | **2026-09-21** | **Tests use isolated synthetic fixtures, never real prospects** | `test-draft.ts` reset 6 real leads and deleted their touches. Fixtures plus a before/after non-fixture row-count assertion make that class of bug detectable rather than silent |
 
@@ -184,7 +193,7 @@ This depends on nothing in the build and is the cheapest source of real hypothes
 | 2026-08-23 | **`scripts/test-draft.ts` destroys real data.** Selected the oldest real `pending_approval`/`parked` leads, `DELETE`d their touches and force-wrote `leads.state` directly, bypassing `lib/state.ts` and writing no `lead_events` | ✅ **resolved 2026-09-21** | Rewritten against synthetic fixtures with scoped cleanup, all transitions through `lib/state.ts`, an abort guard if any non-fixture lead is in `drafting`, and a before/after non-fixture row-count assertion. 32/32 pass; counts identical |
 | 2026-08-23 | `scripts/ping.ts` does not exist, but `CLAUDE.md` and step 1's DoD both name it | ✅ **resolved 2026-09-21** | Written as a **read-only** round-trip. Migration `0001` ends with `drop table if exists _ping`, so the original write-a-row DoD was unrunnable against the real schema |
 | 2026-08-23 | `ANTHROPIC_API_KEY` returned `401` | ✅ resolved 2026-08-23 | Key replaced in `.env.local`. **Still to do: replace it in the Vercel env** — the fix is local only |
-| 2026-09-21 | **`source_cursors` (migration `0004`) has no RLS and no `updated_at` trigger**, unlike all 16 tables in `0001`. Not exploitable today — `anon`/`authenticated` are ungranted — but it breaks the pattern | 🟨 scheduled | Fixed in **U1's migration `0005`** |
+| 2026-09-21 | **`source_cursors` (migration `0004`) has no RLS and no `updated_at` trigger**, unlike all 16 tables in `0001`. Not exploitable today — `anon`/`authenticated` are ungranted — but it breaks the pattern | 🟨 **fix written, not applied** | `0005_app_users_roles.sql` enables RLS and adds `trg_updated_at`. Awaiting manual apply in the SQL editor; the verification query is in the migration's trailer |
 | 2026-09-21 | `STEP-11-RUNBOOK.md` claimed the `zyndix.com` guard was "already enforced by a code guard in `stages/send.ts`". No such file exists | ✅ resolved 2026-09-21 | Runbook corrected. The guard arrives at **U5** and that unit's DoD verifies it |
 | 2026-08-23 | `TELEGRAM_WEBHOOK_SECRET` unset → `/api/webhooks/telegram` 500s | 🟨 open | Scheduled into **U9**. `telegram-poll.ts` covers approvals until then |
 | 2026-08-23 | `source_cursors` not documented in `02-database-schema.md` | 🟨 open | Docs 01–05 now carry a drift banner naming it. Full reconciliation is **U23** |
@@ -192,6 +201,10 @@ This depends on nothing in the build and is the cheapest source of real hypothes
 | 2026-07-13 | **Qualification rate ≈ 20%** (1 of 5), implying ~125 leads/week sourced to hit 25 contacts/week | 🟨 open | Monitor. Do **not** widen the ICP to close the gap — a vaguer ICP means a vaguer message |
 | 2026-07-13 | **`QUALIFY_MIN_SCORE` unsettled.** Currently 50; Stephan Group scored 52, so 60 would have qualified nobody | 🟨 open | Needs more scored leads. Do not change it to raise throughput |
 | 2026-09-21 | `test-draft.ts` ✏️ edit and ❌ kill paths undemonstrated | 🟨 open | Each needs its own fixture — an approved lead cannot transition to `parked`. Backlogged in `09` §5 |
+| 2026-09-21 | **U1's DoD is partly blocked on operator steps.** `app_users` store checks need `0005` applied; the HTTP checks need `SUPABASE_ANON_KEY`, `DASHBOARD_ALLOWED_EMAILS` and the Supabase email provider | 🟨 open | `scripts/test-u1-auth.ts --base-url http://localhost:3000` completes the run once those are done. 29 of 48 checks pass today; the other 19 skip cleanly |
+| 2026-09-21 | **`pnpm lint` fails on `main` — 17 errors, 4 warnings**, all `no-explicit-any` in pre-existing `scripts/*.ts` plus unused-var warnings in `src/lib`. Identical counts before and after U1 | 🟨 open, pre-existing | Not touched by U1 (scope discipline). `pnpm build` and `tsc --noEmit` are clean. Worth a dedicated cleanup session — backlogged in `09` §5 |
+| 2026-09-21 | **`0002_transition_lead.sql` is `security definer` with no `set search_path`.** Supabase's linter flags this as `function_search_path_mutable` | 🟨 open | Out of U1's scope; fixing it means a new migration replacing the function. Backlogged in `09` §5 |
+| 2026-09-21 | **`@supabase/ssr` required a `supabase-js` bump**, 2.110.1 → 2.116.0, to satisfy its `^2.114.0` peer | ✅ resolved 2026-09-21 | Minor bump inside the same major. `tsc`, `pnpm build`, `test-validation` (16/16) and `test-state` re-run clean afterwards |
 
 ---
 

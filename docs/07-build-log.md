@@ -58,6 +58,129 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-21 — Session 4 — U1 auth, roles, dashboard shell; purchase trigger to U2; UD added
+
+**Unit:** U1 — Authentication, roles, dashboard shell
+**Status at end:** 🟨 **implemented** — 29/29 runnable checks pass, 19 blocked on operator steps
+
+**Did**
+- Fast-forwarded `main` from `e2feda2` to `3142c58`. `09-build-plan-v2.md`, `08-complete-build-brief.md`, the rewritten `CLAUDE.md`/`06`/runbook and `scripts/ping.ts` were all sitting on the unmerged `docs/adopt-complete-brief`, so `main` documented a `ping.ts` it did not contain. `src/` and `supabase/` were byte-identical, so it was a clean fast-forward. Branched `feat/u1-auth` from it.
+- Built U1: migration `0005`, the `requireRole()` primitive and its supporting lib, magic-link sign-in, the ten-area dashboard shell, `src/proxy.ts`, and `scripts/test-u1-auth.ts`.
+- Moved the 🛒 Instantly purchase trigger from U3 to U2 across `09`, the runbook and `06`, and rewrote the rationale — the old one was based on a premise that turned out to be impossible.
+- Added unit **UD — Apply design system** to `09`, between U7 and U8.
+- Recorded four decisions in `06` §5 and five new items in `06` §6.
+
+**Files touched**
+- `supabase/migrations/0005_app_users_roles.sql` — new. `app_users`; RLS + `trg_updated_at` on `source_cursors`
+- `src/lib/auth/{core,allowlist,supabase,session,require-role,route-registry}.ts` — new. `cron.ts` untouched
+- `src/app/login/{page,form,actions}.tsx|ts`, `src/app/api/auth/{callback,signout}/route.ts` — new
+- `src/app/dashboard/{layout.tsx,nav.ts}` + ten `page.tsx` — new; `.gitkeep` removed
+- `src/proxy.ts` — new
+- `src/types/enums.ts` — `APP_ROLES`; `src/types/database-extensions.ts` — `app_users`
+- `src/app/layout.tsx` — create-next-app metadata replaced
+- `scripts/test-u1-auth.ts` — new, 48 checks (29 runnable today, 19 gated on migration `0005`)
+- `package.json` — `@supabase/ssr` added, `@supabase/supabase-js` 2.110.1 → 2.116.0
+- `.env.local.example` — `SUPABASE_ANON_KEY`, `DASHBOARD_ALLOWED_EMAILS`
+- `docs/09-build-plan-v2.md`, `docs/STEP-11-RUNBOOK.md`, `docs/06-build-progress.md`, `docs/07-build-log.md`
+
+**Verification**
+
+```
+$ pnpm exec tsc --noEmit
+(clean, exit 0)
+
+$ pnpm build
+✓ Compiled successfully in 2.2s
+├ ƒ /dashboard          (all ten areas dynamic)
+ƒ Proxy (Middleware)
+```
+
+```
+$ curl -i -s http://localhost:3000/dashboard | head -2
+HTTP/1.1 307 Temporary Redirect
+location: /login
+
+$ curl -i -s -X POST http://localhost:3000/api/auth/signout | head -1
+HTTP/1.1 401 Unauthorized
+```
+
+All ten areas, unauthenticated:
+```
+/dashboard            307 -> http://localhost:3000/login
+/dashboard/knowledge  307 -> http://localhost:3000/login
+/dashboard/products   307 -> http://localhost:3000/login
+/dashboard/companies  307 -> http://localhost:3000/login
+/dashboard/campaigns  307 -> http://localhost:3000/login
+/dashboard/approvals  307 -> http://localhost:3000/login
+/dashboard/inbox      307 -> http://localhost:3000/login
+/dashboard/pipeline   307 -> http://localhost:3000/login
+/dashboard/integrations 307 -> http://localhost:3000/login
+/dashboard/reports    307 -> http://localhost:3000/login
+```
+
+```
+$ pnpm tsx scripts/test-u1-auth.ts --base-url http://localhost:3000
+--- allow-list parsing ---      (10 PASS)
+--- assertRole matrix ---       (13 PASS, all 9 role pairs asserted by name)
+--- route registry ---          (4 PASS)
+--- app_users store ---
+SKIP: app_users store (14 checks) — 0005_app_users_roles.sql not applied yet
+SKIP: source_cursors trigger (5 checks) — 0005_app_users_roles.sql not applied yet
+--- HTTP surface ---
+PASS: GET /dashboard redirects to /login — 307 → /login
+PASS: unauthenticated POST /api/auth/signout → 401 — got 401
+
+All 29 checks passed.
+```
+Result: **pass on everything runnable.** Not a full DoD — see *Blocked* below.
+
+No regression:
+```
+$ pnpm tsx scripts/ping.ts           All 3 checks passed.
+$ pnpm tsx scripts/test-validation.ts All 16 checks passed.
+$ pnpm tsx scripts/test-state.ts      All 11 checks passed.
+$ pnpm tsx scripts/test-settings.ts   All 8 checks passed.
+```
+
+`scripts/test-source.ts` was **not** run: it calls Apollo live and creates leads, which is behind the cost gate. The `source_cursors` trigger it would have exercised is instead covered directly by group 4b of `test-u1-auth.ts`, which touches no provider.
+
+**Blocked — four operator steps**
+1. Apply `supabase/migrations/0005_app_users_roles.sql` in the SQL editor; run the verification query in its trailer.
+2. Set `SUPABASE_ANON_KEY` and `DASHBOARD_ALLOWED_EMAILS` in `.env.local`.
+3. Supabase → enable the Email provider, allow-list `http://localhost:3000/api/auth/callback`.
+4. Record the two purchased domain names — `STEP-11-RUNBOOK.md` §A.1 and `06` §1 both hold a `⬜` placeholder. They are U5's allowed-sender list.
+
+**Decisions**
+- **🛒 moves from U3 to U2, and the old rationale was wrong.** — `09` said doing the domains' DNS immediately was what let the purchase wait until U3. But runbook §A.2's DKIM step runs through Google Workspace Admin, and Workspace is bought in clock B — so clock A could never have delivered "full DNS". DNS authentication is inherently gated on the mailbox purchase. Buying at U2 (≈ day 7) instead of U3 (≈ day 11) buys four days, which is what funds the DNS work on purchase day. Warmup ≈ days 9–33, about **24 days**, up from 21.
+- **The dashboard ships unstyled; UD applies the design system.** — The system is authored in Claude Design, outside the repo. UD sits between U7 and U8 because U8 is the first unit that renders real data: styling earlier means styling empty pages, later means restyling. Lettered rather than numbered so no `depends on` reference or migration number shifts. Milestones 🛒 and 🚩 are above it and do not move; ⭐ slips from session 38 to 40.
+- **Roles bootstrap from the env, then the DB is authority.** — `DASHBOARD_ALLOWED_EMAILS` uses `email:role`; a bare email is `viewer`. `ensureAppUser` inserts only when missing and never overwrites an existing role, so a role change is a DB update, not a redeploy. "First user wins admin" was rejected — privilege should not depend on who clicks first.
+- **The anon key is server-only, not `NEXT_PUBLIC_`.** — Sign-in is a server action and the callback is a route handler, so no client component ever holds a Supabase client. The repo had zero client-side Supabase usage and `authenticated` is granted nothing, so publishing the key would buy nothing.
+- **Auth fails closed on missing config.** — `getAuthUser()` catches a missing `SUPABASE_ANON_KEY` and returns null rather than throwing. An unconfigured deployment reads as "nobody is signed in", so a mutating route answers 401 instead of 500. `proxy.ts` has the same fallback.
+
+**Deviations from `09` §U1, all deliberate**
+- **`middleware.ts` → `src/proxy.ts`.** Next 16 renamed Middleware to Proxy (`node_modules/next/dist/docs/01-app/01-getting-started/16-proxy.md`). It lives in `src/` because `app/` does. `09`'s text predates the rename.
+- **`app_users.role` has a `check` constraint** — the schema's first. The repo has no check constraints and enforces state legality in app code, but a role is a privilege boundary and an unrecognised value must not be insertable. Recorded in `06` §5 as an exception, not drift.
+- **The redirect is 307, not the 302 the DoD names.** `NextResponse.redirect` defaults to 307, which preserves the method. The test accepts either.
+- **Six lib files, not the two `09` lists.** `09` names `{session,require-role}.ts`; the repo's split convention (pure `core.ts` + `"server-only"` binder, as in `state.ts`/`state/core.ts`) wanted `core`, `allowlist`, `supabase` and `route-registry` alongside them.
+
+**Problems hit**
+1. **The build failed by prerendering the dashboard.** `Error occurred prerendering page "/dashboard/approvals": Missing SUPABASE_URL or SUPABASE_ANON_KEY`. `createAuthClient` threw on the env check *before* `await cookies()`, so Next never saw a dynamic signal and tried to build the pages statically. Fixed two ways: `export const dynamic = "force-dynamic"` on the dashboard layout and login page — an authenticated area must never be prerendered anyway — and `cookies()` moved above the env check. `cacheComponents` is off, so `force-dynamic` is the applicable opt-out.
+2. **A PostgREST trap worth remembering: `head: true` against a missing table returns 204, no error, null count.** The first version of the migration probe used a head request and cheerfully reported `app_users` as present-and-empty; `countRows()` had the same bug, and would have let a before/after comparison "pass" against a table that does not exist. Probe now uses a body select (real 404/`PGRST205`), and `countRows()` throws on a null count.
+3. **`@supabase/ssr@0.12.7` needs `supabase-js@^2.114.0`**; the repo had 2.110.1. Bumped to 2.116.0 — same major — and re-ran `tsc`, `build`, `test-validation`, `test-state` and `test-settings` before writing any U1 code, so a bump regression could not be confused with new work. All clean.
+4. **`pnpm lint` already fails on `main`** — 17 `no-explicit-any` errors in `scripts/compare-prompt-versions.ts`, `rerun-qualifier-one.ts` and `test-qualify.ts`, plus 4 unused-var warnings. Verified pre-existing by stashing U1 and re-running: **identical 21 problems before and after.** Not fixed — out of scope. Backlogged in `09` §5.
+5. **`0002_transition_lead.sql` is `security definer` with no `set search_path`**, which Supabase's linter flags as `function_search_path_mutable`. Noticed while matching the RPC pattern. Not touched — fixing it needs a new migration replacing the function. Backlogged in `09` §5.
+
+**Note on `docs/03-architecture.md`**
+§6 still specifies "simple email allow-list via NextAuth (or Supabase Auth) — two users, **no roles complexity**". Brief §3 requires three roles and is authority #1, so the brief wins and U1 implements three. `03` is not corrected here; its reconciliation is U23's job.
+
+**Next action**
+- **Operator:** the four blocked items above, then `pnpm dev` and `pnpm tsx scripts/test-u1-auth.ts --base-url http://localhost:3000` for the full 48/48. Paste the result and the migration verification query's output here.
+- Then **U2 — durable job system**, which is also the 🛒 **Instantly purchase trigger**: Instantly Hypergrowth, four mailboxes, MillionVerifier credits, and all remaining DNS on both sending domains (`STEP-11-RUNBOOK.md` §B.0 first).
+- Still outstanding since Session 2: **put the new `ANTHROPIC_API_KEY` into the Vercel env.**
+
+---
+
+
 ### 2026-09-21 — Session 3 — Adopt the complete build brief
 
 **Unit:** docs / reconciliation + repair — Phase 1 repair half. No product features.
