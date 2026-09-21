@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "ping": "tsx scripts/ping.ts",
     "gen:types": "supabase gen types typescript --db-url \"$SUPABASE_DB_URL\" --schema public > src/types/database.ts",
     "test:source-filters": "tsx --test src/lib/stages/source/filters.test.ts"
   },
