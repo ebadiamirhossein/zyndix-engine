@@ -4,7 +4,7 @@
 **Type:** append-only session journal. Newest entry at the top.
 
 **Relationship to the other docs:**
-- `05-build-plan.md` — the contract. What we agreed to build, in order. Rarely changes.
+- `09-build-plan-v2.md` — the contract. What we agreed to build, in order. (`05-build-plan.md` held this role until 2026-09-21 and is now historical.)
 - `06-build-progress.md` — the status board. Tables, checkboxes, current state at a glance.
 - `07-build-log.md` — *this file.* What actually happened, session by session, including the things that went wrong.
 
@@ -57,6 +57,142 @@ Result: pass / fail
 ---
 
 ## Sessions
+
+### 2026-09-21 — Session 3 — Adopt the complete build brief
+
+**Unit:** docs / reconciliation + repair — Phase 1 repair half. No product features.
+**Status at end:** ✅ DoD passed
+
+**Did**
+- Verified brief §2's description of the repo against the actual tree. It is accurate on every substantive claim; six differences found and recorded below.
+- Rewrote `scripts/test-draft.ts` against isolated synthetic fixtures. It was the last destructive script in the repo and the reason step 10 had never been run.
+- Wrote `scripts/ping.ts`, which step 1's DoD has named since July without it existing.
+- Wrote `docs/09-build-plan-v2.md` — 23 units across the brief's six phases, with a first-send milestone and an Instantly purchase trigger.
+- Realigned `01`–`05` (banners), `06` (unit tracker), `STEP-11-RUNBOOK.md` (split purchase clocks).
+
+**Files touched**
+- `scripts/test-draft.ts` — rewritten, 369 → 588 lines
+- `scripts/ping.ts` — new, 111 lines
+- `package.json` — added `pnpm ping`
+- `docs/09-build-plan-v2.md` — new, 655 lines
+- `docs/06-build-progress.md` — step tracker replaced with a unit tracker
+- `docs/STEP-11-RUNBOOK.md` — rewritten, Day 0 split into two clocks
+- `docs/01`–`05` — supersession banners
+- `docs/07-build-log.md` — this entry
+
+**Baseline differences vs brief §2**
+
+Brief §2 is correct that the repo is Next.js 16.2.10, migrations `0000`→`0004`, with Apollo/Apify/Anthropic/MillionVerifier/drafting/Telegram/state/settings/proof+CTA present, and Instantly sending, capacity scheduling, reply and Calendly webhooks, the classifier, orchestration and the dashboard absent. Six differences worth recording:
+
+1. **Docs were renamed and uncommitted.** `docs/01-PRD.md`…`07-build-log.md` showed as deleted with `Engine-`-prefixed copies untracked, while `CLAUDE.md`, the brief §1 and every cross-doc link still used the unprefixed names. Renamed back — the copies were byte-identical, so git now shows no change for them.
+2. **`_ping` does not exist.** `0000_ping.sql` creates it; `0001_init_schema.sql` ends with `drop table if exists _ping;`. Step 1's "reads/writes a test row" DoD was unrunnable against the real schema. `ping.ts` is therefore read-only.
+3. **The absent pieces are `.gitkeep` directories, not missing paths** — `src/lib/scheduler/`, `src/app/dashboard/`, `api/cron/{orchestrate,daily}`, `api/webhooks/{instantly,calendly}`, `api/attio/sync`. Brief §13's "feature flags and integration availability must not conceal incomplete implementation" applies; the tracker keeps calling them absent.
+4. **Schemas exist ahead of their implementations.** `instantlyWebhookSchema`, `replyClassifierOutputSchema` and `capacityDefaultsSchema` are written, and the classifier schema is unit-tested, with **no stage consuming any of them**. Real reuse for U3/U6/U7 — not evidence of progress.
+5. **`STEP-11-RUNBOOK.md` claimed a guard that does not exist.** Line 14 said the `zyndix.com` block was "already enforced by a code guard in `stages/send.ts`". There is no `stages/send.ts`. Corrected; the guard arrives at U5 and that unit's DoD verifies it.
+6. **`source_cursors` has no RLS and no `updated_at` trigger.** `0001` enables RLS on all 16 of its tables; `0004` adds a 17th and enables nothing. Not exploitable today — `0001` grants tables to the engine role only and leaves `anon`/`authenticated` ungranted — but it breaks the pattern. Scheduled into U1's migration `0005`; not touched this session, which ships no migrations.
+
+**Nothing changed in the repo since the 2026-08-23 entry.** `HEAD` was `e2feda2`; the last code commit was `0e772ab` (step 10). Every working-tree change was the doc rename plus the new brief and `CLAUDE.md`. `.env.local` is gitignored and has never been committed — no secret in history.
+
+**Verification**
+
+```
+$ pnpm tsx scripts/ping.ts
+
+=== ping (read-only Supabase round-trip) ===
+
+PASS: settings readable (URL + service-role key valid) — 28 row(s)
+PASS: leads readable (migration 0001 applied) — 34 row(s)
+PASS: transition_lead RPC exists (migration 0002 applied) — P0001: lead 00000000-0000-0000-0000-000000000000 not found
+
+round-trip: 8402ms
+All 3 checks passed.
+```
+Result: **pass** — step 1 DoD, by the read-only route.
+
+```
+$ pnpm tsx scripts/test-draft.ts --limit 1
+
+BEFORE  leads=34 touches=4 lead_events=219
+
+Seeded 1 fixture lead(s) in 'drafting': bcee763a-f30c-49f1-b487-bf2e6a98e882
+[draft] generic guard passed — matched tool: "Follow Up Boss"
+
+--- Draft stage summary ---
+{ "leads_picked": 1, "drafted": 1, "generic_rejected": 0,
+  "parked_generic": 0, "failed": 0,
+  "tokens_used": 1515, "est_cost_usd": 0.006093 }
+
+PASS: stage picked only fixture leads — leads_picked=1, fixtures=1
+PASS: ... → pending_approval — pending_approval
+PASS: ... touch status pending_approval
+PASS: ... draft_body set    PASS: ... body null
+PASS: ... prompt_version recorded — 7
+PASS: ... model body ≤120 words — 84
+PASS: ... generic guard — tool: "Follow Up Boss"
+(7 banned-phrase checks, 7 client-claim checks, signature, placeholder — all PASS)
+
+--- Telegram approve path (fixture touch) ---
+PASS: approve → touch status approved — approved
+PASS: approve → body copied from draft_body
+PASS: approve → lead state approved — approved
+
+--- Non-whitelisted callback rejection ---
+[telegram] rejected user 999999999: callback_query from non-whitelisted user
+PASS: non-whitelisted callback rejected
+
+Cleanup: removed 1 fixture lead(s), company(ies) and all related rows.
+
+BEFORE  leads=34 touches=4 lead_events=219
+AFTER   leads=34 touches=4 lead_events=219
+PASS: leads count unchanged — 34 → 34
+PASS: touches count unchanged — 4 → 4
+PASS: lead_events count unchanged — 219 → 219
+
+32/32 passed
+```
+Result: **pass** — step 10 DoD, approve path. **Non-fixture row counts identical before and after**, which is the non-destructiveness proof.
+
+The generated draft, for the record — 84 words, no invented numbers, anchored on the tool named in the fixture's own evidence:
+
+> **out-of-hours leads on your site**
+> Your contact page routes enquiries to a shared team address with no auto-response — which means anyone who fills out a form on a Friday evening is sitting in an inbox until Monday morning. That gap isn't a staffing problem, it's a routing one. The lead already moved on before anyone checked email, and Follow Up Boss never even got the record. I've mapped out a few fixes specific to how your site is set up right now. Want me to send them over?
+
+```
+$ pnpm tsx scripts/purge-test-data.ts
+No test companies found (*.example.com, State Test Co, or Test Lead).
+```
+Result: **pass** — no fixture leaked.
+
+```
+$ pnpm tsx scripts/test-validation.ts   All 16 checks passed.
+$ pnpm tsx scripts/test-state.ts        All 11 checks passed.
+$ pnpm tsx scripts/test-settings.ts     All 8 checks passed.
+$ pnpm exec tsc --noEmit                (clean)
+$ pnpm build                            ✓ Compiled successfully
+```
+Result: **pass** — no regression.
+
+**Cost:** $0.0061 Anthropic (1,515 tokens) plus one earlier aborted run at $0.0061. Two Telegram messages to the operator's own chat. No prospect contacted.
+
+**Decisions**
+- **`08-complete-build-brief.md` is the scope authority.** — Docs 01–05 keep a banner rather than being deleted; they are still the accurate record of how existing code was built.
+- **Phase 4 executes before Phase 2**, inverting brief §14's order. — Every first touch is operator-approved in Telegram and the proof line is operator-written, so the approval gate covers the generic-copy risk. The binding constraint on revenue is that `stages/send.ts` does not exist, not that a library does not exist. First send runs on the existing draft stage with a minimal single-campaign config; U14/U17 migrate it onto campaigns and matching.
+- **Two purchase clocks, not one.** — Domains now (cheap, and age only accrues); Instantly plus mailboxes at U3. Doing the domain DNS now is precisely what lets the Instantly purchase wait and still give ~21 days of warmup before FIRST SEND READY at U6.
+- **`ping.ts` is read-only.** — Recreating a permanent `_ping` table that migration `0001` deliberately drops, purely to satisfy a July DoD's wording, would be a schema change made to please a document. Reading `settings`, `leads` and the `transition_lead` RPC proves the same three things and writes nothing.
+- **Tests use isolated synthetic fixtures, and prove it by counting.** — A before/after non-fixture row-count assertion turns "this test is non-destructive" from a claim into a check. That is the part worth copying into every future test, more than the fixtures themselves.
+- **The approve-path simulation stubs exactly one method.** — `answerCallback` acknowledges a real button press; no button was pressed, so Telegram rejects the synthetic query id. Stubbing that one call keeps the DB writes, the state transition and the operator message live. Stubbing more would have made the test prove less than it appears to.
+
+**Problems hit**
+1. **First run of the repaired script crashed on the approve path.** `handleApprove` completed all its DB work, then `answerCallback` threw `Bad Request: query is too old and response timeout expired or query ID is invalid` — the synthetic callback id is not one Telegram issued. The `finally` cleanup ran correctly, so nothing leaked, but the count assertions never printed. Fixed by stubbing `answerCallback` for that one call. Worth knowing: the non-whitelisted rejection path never hits this, because `processTelegramUpdate` returns before `handleCallback` for a non-whitelisted user.
+2. **`runDraftStage` cannot be pointed at specific lead ids.** It selects `state = 'drafting'` globally, ordered by `created_at`. Rather than change production code in a docs session, the script **aborts with a non-zero exit if any non-fixture lead is in `drafting`**. Zero are today, so it passes; if that ever stops being true the script refuses to run instead of drafting for real prospects. If a later unit wants true isolation, an optional `leadIds` filter on the stage is the small change to make.
+3. **The ✏️ edit and ❌ kill paths are still undemonstrated.** Each needs its own fixture — once a lead is `approved` it cannot transition to `parked` — and edit is a two-step message flow. Step 10 is recorded as *tested locally — approve path*, not as a blanket pass. Backlogged in `09` §5.
+
+**Next action**
+- **Send `09-build-plan-v2.md` to the operator for review before Session 4 starts.** Two things need a decision that this session deliberately did not make: whether the U3 purchase trigger should move a unit earlier for DNS slack, and whether to buy the sending domains this week.
+- Then **U1 — auth, roles, dashboard shell**, whose migration `0005` also closes the `source_cursors` RLS gap.
+- Still outstanding from Session 2 and unrelated to any unit: **put the new `ANTHROPIC_API_KEY` into the Vercel env.** The local fix does nothing for a deployed cron.
+
+---
 
 ### 2026-08-23 — Session 2 — Anthropic key replaced, step 7 DoD verified
 

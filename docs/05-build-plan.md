@@ -1,5 +1,9 @@
 # Zyndix Outbound Engine — Build Plan
 
+> **Historical design — July 2026.** `08-complete-build-brief.md` is the scope authority and supersedes this file wherever the two conflict; `09-build-plan-v2.md` supersedes it for all sequencing. This file remains accurate for the code that already exists, and is kept as the record of how it was built.
+>
+> **Known drift:** NeverBounce was replaced by MillionVerifier (decision 2026-07-13); `source_cursors` (migration `0004`) is documented in neither this file nor `02-database-schema.md`.
+
 **Version:** 1.0 · **Date:** 2026-07-08 · **File:** `05-build-plan.md`
 **Method:** same discipline as the zyndix-web build — one focused Cursor prompt per step, tested before moving on, progress logged in `06-build-progress.md`. This file is the contract; new ideas go to the Backlog (§4), not into the current step.
 

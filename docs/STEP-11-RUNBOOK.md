@@ -1,42 +1,91 @@
-# Step 11 — Sending Infrastructure Runbook
+# Sending Infrastructure Runbook
 
-**Owner:** Amir · **Created:** 2026-08-23 · **Type:** manual setup task (not a Cursor/Claude Code step)
-**Purpose:** unblock the outbound engine. Steps 1–10 are built and idle. This runbook makes them able to send.
+**Owner:** Amir · **Created:** 2026-08-23 · **Rewritten:** 2026-09-21 (Session 3)
+**Type:** manual setup task — not a Claude Code unit.
+**Implements the purchase side of:** `09-build-plan-v2.md` §4.
 
-**The one thing that matters:** warmup is a calendar clock, not an effort clock. Nothing here shortens it. Start Day 0 tonight and first cold send lands ~6 September. Start Day 0 in two weeks and it lands ~20 September. There is no version of this where waiting is cheaper.
+> **Renamed from "Step 11 — Sending Infrastructure Runbook".** The old 15-step plan is superseded by `09-build-plan-v2.md`. The sending code that used to be "step 11" is now units **U3–U6**.
+
+**The one thing that matters:** warmup is a calendar clock, not an effort clock. Nothing here shortens it.
+
+**What changed in this rewrite:** Day 0 used to be a single shopping trip. It is now **two clocks**, because they have different optimal timing. Buying the domains early is free upside; buying Instantly early just burns subscription on idle inboxes.
+
+| Clock | What | When |
+|---|---|---|
+| **A** | Two sending domains + full DNS | **Now** |
+| **B** | Instantly + four mailboxes + MillionVerifier credits | **Start of U3** (≈ day 11) |
 
 ---
 
-## Day 0 — Purchases (60–90 minutes)
+## A. Now — domains and DNS
 
-### 0.1 Buy two sending domains
+Domains are cheap, and domain age is a deliberability input that only accrues with time. Doing the DNS now is also what lets clock B wait until U3 and still finish warmup on schedule: on purchase day only the mailboxes and the Instantly connection remain.
 
-Registrar: Namecheap (already in use). **Do not use `zyndix.com` or `email.zyndix.com` for any cold send — hard rule, already enforced by a code guard in `stages/send.ts`.**
+### A.1 Buy two sending domains
 
-Pick two lookalikes. Criteria: `.com` only, pronounceable, obviously related to Zyndix but not identical, no hyphens, no numbers.
+Registrar: Namecheap (already in use).
 
-Suggested pairs (check availability, pick any two):
-- `zyndixhq.com`
-- `getzyndix.com`
-- `tryzyndix.com`
-- `zyndixagency.com`
-- `zyndixteam.com`
+> **Do not use `zyndix.com` or any subdomain for cold send.** This is a hard rule in `CLAUDE.md`.
+>
+> ⚠️ **Correction to the previous version of this file**, which said the rule was "already enforced by a code guard in `stages/send.ts`". **It is not. There is no `stages/send.ts`.** The normalized guard, its explicit allowed-sender list and its no-override rule all arrive at **U5**, and U5's DoD is what verifies them — including rejecting `zyndix.com`, `mail.zyndix.com`, `ZYNDIX.COM`, a trailing-dot form, a deep subdomain and a whitespace-padded form. Until U5 ships, the rule is enforced by you, not by code.
 
-Record the two you buy in §5 of `06-build-progress.md`.
+Criteria: `.com` only, pronounceable, obviously related to Zyndix but not identical, no hyphens, no numbers.
 
-### 0.2 Buy Instantly
+Candidates (check availability, pick two): `zyndixhq.com` · `getzyndix.com` · `tryzyndix.com` · `zyndixagency.com` · `zyndixteam.com`
 
-**Plan: Hypergrowth ($97/mo).**
+Record the two you buy in `06-build-progress.md` §1. They go into U5's allowed-sender list.
 
-Honest note: Growth at $47 would cover your actual volume (25–50 sends/week for months). Hypergrowth buys A/B testing, premium live support, and headroom you won't hit this year. Since budget isn't the constraint and deliverability support matters when something goes wrong mid-campaign, take Hypergrowth. Every tier includes unlimited inboxes and unlimited warmup — you are not paying for inbox count.
+### A.2 DNS and authentication — both domains
 
-Skip for now: SuperSearch credits (you have Apollo), Instantly CRM (you have Attio), AI Sales Agent (your engine *is* the agent — that's the case study).
+DNS at Cloudflare (consistent with `zyndix.com`) or Namecheap. Be consistent.
 
-### 0.3 Buy four mailboxes
+**MX (Google Workspace)**
+```
+Type: MX   Host: @   Value: smtp.google.com   Priority: 1
+```
 
-Two per domain. Google Workspace Business Starter, ~€6–7 per mailbox/month.
+**SPF** — one record per domain. Never two; two breaks SPF entirely.
+```
+Type: TXT   Host: @   Value: v=spf1 include:_spf.google.com ~all
+```
 
-Use real human names, matching real people. Do not invent personas.
+**DKIM** — Google Workspace Admin → Apps → Google Workspace → Gmail → Authenticate email. Generate a **2048-bit** key, publish the TXT record, then click **Start authentication**. It is not active until you click that button. This is the step people skip.
+
+**DMARC** — start permissive, tighten later.
+```
+Type: TXT   Host: _dmarc   Value: v=DMARC1; p=none; rua=mailto:dmarc@zyndix.com; pct=100; adkim=r; aspf=r
+```
+Move to `p=quarantine` after 30 days of clean reports. Not before — a strict policy on a young domain with a misconfigured record silently kills your mail.
+
+**Root redirect** — point each sending domain's root at `https://zyndix.com` with a 301. A domain that sends mail but resolves to nothing is a recognised spam pattern.
+
+**Verify before moving on**
+```bash
+DOMAIN=zyndixhq.com   # repeat for the second domain
+
+dig +short MX    $DOMAIN
+dig +short TXT   $DOMAIN                 # expect exactly one v=spf1 record
+dig +short TXT   google._domainkey.$DOMAIN
+dig +short TXT   _dmarc.$DOMAIN
+```
+
+The tracking CNAME cannot be added yet — its target comes from Instantly, so it belongs to clock B.
+
+---
+
+## B. At the start of U3 (≈ day 11) — Instantly, mailboxes, credits
+
+**Why this timing.** FIRST SEND READY is the end of U6, ≈ day 33. Warmup wants 14 days minimum, 21 better. Buying at the start of U3 puts warmup at ≈ days 12–33 — about 21 days, landing exactly on U6's DoD. Buying earlier wastes subscription on idle inboxes; buying later leaves finished code waiting on a clock nothing can shorten. Full arithmetic in `09-build-plan-v2.md` §2.
+
+### B.1 Instantly — Hypergrowth ($97/mo)
+
+Growth at $47 covers the real volume (25–50 sends/week for months). Hypergrowth buys A/B testing, premium support and headroom. Since budget is not the binding constraint and deliverability support matters when something breaks mid-campaign, take Hypergrowth. Every tier includes unlimited inboxes and unlimited warmup — you are not paying for inbox count.
+
+Skip: SuperSearch credits (you have Apollo), Instantly CRM (you have Attio), AI Sales Agent (your engine *is* the agent — that is the case study).
+
+### B.2 Four mailboxes
+
+Two per domain. Google Workspace Business Starter, ~€6–7 per mailbox/month. **Use real human names matching real people. Do not invent personas.**
 
 | Domain | Mailbox | Display name |
 |---|---|---|
@@ -45,125 +94,55 @@ Use real human names, matching real people. Do not invent personas.
 | Domain B | `ingrida@` | Ingrida Šilobrit |
 | Domain B | `i.silobrit@` | Ingrida Šilobrit |
 
-Each mailbox needs: profile photo, full signature with Zyndix name + address + working link to `zyndix.com`. An empty-profile sender is a spam signal.
+Each mailbox needs a profile photo and a full signature with the Zyndix name, address and a working link to `zyndix.com`. An empty-profile sender is a spam signal.
 
-### 0.4 Buy MillionVerifier credits
+### B.3 MillionVerifier credits
 
-Pay-as-you-go, ~$37 for a starter block. No subscription. API key goes in `MILLIONVERIFIER_API_KEY`.
+Pay-as-you-go, ~$37 for a starter block. No subscription. The key is already in `MILLIONVERIFIER_API_KEY`; this is topping up the balance that U5's preflight will spend.
 
----
+### B.4 Custom tracking domain
 
-## Day 0+1 — DNS and authentication
-
-Do all of this for **both** domains. DNS at Cloudflare (consistent with `zyndix.com`) or at Namecheap — either is fine, just be consistent.
-
-### 1.1 MX (Google Workspace)
-
-```
-Type: MX   Host: @   Value: smtp.google.com   Priority: 1
-```
-
-### 1.2 SPF
-
-```
-Type: TXT   Host: @   Value: v=spf1 include:_spf.google.com ~all
-```
-
-One SPF record per domain. Never two — that breaks SPF entirely.
-
-### 1.3 DKIM
-
-Google Workspace Admin → Apps → Google Workspace → Gmail → Authenticate email.
-Generate a **2048-bit** key, publish the TXT record it gives you, then click **Start authentication**. It is not active until you click that button — this is the step people skip.
-
-### 1.4 DMARC
-
-Start permissive, tighten later:
-
-```
-Type: TXT   Host: _dmarc   Value: v=DMARC1; p=none; rua=mailto:dmarc@zyndix.com; pct=100; adkim=r; aspf=r
-```
-
-Move to `p=quarantine` after 30 days of clean reports. Not before — a strict policy on a young domain with a misconfigured record silently kills your mail.
-
-### 1.5 Domain redirect
-
-Point each sending domain's root at `https://zyndix.com` with a 301. A domain that sends mail but resolves to nothing is a recognised spam pattern. Cloudflare Redirect Rule or Namecheap URL redirect — either works.
-
-### 1.6 Custom tracking domain
-
-In Instantly → Settings → Custom Tracking Domain, take the CNAME target it displays and add:
-
+Instantly → Settings → Custom Tracking Domain. Take the CNAME target it shows and add, on both domains:
 ```
 Type: CNAME   Host: track   Value: <value shown in Instantly>
 ```
+Verify with `dig +short CNAME track.$DOMAIN`.
 
 **Tracking policy for this engine:**
-- **Open tracking: ON** (through the custom domain). Your next-best-action logic needs open events.
-- **Link tracking: OFF.** Wrapped links are a deliverability tax and your only link is a clean `zyndix.com/free-audit` — it carries more trust unwrapped than a redirect URL does.
+- **Open tracking: ON**, through the custom domain. Note brief §8: opens are *diagnostic and may be unreliable*; they must not alone trigger aggressive follow-up or be reported as interest.
+- **Link tracking: OFF.** Wrapped links are a deliverability tax, and a clean `zyndix.com/free-audit` carries more trust unwrapped than a redirect URL does.
 
-### 1.7 Verify before proceeding
+### B.5 Gate before warmup
 
-```bash
-DOMAIN=zyndixhq.com   # repeat for the second domain
+Send one email from each of the four mailboxes to the address at **mail-tester.com**.
 
-dig +short MX    $DOMAIN
-dig +short TXT   $DOMAIN                 # expect one v=spf1 record
-dig +short TXT   google._domainkey.$DOMAIN
-dig +short TXT   _dmarc.$DOMAIN
-dig +short CNAME track.$DOMAIN
-```
+**Every mailbox scores ≥ 9/10. Do not start warmup below 9.** Fix and retest — a mailbox that starts warmup misconfigured spends three weeks building a bad reputation instead of a good one.
 
-Then send one email from each of the four mailboxes to the address at **mail-tester.com**.
-
-**Gate: every mailbox scores ≥ 9/10. Do not start warmup below 9.** Fix and retest — a mailbox that starts warmup misconfigured spends 14 days building a bad reputation instead of a good one.
-
----
-
-## Days 1–14 — Warmup (background) + Phase 0 (your actual work)
-
-### 2.1 Turn on warmup
-
-Connect all four mailboxes in Instantly, enable warmup on each:
+### B.6 Turn on warmup, then leave it alone
 
 | Setting | Value |
 |---|---|
-| Warmup emails/day | 20 → 40, ramp over the full period |
+| Warmup emails/day | 20 → 40, ramped over the full period |
 | Reply rate | 30% |
-| Weekend activity | ON (during warmup only) |
-| Daily send limit | **0 until day 14** |
-| Duration | 14 days minimum, 21 is better |
+| Weekend activity | ON (warmup only) |
+| **Daily send limit** | **0 until U6** |
+| Duration | 14 days minimum, ~21 as scheduled here |
 
-Then leave it alone. Checking it daily changes nothing.
-
-### 2.2 Do these while it warms
-
-These are the reason the two weeks aren't wasted:
-
-1. **Phase 0 — 20 manual warm Lithuanian messages, sent by hand.** This is the highest-value item in the entire project and depends on nothing. The writer prompt currently has zero few-shot examples, which means it will produce plausible-but-generic copy — the precise failure mode of the 1,000-email campaign. Twenty real messages produce twenty real hypothesis/evidence pairs and real replies. Best five get promoted into `writer_prompt_email` as settings v2 before the engine ever sends.
-2. **Send the four testimonial requests** (Fonderis, ScholarCert, PulseConf, Loveko). Drafts already exist. Pending since late July. Unblocks Clutch, GoodFirms, site testimonial slots, and the "small agency" objection. Fifteen minutes of work.
-3. **Confirm Apollo credit balance** and MillionVerifier key work — both get hit hard on day 14.
-
-### 2.3 Day 12 checkpoint
-
-Re-run mail-tester on all four mailboxes. Any score that dropped during warmup means something is wrong; find it before you send.
+Checking it daily changes nothing. Re-run mail-tester on all four around day 28 (≈ U5): any score that dropped during warmup means something is wrong, and you want to find it before U6's live drill, not during it.
 
 ---
 
-## Day 14 — Code and first send
+## C. While it warms — the work that does not depend on it
 
-Only now does this become a Claude Code task. One session, one prompt:
+U3 through U6 are being built in this window, so the engine side is covered. These are the non-code items that are pure upside:
 
-> Implement Step 11 per `05-build-plan.md`: `scheduler/ledger.ts` (atomic slot grant), `scheduler/windows.ts` (timezone-aware send windows with jitter), `integrations/instantly.ts`, and `stages/send.ts` with double suppression check and the zyndix.com domain guard. Ship `scripts/test-send.ts`. Read docs 01–06 first. Update `06-build-progress.md` and append a session entry to `07-build-log.md` when done.
+1. **Phase 0 — 20 manual warm Lithuanian messages, sent by hand.** The highest-value item in the project that depends on nothing. The writer prompt has zero few-shot examples, which means plausible-but-generic copy is its default failure mode. Twenty real messages produce twenty real hypothesis/evidence pairs and real replies; the best five get promoted into `writer_prompt_email` as v8 before the engine ever sends.
+2. **Send the four testimonial requests** — Fonderis, ScholarCert, PulseConf, Loveko. Drafts exist. Fifteen minutes, pending since late July.
+3. **Confirm Apollo credit balance and the MillionVerifier key.** Both get hit hard at U5.
 
-**Definition of done (from the build plan, unchanged):**
-- An approved touch sends through a warm inbox, inside its send window
-- `capacity_ledger.used` increments atomically
-- A quota-exhausted send queues for the next day rather than failing
-- The guard **refuses** a `zyndix.com` send account in a test — verify this one explicitly
-- Suppression is checked twice: at source and immediately before send
+---
 
-### First live send settings
+## D. First live send settings (U6)
 
 | Setting | Value |
 |---|---|
@@ -174,28 +153,31 @@ Only now does this become a Claude Code task. One session, one prompt:
 | Window | 08:30–11:00 recipient local |
 | Auto-pause | bounce rate >3% or any spam complaint |
 
-Start at 15. The transcripts you collected say 30–40/day/inbox is the safe ceiling *for a mature inbox* — a 14-day-old one is not mature. Warmup is not immunity.
+Start at 15. Transcripts say 30–40/day/inbox is the safe ceiling *for a mature inbox*. A three-week-old one is not mature. **Warmup is not immunity.**
+
+U6's DoD requires the live drill to send to an **operator-owned mailbox, never a prospect**, before anything else goes out. See `09-build-plan-v2.md` U6.
 
 ---
 
-## Definition of done for this runbook
+## E. Definition of done
 
-- [ ] Two sending domains purchased and recorded
+**Clock A — now**
+- [ ] Two sending domains purchased and recorded in `06-build-progress.md` §1
+- [ ] MX, SPF, DKIM (authentication *started*), DMARC verified by `dig` on both domains
+- [ ] Both domains 301 to `zyndix.com`
+
+**Clock B — at U3**
 - [ ] Instantly Hypergrowth active
 - [ ] Four mailboxes live with photos and signatures
-- [ ] SPF, DKIM (authentication *started*), DMARC, MX, tracking CNAME verified by `dig` on both domains
-- [ ] Both domains 301 to zyndix.com
+- [ ] MillionVerifier credits topped up
+- [ ] Tracking CNAME live on both domains; link tracking OFF, open tracking ON
 - [ ] All four mailboxes score ≥9/10 on mail-tester
-- [ ] Warmup running, daily send limit 0
+- [ ] Warmup running with daily send limit 0
+- [ ] Day-28 re-test passed
+
+**Parallel**
 - [ ] 20 Phase 0 messages sent, replies logged
 - [ ] 4 testimonial requests sent
-- [ ] Day 12 re-test passed
-- [ ] Step 11 code shipped, DoD verified, `06-build-progress.md` and `07-build-log.md` updated
 
----
-
-## What comes after
-
-Steps 12–15 (webhooks, reply classifier, orchestrator, dashboard v0), then the v1 gate: 10 leads end-to-end, one clean week of sends, zero unhandled errors.
-
-The v2 scope — LinkedIn lane, next-best-action policy, multi-channel cadence, dashboard — gets specced during the warmup window and built after the v1 gate passes. An engine that has never sent an email has no outcome data to make those systems smarter than a rules table.
+**Code** — tracked in `06-build-progress.md` §2, not here
+- [ ] U3 scheduler · U4 Instantly adapter · U5 send stage + guards · U6 webhooks + stop rules 🚩

@@ -1,68 +1,134 @@
-# Zyndix Outbound Engine — Build Progress
+# Zyndix Engine — Build Progress
 
-**File:** `06-build-progress.md` · **Started:** 2026-07-08 · **Last reconciled:** 2026-08-23 (Session 1)
-**How to use:** update after every session. Status values: `⬜ not started · 🟨 in progress / built but DoD not verified · ✅ done (DoD passed) · ⛔ blocked`.
+**File:** `06-build-progress.md` · **Started:** 2026-07-08 · **Last reconciled:** 2026-09-21 (Session 3)
+**Tracks:** `09-build-plan-v2.md`, which implements `08-complete-build-brief.md`.
 
-**Evidence discipline (added Session 1).** `✅` means the step's DoD script was actually run and passed, and the output is in `07-build-log.md`. `🟨` means the code exists and looks complete but its DoD has not been demonstrated — either the script was withheld on cost grounds, or it failed, or no such script exists. "The file exists" is not `✅`. Where this file and any earlier handoff disagree, **the repo wins.**
+**Status vocabulary** (`CLAUDE.md`, never collapsed):
+
+| Status | Means |
+|---|---|
+| **not started** | no implementation exists |
+| **implemented** | code exists and looks complete; its DoD has not been demonstrated |
+| **tested locally** | its DoD script was actually run and passed, output in `07-build-log.md` |
+| **verified with provider** | exercised against the real third-party service, separately reported |
+| **active in production** | running against real prospects |
+
+"The file exists" is never better than **implemented**. A mocked integration is never **verified with provider**. Where this file and any handoff disagree, **the repo wins**.
 
 ---
 
-## 1. Prerequisites checklist (outside the repo)
+## 1. Prerequisites (outside the repo)
 
-Filled Session 1 from `.env.local` **key presence only** — no value was read, printed, or recorded.
+Filled from `.env.local` **key presence only** — no value was read, printed or recorded.
 
-| Item | Status | Notes |
-|---|---|---|
-| Supabase project `zyndix-engine` created | ✅ | `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` present; migrations verified applied via `show-settings.ts` |
-| Anthropic API key | ✅ | Replaced 2026-08-23 after the old key returned `401`. Verified by a live qualifier call. **Vercel env still needs the new value** |
-| Apollo API key + credits confirmed | 🟨 | `APOLLO_API_KEY` present; plan/tier and remaining credits not verified this session |
-| Apify account + token | 🟨 | `APIFY_TOKEN` present; balance not verified |
-| NeverBounce / MillionVerifier key | ✅ | **MillionVerifier chosen.** `MILLIONVERIFIER_API_KEY` present. `NEVERBOUNCE_API_KEY` absent and superseded — docs 01–05 still say "neverbounce" |
-| Instantly: 2 pre-warmed domains + 4 inboxes bought | ⬜ | `INSTANTLY_API_KEY` absent. **Blocks step 11.** See `STEP-11-RUNBOOK.md` Day 0 |
-| Instantly inboxes pass mail-tester (SPF/DKIM/DMARC) | ⬜ | nothing to test yet; `send_accounts` table has 0 rows |
-| Attio API key | ⬜ | `ATTIO_API_KEY` absent — step 8 deliberately deferred, so not a blocker |
-| Telegram bot via @BotFather + user IDs | ✅ | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ALLOWED_USER_IDS` present |
-| Telegram webhook secret | ⬜ | `TELEGRAM_WEBHOOK_SECRET` absent → `/api/webhooks/telegram` 500s on every request. Approval currently runs via `scripts/telegram-poll.ts` long-poll |
-| GitHub repo `zyndix-engine` (private) + Vercel linked | 🟨 | git repo live; Vercel link not verifiable from inside the repo |
-| Calendly webhook signing key | ⬜ | `CALENDLY_WEBHOOK_SIGNING_KEY` absent — needed at step 12 |
-| Dashboard allow-list | ⬜ | `DASHBOARD_ALLOWED_EMAILS` absent — needed at step 15 |
-
-## 2. Phase 1 step tracker
-
-Reconciled against the repo on 2026-08-23. Evidence column says what the status rests on.
-
-| # | Step | Status | Evidence | DoD result / notes |
-|---|---|---|---|---|
-| 1 | Scaffold & foundations | 🟨 | build run | `pnpm build` passes (Next 16.2.10, TS clean). **`scripts/ping.ts` does not exist** — the second half of the DoD is unrunnable, and `CLAUDE.md` still tells you to run it |
-| 2 | Migrations (full schema) | 🟨 | files + live read | `0000_ping`, `0001_init_schema` (321 lines — all 15 tables from `02-database-schema.md` §2–§4, plus `qualification_history`, `set_updated_at()`, partial unique `settings_key_active_uidx`, `webhook_events` provider/external_id unique, RLS on all 16 tables), `0002_transition_lead` RPC, `0003_apollo_unique`, `0004_source_cursors`. Applied to the live DB — `show-settings.ts`, `test-state.ts` and `test-settings.ts` all round-trip. No per-table insert/read DoD script exists, so not `✅` |
-| 3 | Settings system + seed | ✅ | `test-settings.ts` | 8/8 PASS. v2 created, active flipped, v1 preserved, cleanup restored v1 |
-| 4 | State machine | ✅ | `test-state.ts` | 11/11 PASS. Legal hops, illegal jump throws `IllegalTransitionError` with no state change and no event row, stale-transition guard fires |
-| 5 | Apollo + source stage | 🟨 | files only | `integrations/apollo.ts` (389) + `apollo-types.ts`, `stages/source/` (399 + 120 filters + 40 cursor). `test-source.ts` withheld — Apollo quota. `pnpm test:source-filters` passes 9/9 (name-guard unit tests only) |
-| 6 | Apify + enrich stage | 🟨 | files only | `integrations/apify.ts` (295), `stages/enrich/core.ts` (540), `apify_actor_templates` live at **v3** (crawler switched to `playwright:adaptive`). `test-enrich.ts` withheld — real Apify actor spend |
-| 7 | Anthropic + qualify stage | ✅ | `test-qualify.ts` | `integrations/anthropic.ts` (167), `stages/qualify/core.ts` (661), `qualifier_prompt` live at **v4**. **Anthropic key replaced 2026-08-23**; `test-qualify.ts --limit 1` re-run **3/3 PASS**, 2,520 tokens, **$0.0093**. Lead `200c7e06` correctly **parked with a `disqualify_reason`** (site returned 404 — no evidence, so no hypothesis). That is the evidence-required rule working, not a miss |
-| 8 | Attio sync | ⛔ deferred | operator decision 2026-07-13 | Deliberately deferred (read-only human window; no send dependency). `integrations/attio.ts` and `/api/attio/sync` are placeholders. Not an oversight |
-| 9 | Verification stage | 🟨 | files only | `integrations/millionverifier.ts` (149), `stages/verify/core.ts` (418). `test-verify.ts` withheld — spends **Apollo reveal credits** + MillionVerifier credits |
-| 10 | Writer + Telegram approval | 🟨 | files only | `stages/draft/core.ts` (542) + `guard.ts` (325), `telegram/handler.ts` (643), `integrations/telegram{,-approval,-format}.ts`, `sequences/default.ts`, `/api/webhooks/telegram/route.ts`. `writer_prompt_email` live at **v7**. Was entirely uncommitted until Session 1; now at `0e772ab`. `test-draft.ts` **not run** — it destroys real data (see §6). The Anthropic key is no longer a reason; the destructive reset block still is. Webhook route unreachable without `TELEGRAM_WEBHOOK_SECRET` |
-| 11 | Instantly send + ledger + windows | ⬜ | absence confirmed | No `src/lib/scheduler/` (no `ledger.ts`, no `windows.ts`), no `stages/send.ts`, no `integrations/instantly.ts`. **The zyndix.com send guard does not exist yet** — it arrives with `stages/send.ts`. Blocked on `STEP-11-RUNBOOK.md` Day 0 (domains, Instantly, 4 mailboxes, 14-day warmup) |
-| 12 | Webhooks: Instantly + Calendly | ⬜ | absence confirmed | `/api/webhooks/instantly` and `/api/webhooks/calendly` are `.gitkeep` placeholders |
-| 13 | Reply classifier + routing | ⬜ | absence confirmed | No `stages/classify.ts`. `reply_classifier_prompt` seeded at v1 and its zod schema is tested by `test-validation.ts`, but no stage consumes it |
-| 14 | Orchestrator + crons | ⬜ | absence confirmed | `/api/cron/orchestrate` and `/api/cron/daily` are `.gitkeep` placeholders. `lib/auth/cron.ts` (23 lines) exists |
-| 15 | Dashboard v0 | ⬜ | absence confirmed | `src/app/dashboard/.gitkeep` only |
-| — | **v1 gate:** 10 leads end-to-end, 1 clean week | ⬜ | | 0 leads have reached `sent` |
-
-**Live pipeline as of 2026-08-23 (after the step 7 re-run):** 34 companies · 34 leads — `parked` 19, `qualifying` 10, `pending_approval` 3, `approved` 1, `enriching` 1 · 17 qualification rows · 4 touches · **0 send_accounts**.
-
-## 3. Phase 2 / 3 tracker
-
-| # | Step | Status | Notes |
+| Item | Status | Needed by | Notes |
 |---|---|---|---|
-| 16 | Cadence hardening | ⬜ | |
-| 17 | Signal monitoring (re-scan) | ⬜ | |
-| 18 | Digest v1 (attribution + costs) | ⬜ | |
-| 19 | Few-shot promotion workflow | ⬜ | |
-| 20 | Heyreach LinkedIn lane | ⬜ | `linkedin_senders` settings key not yet created |
-| 21 | Multi-segment concurrency (lt-events on) | ⬜ | `segments` v3 has `lt-events` present with `active: false` |
-| 22 | Calendly no-show loop | ⬜ | |
+| Supabase project `zyndix-engine` | ✅ ready | — | `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` present. Migrations verified applied by `scripts/ping.ts` 2026-09-21 |
+| Anthropic API key | ✅ ready | — | Replaced 2026-08-23 after a `401`. Verified live. **Vercel env still holds the dead key** |
+| Apollo API key + credits | 🟨 present, unverified | U15 | Plan/tier and remaining credits not confirmed |
+| Apify account + token | 🟨 present, unverified | U15 | Balance not confirmed |
+| MillionVerifier key | ✅ ready | U3 (credits) | `MILLIONVERIFIER_API_KEY` present. `NEVERBOUNCE_API_KEY` absent and superseded |
+| Telegram bot + user IDs | ✅ ready | — | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ALLOWED_USER_IDS` present; approve path exercised 2026-09-21 |
+| **Two sending domains** + full DNS | ⬜ **buy now** | U5 | Cheap, and domain age only accrues with time. See `STEP-11-RUNBOOK.md` §A |
+| **Instantly Hypergrowth + 4 mailboxes** | ⬜ **buy at U3** | U4 | 🛒 purchase trigger. ~21 days of warmup lands on FIRST SEND READY at U6. `STEP-11-RUNBOOK.md` §B |
+| Mailboxes pass mail-tester ≥9/10 | ⬜ | U4 | Nothing to test yet; `send_accounts` has 0 rows |
+| `TELEGRAM_WEBHOOK_SECRET` | ⬜ | U9 | Unset → `/api/webhooks/telegram` 500s on every request. Approvals run via `scripts/telegram-poll.ts` |
+| `DASHBOARD_ALLOWED_EMAILS` | ⬜ | U1 | Needed for the auth allow-list |
+| Calendly webhook signing key | ⬜ | U8 | `CALENDLY_WEBHOOK_SIGNING_KEY` absent |
+| Attio API key | ⬜ | U19 | Deliberately deferred 2026-07-13; nothing before U19 needs it |
+| Heyreach account | ⬜ | U18 | External execution stays **off**; adapter completes without it |
+| Embeddings provider | ⬜ open decision | U12 | Anthropic has no embeddings endpoint. FTS ships first and stays the labeled fallback |
+| GitHub repo + Vercel linked | 🟨 | U23 | git repo live; Vercel link not verifiable from inside the repo |
+
+---
+
+## 2. Unit tracker — `09-build-plan-v2.md`
+
+Units run in execution order. Phase 4 precedes Phase 2 by operator decision (§5, 2026-09-21).
+
+### Phase 1 — Reconcile and repair *(4 sessions)*
+
+| Unit | Name | Status | Evidence |
+|---|---|---|---|
+| — | Repair + adopt brief *(Session 3)* | ✅ **tested locally** | `test-draft.ts` rewritten against fixtures, 32/32 pass, non-fixture counts identical. `ping.ts` added, 3/3 pass. Docs realigned |
+| U1 | Auth, roles, dashboard shell | ⬜ not started | Migration `0005` also fixes `source_cursors` RLS |
+| U2 | Durable job system | ⬜ not started | |
+
+### Phase 4 (early) — Campaign execution *(16 sessions)*
+
+| Unit | Name | Status | Evidence |
+|---|---|---|---|
+| U3 | Scheduler: ledger + send windows 🛒 | ⬜ not started | `capacity_defaults` / `send_windows` seeded, consumed by nothing |
+| U4 | Instantly adapter | ⬜ not started | `integrations/instantly.ts` does not exist |
+| U5 | Send stage, preflight, guards | ⬜ not started | **The `zyndix.com` guard does not exist yet** — it arrives here |
+| U6 | Webhooks, reply freeze, suppression 🚩 | ⬜ not started | 🚩 **FIRST SEND READY.** `instantlyWebhookSchema` written, unconsumed |
+| U7 | Reply classifier + routing | ⬜ not started | `reply_classifier_prompt` v1 seeded; schema written; no stage consumes it |
+| U8 | Calendly, meetings, booking stop | ⬜ not started | route is a `.gitkeep` |
+| U9 | Orchestrator, crons, pause | ⬜ not started | both cron routes are `.gitkeep`; `lib/auth/cron.ts` exists |
+
+### Phase 2 — Knowledge system *(11 sessions)*
+
+| Unit | Name | Status | Evidence |
+|---|---|---|---|
+| U10 | Storage, upload, extraction | ⬜ not started | no Storage usage anywhere yet |
+| U11 | PDF/DOCX, OCR, review, screening | ⬜ not started | |
+| U12 | Search, retrieval, Ask the library | ⬜ not started | embeddings provider undecided |
+| U13 | Structured catalog | ⬜ not started | `proof_points` v1 is the only asset store today |
+
+### Phase 3 — Research and matching *(9 sessions)*
+
+| Unit | Name | Status | Evidence |
+|---|---|---|---|
+| U14 | Campaigns, enrollments, prospect import | ⬜ not started | |
+| U15 | Typed evidence model | ⬜ not started | builds on `enrich/core.ts` + `qualify/core.ts` |
+| U16 | Matching and recommendations ⭐ | ⬜ not started | ⭐ the brief's central acceptance criterion |
+| U17 | Draft rewired to matching, approvals UI | ⬜ not started | |
+
+### Phase 5 — Integrations and commercial workflow *(12 sessions)*
+
+| Unit | Name | Status | Evidence |
+|---|---|---|---|
+| U18 | Heyreach + manual LinkedIn (OFF) | ⬜ not started | |
+| U19 | Attio two-way sync | ⬜ not started | supersedes the deferred step 8 |
+| U20 | Inbox, briefs, pipeline, opportunities | ⬜ not started | |
+| U21 | Costs, reports, digest, learning | ⬜ not started | |
+
+### Phase 6 — Verification and handoff *(5 sessions)*
+
+| Unit | Name | Status | Evidence |
+|---|---|---|---|
+| U22 | Dashboard pass, e2e, chaos, red-team | ⬜ not started | |
+| U23 | Fresh-project migrations, handoff | ⬜ not started | |
+
+**Live pipeline as of 2026-09-21:** 34 companies · 34 leads — `parked` 19, `qualifying` 10, `pending_approval` 3, `approved` 1, `enriching` 1 · 219 lead_events · 4 touches · **0 send_accounts** · 0 leads have reached `sent`.
+
+---
+
+## 3. Carried-over status of steps 1–10 (`05-build-plan.md`)
+
+The old 15-step plan is superseded by the unit tracker above, but the code those steps produced is real and most units reuse it. Restated honestly in the four-word vocabulary:
+
+| Old step | What exists | Status | Why not higher |
+|---|---|---|---|
+| 1 Scaffold & foundations | Next 16.2.10, TS strict, `lib/db`, `auth/cron.ts`, `scripts/ping.ts` | **tested locally** | `ping.ts` written and passing 2026-09-21. It is read-only: migration `0001` drops `_ping`, so the original write-a-row DoD is unrunnable by design |
+| 2 Migrations | `0000`–`0004`, 17 tables, RLS on 16, `transition_lead` RPC | **implemented** | Applied to the live DB and proven reachable by `ping.ts`, but no per-table insert/read DoD script exists. `source_cursors` lacks RLS — fixed in U1 |
+| 3 Settings system | `settings/core.ts` (210), seed content (314) | **tested locally** | `test-settings.ts` 8/8 |
+| 4 State machine | `state/core.ts` (122) + `0002` RPC | **tested locally** | `test-state.ts` 11/11 |
+| 5 Apollo + source | `apollo.ts` (389), `source/` (559) | **implemented** | `test-source.ts` withheld on Apollo quota. `test:source-filters` 9/9 covers name-guard units only |
+| 6 Apify + enrich | `apify.ts` (295), `enrich/core.ts` (540) | **implemented** | `test-enrich.ts` withheld on real actor spend. Templates at v3 (`playwright:adaptive`), **never re-tested against the site that failed** |
+| 7 Anthropic + qualify | `anthropic.ts` (167), `qualify/core.ts` (661) | **verified with provider** | `test-qualify.ts --limit 1` 3/3, 2,520 tokens, $0.0093, live API. Lead `200c7e06` correctly parked with a `disqualify_reason` |
+| 8 Attio sync | placeholders only | **not started** | Deliberately deferred 2026-07-13. Returns as U19 |
+| 9 Verification stage | `millionverifier.ts` (149), `verify/core.ts` (418) | **implemented** | `test-verify.ts` withheld — spends Apollo **reveal** credits plus MillionVerifier credits |
+| 10 Writer + Telegram | `draft/core.ts` (542) + `guard.ts` (325), `telegram/handler.ts` (643) | **tested locally — approve path** | `test-draft.ts` 32/32 on 2026-09-21: draft → `pending_approval` → Telegram → ✅ → `approved`. **The ✏️ edit and ❌ kill paths remain undemonstrated** — each needs its own fixture |
+| 11 Instantly send | — | **not started** | Becomes U3–U6 |
+| 12 Webhooks | `.gitkeep` | **not started** | Becomes U6, U8 |
+| 13 Reply classifier | `.gitkeep` | **not started** | Becomes U7 |
+| 14 Orchestrator | `.gitkeep` | **not started** | Becomes U9 |
+| 15 Dashboard | `.gitkeep` | **not started** | Becomes U1 (shell) + U22 (full pass) |
+
+**Nothing is "active in production".** Zero leads have reached `sent`.
+
+---
 
 ## 4. Phase 0 tracker (manual warm outreach — parallel, not optional)
 
@@ -73,68 +139,83 @@ Reconciled against the repo on 2026-08-23. Evidence column says what the status 
 | Messages 6–10 sent | ⬜ | |
 | Messages 11–20 sent | ⬜ | |
 | Replies / meetings logged | ⬜ | replies: _ · meetings: _ |
-| Best 5 examples promoted into writer prompt | ⬜ | per 04-prompts §8; writer is already at v7 from live iteration, so this becomes v8 |
+| Best 5 promoted into writer prompt | ⬜ | writer is already at v7 from live iteration, so this becomes v8 |
+| 4 testimonial requests sent | ⬜ | Fonderis, ScholarCert, PulseConf, Loveko — drafts exist, pending since late July |
+
+This depends on nothing in the build and is the cheapest source of real hypothesis/evidence pairs. It is still the highest-value item that is not code.
+
+---
 
 ## 5. Decisions log
 
 | Date | Decision | Why |
 |---|---|---|
 | 2026-07-08 | One orchestrator + stage workers, no agent swarm | determinism, debuggability, cost |
-| 2026-07-08 | Supabase = brain, Attio = thin human window | Attio 3-object cap irrelevant; full data ownership |
+| 2026-07-08 | Supabase = brain, Attio = thin human window | full data ownership; Attio's 3-object cap irrelevant |
 | 2026-07-08 | Cron-pull over event/queue architecture | replayable, zero queue infra at v1 volume |
 | 2026-07-08 | Telegram over Slack for approvals | mobile speed, free bot API, 2-person team |
-| 2026-07-08 | Buy pre-warmed Instantly domains; still ramp from 15/day | warmup ≠ immunity |
-| 2026-07-08 | Skip Clay, Reply.io, Wappalyzer/BuiltWith at v1 | duplication vs own Claude layer; cost; HTML tool-detect covers 70% free |
-| 2026-07-08 | NeverBounce-class verification mandatory before send | bounce >3% burns inboxes |
-| 2026-07-08 | Signals (triggers[]) in v1 via LI posts + Apify jobs; monitoring subsystem in Phase 2 | value now, scope control |
-| 2026-07-08 | Activation: us-realestate → lt-events, one at a time | learning requires isolation |
-| 2026-07-08 | Evidence-required rule enforced at DB level (hypothesis not null) | the anti-generic guarantee |
-| 2026-07-08 | Cold sends never from zyndix.com/email.zyndix.com — code guard | domain reputation is unrecoverable |
-| 2026-07-08 | Ads conversion module: capture now, upload later on Amir's call | standing instruction: don't jump ahead on ads |
-| 2026-07-13 | Step 8 (Attio) deferred, proceed to step 9 | read-only human window; nothing downstream depends on it |
-| 2026-07-13 | **MillionVerifier chosen over NeverBounce** | implemented as `integrations/millionverifier.ts`; docs 01–05 still say "neverbounce" and are now wrong |
-| 2026-07-13 | Apify site crawler switched to `playwright:adaptive` | `apify_actor_templates` v3; cheerio returned zero pages on JS-rendered sites |
-| 2026-08-23 | Build moves from Cursor to Claude Code | remaining DoDs are script-based; the run-read-fix loop closes without a human relay |
-| 2026-08-23 | LinkedIn senders will be a `settings` key, not code | sender choice is a per-campaign judgement call; hardcoding means a deploy to change who sends |
+| 2026-07-08 | Buy pre-warmed domains; still ramp from 15/day | warmup ≠ immunity |
+| 2026-07-08 | Skip Clay, Reply.io, Wappalyzer at v1 | duplication vs own Claude layer; HTML tool-detect covers most of it free |
+| 2026-07-08 | Verification mandatory before send | bounce >3% burns inboxes |
+| 2026-07-08 | Evidence-required rule enforced at DB level | the anti-generic guarantee |
+| 2026-07-08 | Cold sends never from zyndix.com — code guard | domain reputation is unrecoverable |
+| 2026-07-08 | Ads conversion module: capture now, upload later | standing instruction: don't jump ahead on ads |
+| 2026-07-13 | Step 8 (Attio) deferred | read-only human window; nothing downstream depends on it |
+| 2026-07-13 | **MillionVerifier chosen over NeverBounce** | implemented as `integrations/millionverifier.ts` |
+| 2026-07-13 | Apify crawler → `playwright:adaptive` | cheerio returned zero pages on JS-rendered sites |
+| 2026-08-23 | LinkedIn senders as a `settings` key, not code | sender choice is a per-campaign judgement; hardcoding means a deploy to change who sends |
 | 2026-08-23 | Instantly Hypergrowth over Growth | time, not budget, is the binding constraint |
-| 2026-08-23 | API keys stay in Vercel env vars; dashboard shows status only | a dashboard auth bug exposing stored service-role keys is unrecoverable |
-| 2026-08-23 | **Telegram long-poll (`scripts/telegram-poll.ts`) stands in for the webhook** | `TELEGRAM_WEBHOOK_SECRET` unset; poll unblocks approvals without a public URL |
-| 2026-08-23 | **`✅` requires a passing DoD run, not file existence** | the tracker drifted for six weeks because "built" and "verified" were the same symbol |
+| 2026-08-23 | API keys stay in env vars; dashboard shows status only | a dashboard auth bug exposing stored service-role keys is unrecoverable |
+| 2026-08-23 | Telegram long-poll stands in for the webhook | `TELEGRAM_WEBHOOK_SECRET` unset; unblocks approvals without a public URL |
+| 2026-08-23 | `✅` requires a passing DoD run, not file existence | the tracker drifted for six weeks because "built" and "verified" shared one symbol |
+| **2026-09-21** | **`08-complete-build-brief.md` adopted as scope authority** | It supersedes docs 01–05 wherever they conflict. Docs 01–05 keep a banner saying so rather than being deleted — they remain the record of how existing code was built |
+| **2026-09-21** | **Build runs in Claude Code (desktop app), not Cursor** | Decided 2026-08-23, now in force. The remaining DoDs are script-based; Claude Code closes the run-read-fix loop without a human relay |
+| **2026-09-21** | **Phase 4 executes before Phase 2** | Every first touch is operator-approved in Telegram and the proof line is operator-written, so the approval gate covers the generic-copy risk. The binding constraint on revenue is that `stages/send.ts` does not exist, not that a library does not exist. First send runs on the existing draft stage with a minimal single-campaign config; U14/U17 migrate it onto campaigns and matching |
+| **2026-09-21** | **Sending domains bought now; Instantly bought at U3** | Two clocks, not one. Domains are cheap and only benefit from age, and doing their DNS now is what lets the Instantly purchase wait until U3 and still give ~21 days of warmup before FIRST SEND READY at U6 |
+| **2026-09-21** | **MillionVerifier replaces NeverBounce — docs corrected, not just contradicted** | The 2026-07-13 decision was real but docs 01–05 kept saying "NeverBounce" for two months. They now carry an explicit drift note |
+| **2026-09-21** | **Tests use isolated synthetic fixtures, never real prospects** | `test-draft.ts` reset 6 real leads and deleted their touches. Fixtures plus a before/after non-fixture row-count assertion make that class of bug detectable rather than silent |
+
+---
 
 ## 6. Issues / blockers log
 
 | Date | Issue | Status | Resolution |
 |---|---|---|---|
-| 2026-08-23 | **`ANTHROPIC_API_KEY` returned `401 authentication_error`.** Proven by `test-qualify.ts --limit 1`. Blocked steps 7, 10, 13, 14 — every Claude call in the engine | ✅ resolved 2026-08-23 | Key replaced in `.env.local`. `test-qualify.ts --limit 1` re-run: 3/3 PASS, 2,520 tokens, $0.0093. **Still to do: replace it in the Vercel env too** — the fix so far is local only |
-| 2026-08-23 | **`scripts/test-draft.ts` destroys real data.** Lines 91–103 take the `limit * 2` oldest leads in `pending_approval`/`parked`, `DELETE` their `touches` rows, and force-write `leads.state = 'drafting'` directly — bypassing `lib/state.ts`, writing no `lead_events`. Reverses real parking decisions silently | ⛔ open | Do not run until fixed. Rewrite to seed its own throwaway lead and route every state change through `lib/state.ts` |
-| 2026-08-23 | Lead `200c7e06` sat at `qualify_failed` attempt **1/3** after the 401 | ✅ resolved 2026-08-23 | Cleared by the successful re-run. Lead is now `parked` with a `disqualify_reason` (site 404) |
-| 2026-08-23 | `scripts/ping.ts` does not exist, but `CLAUDE.md` and step 1's DoD both name it | 🟨 open | Either write it (5 lines against `_ping`) or drop it from the docs. Not fixed in Session 1 — reconcile-only scope |
-| 2026-08-23 | `TELEGRAM_WEBHOOK_SECRET` unset → `/api/webhooks/telegram` returns 500 on every request | 🟨 open | Set the secret and register the webhook, or keep using `telegram-poll.ts` until step 14 |
-| 2026-08-23 | `source_cursors` (migration `0004`) is not documented in `02-database-schema.md` | 🟨 open | Add it to the schema doc |
-| 2026-08-23 | Docs 01–05 say "NeverBounce"; the code is MillionVerifier | 🟨 open | Correct the docs, or note the substitution inline |
-| 2026-07-13 | **JS-rendered sites returned no pages to the crawler.** `fantasticfrank.co` (Astro/Vercel) returned zero pages to `website-content-crawler` in cheerio mode | 🟨 mitigated, unverified | `apify_actor_templates` bumped to v3 with `crawlerType: playwright:adaptive`. **Not yet re-tested against `fantasticfrank.co`** — verify before assuming any site is uncrawlable |
-| 2026-07-13 | **Qualification rate ≈ 20%** (1 of 5). To hit the 25-contacts/week target that implies sourcing ~125 leads/week — well above current throughput | 🟨 open | Monitor. Do **not** widen the ICP to close the gap; a vaguer ICP means a vaguer message |
-| 2026-07-13 | **`QUALIFY_MIN_SCORE` threshold is unsettled.** Currently 50. Stephan Group scored 52 — at 60 it would have qualified nobody | 🟨 open | Flagged, not resolved. Needs more scored leads before moving it. Do not change it to raise throughput |
+| 2026-08-23 | **`scripts/test-draft.ts` destroys real data.** Selected the oldest real `pending_approval`/`parked` leads, `DELETE`d their touches and force-wrote `leads.state` directly, bypassing `lib/state.ts` and writing no `lead_events` | ✅ **resolved 2026-09-21** | Rewritten against synthetic fixtures with scoped cleanup, all transitions through `lib/state.ts`, an abort guard if any non-fixture lead is in `drafting`, and a before/after non-fixture row-count assertion. 32/32 pass; counts identical |
+| 2026-08-23 | `scripts/ping.ts` does not exist, but `CLAUDE.md` and step 1's DoD both name it | ✅ **resolved 2026-09-21** | Written as a **read-only** round-trip. Migration `0001` ends with `drop table if exists _ping`, so the original write-a-row DoD was unrunnable against the real schema |
+| 2026-08-23 | `ANTHROPIC_API_KEY` returned `401` | ✅ resolved 2026-08-23 | Key replaced in `.env.local`. **Still to do: replace it in the Vercel env** — the fix is local only |
+| 2026-09-21 | **`source_cursors` (migration `0004`) has no RLS and no `updated_at` trigger**, unlike all 16 tables in `0001`. Not exploitable today — `anon`/`authenticated` are ungranted — but it breaks the pattern | 🟨 scheduled | Fixed in **U1's migration `0005`** |
+| 2026-09-21 | `STEP-11-RUNBOOK.md` claimed the `zyndix.com` guard was "already enforced by a code guard in `stages/send.ts`". No such file exists | ✅ resolved 2026-09-21 | Runbook corrected. The guard arrives at **U5** and that unit's DoD verifies it |
+| 2026-08-23 | `TELEGRAM_WEBHOOK_SECRET` unset → `/api/webhooks/telegram` 500s | 🟨 open | Scheduled into **U9**. `telegram-poll.ts` covers approvals until then |
+| 2026-08-23 | `source_cursors` not documented in `02-database-schema.md` | 🟨 open | Docs 01–05 now carry a drift banner naming it. Full reconciliation is **U23** |
+| 2026-07-13 | **JS-rendered sites returned no pages to the crawler.** `fantasticfrank.co` returned zero pages in cheerio mode | 🟨 mitigated, unverified | Templates bumped to v3 with `crawlerType: playwright:adaptive`. **Never re-tested against that site** — do not assume any site is uncrawlable |
+| 2026-07-13 | **Qualification rate ≈ 20%** (1 of 5), implying ~125 leads/week sourced to hit 25 contacts/week | 🟨 open | Monitor. Do **not** widen the ICP to close the gap — a vaguer ICP means a vaguer message |
+| 2026-07-13 | **`QUALIFY_MIN_SCORE` unsettled.** Currently 50; Stephan Group scored 52, so 60 would have qualified nobody | 🟨 open | Needs more scored leads. Do not change it to raise throughput |
+| 2026-09-21 | `test-draft.ts` ✏️ edit and ❌ kill paths undemonstrated | 🟨 open | Each needs its own fixture — an approved lead cannot transition to `parked`. Backlogged in `09` §5 |
+
+---
 
 ## 7. Settings version log (mirror of DB — verified live 2026-08-23)
 
 | Key | Active version | Last change | Note |
 |---|---|---|---|
-| icp_rubric | v1 | 2026-07-13 | seed content unchanged; `updated_at` bumped 2026-08-23 by `test-settings.ts` cleanup (active flag only) |
+| icp_rubric | v1 | 2026-07-13 | seed content unchanged |
 | segments | v3 | 2026-07-13 | expanded `exclude_keywords`, dropped president title; `lt-events` present, `active: false` |
 | qualifier_prompt | v4 | 2026-07-13 | contradiction rule: discard contested evidence |
 | writer_prompt_email | v7 | 2026-07-13 | human CTA rule; no reply-with-keyword language |
-| writer_prompt_linkedin | v1 | 2026-07-13 | seed; Phase 3 |
-| reply_classifier_prompt | v1 | 2026-07-13 | seed; no stage consumes it yet |
+| writer_prompt_linkedin | v1 | 2026-07-13 | seed; consumed by nothing until U18 |
+| reply_classifier_prompt | v1 | 2026-07-13 | seed; consumed by nothing until U7 |
 | cadence_default | v1 | 2026-07-13 | 0/3/7/14, stop on reply |
-| capacity_defaults | v1 | 2026-07-13 | 15→30/day ramp; auto-pause at 3% bounce / 1 complaint |
-| send_windows | v1 | 2026-07-13 | Tue–Thu priority, 08:30–11:00 local |
+| capacity_defaults | v1 | 2026-07-13 | 15→30/day ramp; auto-pause at 3% bounce / 1 complaint. Consumed by nothing until U3 |
+| send_windows | v1 | 2026-07-13 | Tue–Thu priority, 08:30–11:00 local. Consumed by nothing until U3 |
 | apify_actor_templates | v3 | 2026-07-13 | site crawler → `playwright:adaptive` |
 | compliance_footer | v2 | 2026-07-13 | CAN-SPAM signature block |
 | cta_variants | v2 | 2026-07-13 | natural human CTA questions |
 | proof_points | v1 | 2026-07-13 | `us-realestate` null; `lt-events` verified |
 
-**Correction (Session 1):** the previous version of this table listed every key at v1 dated 2026-07-08. That was wrong — nine keys had moved and four keys (`apify_actor_templates`, `compliance_footer`, `cta_variants`, `proof_points`) were missing from it entirely. `linkedin_senders` is agreed but not yet created.
+`linkedin_senders` is agreed but not yet created. `operations_pause` arrives at U9. 28 settings rows across 13 keys, confirmed by `ping.ts` 2026-09-21.
+
+---
 
 ## 8. Weekly metrics snapshot (fill from digest, Mondays)
 
