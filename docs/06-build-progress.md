@@ -189,6 +189,7 @@ This depends on nothing in the build and is the cheapest source of real hypothes
 | **2026-09-24** | **The worker claims one job at a time** | A budget stop can then never strand a job that was leased but not started. One RPC per job is negligible at this volume; revisit only if claim overhead shows up in a cron's budget |
 | **2026-09-24** | **`jobs.state` carries a check constraint** — the schema's second, after `app_users.role` | An unrecognised state is invisible to every claimer: the job would be silently lost. Same reasoning as the role constraint |
 | **2026-09-24** | **New `security definer` functions pin `search_path` and revoke PUBLIC execute** | `claim_jobs` does both. `0002`'s `transition_lead` does neither — still in the `09` §5 backlog, not fixed here |
+| **2026-09-24** | **Work directly on `main`: no feature branches, no PRs** | Operator decision after U2. Units U1 and U2 each went through a branch and a PR (#1, #2), and for a single operator that is a round trip with no reviewer on the other end. The safety net is unchanged: every unit still ends with a passing DoD, real output in `07`, one commit and an operator-run `git push origin main`. Supersedes the per-unit `feat/*` branches used for U1 and U2. `CLAUDE.md` §Session discipline updated |
 
 ---
 

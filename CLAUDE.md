@@ -25,7 +25,8 @@ Read the **newest entry in `07-build-log.md` first** — it says where the last 
 - Use plan mode for reconciliation, schema changes, and anything touching sending, suppression, auth or secrets.
 - A unit is done only when its Definition of Done passes with real output pasted into the log.
 - Status vocabulary, used everywhere: **implemented** → **tested locally** → **verified with provider** → **active in production**. Never collapse them. A mocked integration is never "verified".
-- **End of every session, mandatory:** update `06-build-progress.md`, append a session entry to the top of `07-build-log.md` (template in that file), commit, and give the operator the exact `git push` command.
+- **Work directly on `main`.** No feature branches and no PRs. Commit each session's work to `main` (decision 2026-09-24, `06` §5).
+- **End of every session, mandatory:** update `06-build-progress.md`, append a session entry to the top of `07-build-log.md` (template in that file), commit to `main`, and give the operator the exact command: `git push origin main`. Never push yourself.
 
 ---
 

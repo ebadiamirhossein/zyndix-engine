@@ -58,6 +58,36 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-24 — Session 8 (addendum) — work directly on `main`
+
+**Step:** docs
+**Status at end:** ✅ done. No code changed.
+
+**Did**
+- Operator decision: from now on, work directly on `main`. No feature branches and no PRs.
+- Recorded it in `06` §5 and in `CLAUDE.md` §Session discipline. Sessions now end with a commit to `main` and the operator running `git push origin main`.
+- U2 had already reached `main` through PR #2 (`6213fa7`), so nothing needed merging. Deleted the local `feat/u2-jobs` branch. The remote branches `feat/u1-auth`, `feat/u2-jobs` and the two `docs/*` branches still exist; deleting them is the operator's call.
+
+**Files touched**
+- `CLAUDE.md`: §Session discipline
+- `docs/06-build-progress.md`: §5, one row
+- `docs/07-build-log.md`: this entry
+
+**Verification**
+```
+$ git status -sb
+## main...origin/main [ahead 1]
+```
+Result: pass
+
+**Decisions**
+- Work on `main` directly: single operator, no reviewer. The DoD, the log and the operator-run push are the safety net (`06` §5).
+
+**Next action**
+- Unchanged: **U3**, see Session 8.
+
+---
+
 ### 2026-09-24 — Session 8 — U2 durable job system
 
 **Unit:** U2 — Durable job system (`09` §U2), branch `feat/u2-jobs`
