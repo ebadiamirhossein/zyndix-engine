@@ -29,7 +29,7 @@ Filled from `.env.local` **key presence only** — no value was read, printed or
 | Apify account + token | 🟨 present, unverified | U15 | Balance not confirmed |
 | MillionVerifier key | ✅ ready | U2 (credits) | `MILLIONVERIFIER_API_KEY` present. `NEVERBOUNCE_API_KEY` absent and superseded |
 | Telegram bot + user IDs | ✅ ready | — | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ALLOWED_USER_IDS` present; approve path exercised 2026-09-21 |
-| **Two sending domains** | ✅ **bought 2026-09-21** | U5 | 301 → `zyndix.com` live on both. ⬜ **Names not yet recorded** — they are U5's allowed-sender list. `STEP-11-RUNBOOK.md` §A.1 |
+| **Two sending domains** | ✅ **bought 2026-09-21** | U5 | `zyndixhq.com` and `getzyndix.com`. 301 → `zyndix.com` live on both. These are U5's allowed-sender list. `STEP-11-RUNBOOK.md` §A.1 |
 | DNS authentication (MX, SPF, DKIM, DMARC) | ⬜ **at U2** | U4 | Moved out of clock A: DKIM is generated in Google Workspace Admin, which U2 buys. `STEP-11-RUNBOOK.md` §B.0 |
 | **Instantly Hypergrowth + 4 mailboxes** | ⬜ **buy at U2** (≈ day 7) | U4 | 🛒 purchase trigger, moved from U3 on 2026-09-21. ~24 days of warmup lands on FIRST SEND READY at U6. `STEP-11-RUNBOOK.md` §B |
 | Mailboxes pass mail-tester ≥9/10 | ⬜ | U4 | Nothing to test yet; `send_accounts` has 0 rows |

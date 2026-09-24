@@ -37,10 +37,10 @@ Criteria used: `.com` only, pronounceable, obviously related to Zyndix but not i
 
 | # | Domain | 301 → `zyndix.com` |
 |---|---|---|
-| 1 | ⬜ **record the domain name** | ✅ live |
-| 2 | ⬜ **record the domain name** | ✅ live |
+| 1 | `zyndixhq.com` | ✅ live |
+| 2 | `getzyndix.com` | ✅ live |
 
-> ⬜ **Open:** the two purchased domain names are not yet written down anywhere. Fill this table and the matching row in `06-build-progress.md` §1. They are the literal contents of U5's allowed-sender list, and U5's DoD asserts that list, so this cannot stay blank past U5.
+> These two domains are the literal contents of U5's allowed-sender list, and U5's DoD asserts that the guard accepts them. Recorded 2026-09-24; also in `06-build-progress.md` §1.
 
 ### A.2 Root redirect — done
 
@@ -185,7 +185,7 @@ U6's DoD requires the live drill to send to an **operator-owned mailbox, never a
 **Clock A — done 2026-09-21**
 - [x] Two sending domains purchased
 - [x] Both domains 301 to `zyndix.com`
-- [ ] ⬜ Domain names recorded in §A.1 above and in `06-build-progress.md` §1
+- [x] Domain names recorded in §A.1 above and in `06-build-progress.md` §1 — `zyndixhq.com`, `getzyndix.com`
 
 **Clock B — at U2 (≈ day 7)**
 - [ ] MX, SPF, DKIM (authentication *started*), DMARC verified by `dig` on both domains — §B.0

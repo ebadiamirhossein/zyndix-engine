@@ -58,6 +58,39 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-24 — Session 5 — Record the sending domain names
+
+**Unit:** docs — closes open operator input #4 from Session 4. No code changed.
+**Status at end:** ✅ done
+
+**Did**
+- Recorded the two sending domains bought on 2026-09-21: **`zyndixhq.com`** and **`getzyndix.com`**.
+- Replaced the `⬜` placeholders in `06-build-progress.md` §1 and `STEP-11-RUNBOOK.md` §A.1, and ticked the matching Clock A checklist item in the runbook's §E.
+
+**Files touched**
+- `docs/06-build-progress.md` — §1 sending-domains row
+- `docs/STEP-11-RUNBOOK.md` — §A.1 table and note, §E checklist
+- `docs/07-build-log.md` — this entry
+
+**Verification**
+```
+$ grep -rn "record the domain\|Names not yet recorded\|not yet written down" docs/06-build-progress.md docs/STEP-11-RUNBOOK.md
+(no output)
+```
+Result: **pass**. No placeholders left.
+
+**Decisions**
+- **The runbook §B.2 mailbox table still says "Domain A" / "Domain B".** Which mailboxes go on which domain is the operator's call at purchase time, so it was left alone rather than filled in with a guessed mapping.
+
+**Problems hit**
+- None.
+
+**Next action**
+- Unchanged from Session 4: apply `0005`, set `SUPABASE_ANON_KEY` and `DASHBOARD_ALLOWED_EMAILS`, enable the Supabase email provider, then run `pnpm tsx scripts/test-u1-auth.ts --base-url http://localhost:3000` for 48/48 and paste the output here.
+- Then **U2**, which is also the 🛒 purchase trigger.
+
+---
+
 ### 2026-09-21 — Session 4 — U1 auth, roles, dashboard shell; purchase trigger to U2; UD added
 
 **Unit:** U1 — Authentication, roles, dashboard shell
