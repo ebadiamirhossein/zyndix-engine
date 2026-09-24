@@ -184,6 +184,12 @@ export const sendWindowsSchema = z
     secondary_window_local: z.tuple([z.string(), z.string()]),
     weekend: z.boolean(),
     jitter_minutes: z.number().int().nonnegative(),
+    /**
+     * Take the next priority window if it opens within this many hours;
+     * otherwise the earliest window of either tier (09 §U3, operator decision
+     * 2026-09-24). Optional so v1 still parses; the scheduler defaults it to 48.
+     */
+    priority_lookahead_hours: z.number().int().nonnegative().optional(),
   })
   .strict();
 

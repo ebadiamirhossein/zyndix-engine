@@ -228,3 +228,32 @@ export const JOB_STATES = ["queued", "leased", "done", "failed", "dead", "cancel
 
 export type JobState = (typeof JOB_STATES)[number];
 export const jobStateSchema = z.enum(JOB_STATES);
+
+// ---------------------------------------------------------------------------
+// Capacity reservations (09 §U3; check constraint in 0007_capacity_counters.sql)
+// ---------------------------------------------------------------------------
+
+export const CAPACITY_RESERVATION_STATES = [
+  "reserved",
+  "accepted",
+  "failed",
+  "released",
+  "uncertain",
+  "reconciled",
+] as const;
+
+export type CapacityReservationState = (typeof CAPACITY_RESERVATION_STATES)[number];
+export const capacityReservationStateSchema = z.enum(CAPACITY_RESERVATION_STATES);
+
+/** settle_capacity() outcomes (0007b). */
+export const CAPACITY_OUTCOMES = [
+  "release",
+  "accept",
+  "fail",
+  "uncertain",
+  "reconcile_sent",
+  "reconcile_not_sent",
+] as const;
+
+export type CapacityOutcome = (typeof CAPACITY_OUTCOMES)[number];
+export const capacityOutcomeSchema = z.enum(CAPACITY_OUTCOMES);

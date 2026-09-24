@@ -1,6 +1,6 @@
 # Zyndix Engine — Build Progress
 
-**File:** `06-build-progress.md` · **Started:** 2026-07-08 · **Last reconciled:** 2026-09-24 (Session 8)
+**File:** `06-build-progress.md` · **Started:** 2026-07-08 · **Last reconciled:** 2026-09-24 (Session 9)
 **Tracks:** `09-build-plan-v2.md`, which implements `08-complete-build-brief.md`.
 
 **Status vocabulary** (`CLAUDE.md`, never collapsed):
@@ -39,6 +39,7 @@ Filled from `.env.local` **key presence only** — no value was read, printed or
 | Supabase Auth email provider + redirect URL | ✅ ready (localhost) | U1 | Magic-link round trip completed by the operator on localhost, 2026-09-24. Whether the production callback URL is allow-listed is **not verified** — check before deploy |
 | Migration `0005_app_users_roles.sql` applied | ✅ applied | U1 | Proven by `test-u1-auth.ts`: `app_users` readable, check constraint rejects a bad role (`23514`), `source_cursors` trigger fires |
 | Migrations `0006_jobs.sql` + `0006b_claim_jobs_rpc.sql` applied | ✅ applied 2026-09-24 | U2 | Applied by the operator in the SQL editor. `jobs.relrowsecurity = t`; `claim_jobs` executable by `postgres`, `service_role` and `supabase_admin` only (operator-reported). Exercised end to end by `test-u2-jobs.ts` |
+| Migrations `0007_capacity_counters.sql` + `0007b_reserve_capacity.sql` applied | ✅ applied 2026-09-24 | U3 | Applied by the operator in the SQL editor. `capacity_ledger` and `capacity_reservations` both `relrowsecurity = true`; `reserve_capacity` and `settle_capacity` executable by `postgres` and `service_role` only (operator-reported). Exercised end to end by `test-u3-scheduler.ts` |
 | Calendly webhook signing key | ⬜ | U8 | `CALENDLY_WEBHOOK_SIGNING_KEY` absent |
 | Attio API key | ⬜ | U19 | Deliberately deferred 2026-07-13; nothing before U19 needs it |
 | Heyreach account | ⬜ | U18 | External execution stays **off**; adapter completes without it |
@@ -63,7 +64,7 @@ Units run in execution order. Phase 4 precedes Phase 2 by operator decision (§5
 
 | Unit | Name | Status | Evidence |
 |---|---|---|---|
-| U3 | Scheduler: ledger + send windows | ⬜ not started | `capacity_defaults` / `send_windows` seeded, consumed by nothing |
+| U3 | Scheduler: ledger + send windows | ✅ **tested locally** | `pnpm test:scheduler` → **80/80** against Supabase: 30 concurrent reservations at quota 15 → exactly 15 `ok` / 15 `quota_exhausted`, `reserved = 15` (3 rounds); release decrements; windows table incl. both DoD cases, 3 DST dates, ±17 min jitter over 1000 draws; non-fixture counts unchanged (2026-09-24, `07` Session 9). No provider, so this is the highest status U3 can reach |
 | U4 | Instantly adapter | ⬜ not started | `integrations/instantly.ts` does not exist |
 | U5 | Send stage, preflight, guards | ⬜ not started | **The `zyndix.com` guard does not exist yet** — it arrives here |
 | U6 | Webhooks, reply freeze, suppression 🚩 | ⬜ not started | 🚩 **FIRST SEND READY.** `instantlyWebhookSchema` written, unconsumed |
@@ -189,6 +190,11 @@ This depends on nothing in the build and is the cheapest source of real hypothes
 | **2026-09-24** | **The worker claims one job at a time** | A budget stop can then never strand a job that was leased but not started. One RPC per job is negligible at this volume; revisit only if claim overhead shows up in a cron's budget |
 | **2026-09-24** | **`jobs.state` carries a check constraint** — the schema's second, after `app_users.role` | An unrecognised state is invisible to every claimer: the job would be silently lost. Same reasoning as the role constraint |
 | **2026-09-24** | **New `security definer` functions pin `search_path` and revoke PUBLIC execute** | `claim_jobs` does both. `0002`'s `transition_lead` does neither — still in the `09` §5 backlog, not fixed here |
+| **2026-09-24** | **Send-window tier rule: priority lookahead** (operator decision, Session 9) | `09` §U3's two DoD window cases conflict under a plain earliest-window rule: from Sun 23:00 and from Fri 16:30 the next two windows are the same (Mon 13:30 secondary, Tue 08:30 priority), yet one case expects Tuesday and the other Monday. Rule adopted: take the next priority window if it opens within `priority_lookahead_hours` (default **48**), else the earliest window of either tier. The field is optional on `send_windows`, so v1 still parses and no settings row was written; changing it is a new settings version |
+| **2026-09-24** | **Capacity reservations are rows (`capacity_reservations`), not just counters** | `09` §U3 names only the four counters. But U2 jobs can be re-claimed and re-run, and a counters-only ledger would double-decrement on a retried release. Every counter change is a state transition on a reservation row inside `reserve_capacity()`/`settle_capacity()`, so it applies at most once; repeating a reached state returns `already`. Idempotency keys make a re-run reservation return the first one |
+| **2026-09-24** | **An uncertain send keeps its capacity held until reconciled** | A timeout after possible acceptance may have sent the message. It keeps counting in `reserved` until reconcile says `sent` (→ `used`, `reconciled`) or `not_sent` (→ freed, `reconciled`). Full table in `0007`'s header |
+| **2026-09-24** | **A day's quota only goes down; it is counted per sender per UTC day** | The first reservation sets the day's quota from the ramp; a later lower quota lowers it, a higher one does not raise it. The ledger date is the UTC date of the send instant (CLAUDE.md: timestamps in UTC) |
+| **2026-09-24** | **The ramp anchors on new `send_accounts.ramp_started_on`; `daily_quota` is not used** | The ramp (15→30, +5 every 4 days) needs a start date and `send_accounts` had none. Null = not started → `rampQuota()` returns null, never 0. `daily_quota` (default 0 in `0001`) is ambiguous and superseded by the ramp |
 | **2026-09-24** | **Work directly on `main`: no feature branches, no PRs** | Operator decision after U2. Units U1 and U2 each went through a branch and a PR (#1, #2), and for a single operator that is a round trip with no reviewer on the other end. The safety net is unchanged: every unit still ends with a passing DoD, real output in `07`, one commit and an operator-run `git push origin main`. Supersedes the per-unit `feat/*` branches used for U1 and U2. `CLAUDE.md` §Session discipline updated |
 
 ---
@@ -227,8 +233,8 @@ This depends on nothing in the build and is the cheapest source of real hypothes
 | writer_prompt_linkedin | v1 | 2026-07-13 | seed; consumed by nothing until U18 |
 | reply_classifier_prompt | v1 | 2026-07-13 | seed; consumed by nothing until U7 |
 | cadence_default | v1 | 2026-07-13 | 0/3/7/14, stop on reply |
-| capacity_defaults | v1 | 2026-07-13 | 15→30/day ramp; auto-pause at 3% bounce / 1 complaint. Consumed by nothing until U3 |
-| send_windows | v1 | 2026-07-13 | Tue–Thu priority, 08:30–11:00 local. Consumed by nothing until U3 |
+| capacity_defaults | v1 | 2026-07-13 | 15→30/day ramp; auto-pause at 3% bounce / 1 complaint. `email_inbox` read by `rampQuota()` (U3); the send stage (U5) is the first runtime caller |
+| send_windows | v1 | 2026-07-13 | Tue–Thu priority, 08:30–11:00 local. Read by `nextSendWindow()` (U3); U5 is the first runtime caller. Schema gained optional `priority_lookahead_hours` (default 48) in U3 — v1 unchanged, no new version written |
 | apify_actor_templates | v3 | 2026-07-13 | site crawler → `playwright:adaptive` |
 | compliance_footer | v2 | 2026-07-13 | CAN-SPAM signature block |
 | cta_variants | v2 | 2026-07-13 | natural human CTA questions |

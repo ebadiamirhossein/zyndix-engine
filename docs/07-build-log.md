@@ -58,6 +58,195 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-24 — Session 9 — U3 capacity ledger and send windows
+
+**Unit:** U3 — Scheduler: atomic capacity ledger and send windows (`09` §U3), on `main`
+**Status at end:** ✅ **tested locally** — both `09` §U3 DoD items pass against Supabase. No provider is involved, so this is the highest status U3 can reach.
+
+**Did**
+- `0007_capacity_counters.sql`:
+  - adds `reserved`, `accepted`, `failed` and `reconciled` to `capacity_ledger`, each `not null default 0 check (>= 0)`
+  - adds `send_accounts.ramp_started_on date`, nullable
+  - new `capacity_reservations` table (state check constraint, partial-unique `idempotency_key`, `trg_updated_at`, RLS)
+  - the header documents the recovery semantics brief §10 asks for
+- `0007b_reserve_capacity.sql`: `reserve_capacity()` and `settle_capacity()`. Both are `security definer` with a pinned `search_path`; PUBLIC, anon and authenticated execute is revoked, service_role granted.
+  - The reservation is one guarded `UPDATE … where used + reserved + n <= quota`, so concurrent callers queue on the row lock.
+  - Settling is state-guarded: reaching a state the reservation is already in returns `already`, and an invalid transition raises.
+- `src/lib/scheduler/`:
+  - `windows.ts` (pure): `nextSendWindow`, `jitteredSendAt`, `rampQuota`, `ledgerDate`. Timezone maths runs on Node `Intl`, with no new dependency.
+  - `ledger.ts`: `createCapacityLedger`, with every RPC return Zod-validated.
+  - `index.ts`: the `server-only` binding.
+  - Replaces the `.gitkeep`.
+- `sendWindowsSchema` gained an optional `priority_lookahead_hours`. The seeded v1 is unchanged and no settings row was written.
+- `scripts/test-u3-scheduler.ts` plus `pnpm test:scheduler`.
+- The operator applied both migrations in the SQL editor.
+
+**Files touched**
+- `supabase/migrations/0007_capacity_counters.sql`, `supabase/migrations/0007b_reserve_capacity.sql`: new
+- `src/lib/scheduler/{windows,ledger,index}.ts`: new; `src/lib/scheduler/.gitkeep`: removed
+- `src/lib/validation/jsonb.ts`: `priority_lookahead_hours` (optional)
+- `src/types/enums.ts`: `CAPACITY_RESERVATION_STATES`, `CAPACITY_OUTCOMES`
+- `src/types/database-extensions.ts`: `DatabaseWithCapacity`
+- `scripts/test-u3-scheduler.ts`: new; `package.json`: `test:scheduler`
+- `docs/06-build-progress.md`: header, §1 migration row, §2 U3 row, §5 five decisions, §7 two settings notes
+- `docs/07-build-log.md`: this entry
+
+**Verification**
+
+Before applying, the SQL was checked against a throwaway local Postgres 16 cluster in the scratchpad. It confirmed:
+- 30 parallel `psql` sessions calling `reserve_capacity` at quota 15 → `15 ok / 15 quota_exhausted`, `reserved = 15`, 3 rounds
+- 10 concurrent calls with the same key → 1 reservation
+- a second release returns `already`
+- grants: `postgres` and `service_role` only; RLS `t` on both tables
+
+That was a pre-flight, not the DoD.
+
+Operator, after applying (reported in chat):
+```
+capacity_ledger       | true
+capacity_reservations | true
+reserve_capacity | postgres     | EXECUTE
+reserve_capacity | service_role | EXECUTE
+settle_capacity  | postgres     | EXECUTE
+settle_capacity  | service_role | EXECUTE
+```
+
+```
+$ pnpm exec tsc --noEmit        → clean
+$ pnpm build                    → clean
+$ pnpm lint                     → ✖ 21 problems (17 errors, 4 warnings) — identical to main (09 §5 backlog)
+$ pnpm exec eslint src/lib/scheduler src/types src/lib/validation/jsonb.ts scripts/test-u3-scheduler.ts → exit 0
+
+$ pnpm test:scheduler
+
+=== test-u3-scheduler (tag=test.u3.…) ===
+
+--- windows (pure, Europe/Vilnius, seeded send_windows v1) ---
+PASS: Sun 23:00 → next Tuesday 08:30–11:00 (DoD) — priority 2026-09-29 (tue) 2026-09-29T05:30:00.000Z → 2026-09-29T08:00:00.000Z
+PASS: Fri 16:30 → Monday secondary 13:30–16:00 (DoD) — secondary 2026-09-28 (mon) 2026-09-28T10:30:00.000Z → 2026-09-28T13:00:00.000Z
+PASS: Sat 10:00 → Monday secondary (weekend excluded, Tue is 70.5h out) — secondary 2026-09-28 (mon) …
+PASS: Mon 09:00 → Tuesday priority, not Mon 13:30 (lookahead 48h) — priority 2026-09-29 (tue) …
+PASS: Wed 09:00 inside the window → starts now — priority 2026-09-30 (wed) 2026-09-30T06:00:00.000Z → 2026-09-30T08:00:00.000Z
+PASS: Wed 11:00 exactly → Thursday (end is exclusive) — priority 2026-10-01 (thu) …
+PASS: Thu 12:00 → Friday secondary (next priority is Tue, >48h) — secondary 2026-10-02 (fri) …
+PASS: DST autumn: Fri 2026-10-23 16:30 EEST → Mon 2026-10-26 13:30 EET = 11:30Z — secondary 2026-10-26 (mon) 2026-10-26T11:30:00.000Z → 2026-10-26T14:00:00.000Z
+PASS: DST autumn: Sun 2026-10-25 23:00 EET (transition day) → Tue 08:30 EET = 06:30Z — priority 2026-10-27 (tue) 2026-10-27T06:30:00.000Z → …
+PASS: DST spring: Fri 2027-03-26 16:30 EET → Mon 2027-03-29 13:30 EEST = 10:30Z — secondary 2027-03-29 (mon) 2027-03-29T10:30:00.000Z → …
+PASS: America/New_York: Wed 07:00 EDT → same day 08:30 EDT = 12:30Z
+PASS: weekend:false wins over a listed 'sat' (Fri 16:30 → Mon, never Sat)
+PASS: weekend:true with 'sat' listed → Saturday 08:30
+PASS: spring-forward gap: a 03:30 opening on 2027-03-28 (03:00→04:00) moves to 04:30 EEST — 2027-03-28T01:30:00.000Z
+--- windows edge cases (pure) ---
+PASS: only weekend days with weekend:false → config error, never a weekend window — SendWindowConfigError: no send window within 14 days
+PASS: invalid IANA timezone throws InvalidTimeZoneError — InvalidTimeZoneError: invalid IANA timezone: "Mars/Olympus_Mons"
+PASS: empty timezone throws InvalidTimeZoneError
+PASS: InvalidTimeZoneError is exported as a class
+PASS: unknown day key is a config error — SendWindowConfigError: priority_days: unknown day "tuesday"
+PASS: priority_lookahead_hours: 0 → plain earliest window (Sun 23:00 → Mon secondary) — secondary 2026-09-28
+--- jitter (pure, 1000 draws) ---
+PASS: jitter within ±17 minutes over 1000 draws — max |offset| = 17.00 min
+PASS: every jittered send lies inside the window — 2026-09-29T05:30:00.000Z → 2026-09-29T08:00:00.000Z
+PASS: jitter uses both directions — range -16.98 .. 17.00 min
+PASS: rng 0.5 → sendAt = base = start + J — 2026-09-29T05:47:00.000Z
+PASS: a 10-minute window shrinks the jitter and stays inside
+--- ramp curve (pure, capacity_defaults v1: 15→30, +5 every 4 days) ---
+PASS: rampQuota day 0 = 15 / day 3 = 15 / day 4 = 20 / day 8 = 25 / day 12 = 30 / day 100 = 30   (6 checks)
+PASS: rampQuota before the start date = null
+PASS: rampQuota with no ramp start = null (unknown is null, not 0)
+PASS: ledgerDate is the UTC date
+
+BEFORE  leads=34 touches=4 lead_events=219 jobs=0 send_accounts=0 capacity_ledger=0 capacity_reservations=0
+
+--- DoD 1: 30 concurrent reserve_capacity at quota 15 → exactly 15 ok ---
+PASS: round 1: exactly 15 ok and 15 quota_exhausted — ok=15 quota_exhausted=15
+PASS: round 1: capacity_ledger.reserved = 15 — quota=15 used=0 reserved=15
+PASS: round 1: 15 reservation rows — rows=15
+  (rounds 2–3 identical: 3 PASS each)
+
+--- DoD 2: releasing a reservation decrements ---
+PASS: release → ok, reserved 15 → 14 — status=ok reserved=14
+PASS: second release is 'already', reserved stays 14 — status=already reserved=14
+PASS: freed capacity can be reserved again — … "quota":15,"used":0,"reserved":15
+PASS: …and then the day is full again — quota_exhausted
+PASS: released reservation has settled_at
+
+--- settle paths: accept / fail / uncertain / reconcile ---
+PASS: accept: reserved −1, used +1, accepted +1 — used=1 reserved=4 accepted=1
+PASS: fail: reserved −1, failed +1, used unchanged — used=1 reserved=3 failed=1
+PASS: uncertain: counters unchanged — capacity stays held — used=1 reserved=3
+PASS: uncertain reservation is not settled — settled_at=null
+PASS: reconcile sent: reserved −1, used +1, reconciled +1 — used=2 reserved=2 reconciled=1
+PASS: reconcile not_sent: reserved −1, reconciled +1, used unchanged — used=2 reserved=1 reconciled=2
+PASS: reconciled row records its outcome — reconciled/sent
+--- invalid transitions ---
+PASS: accepting an accepted reservation is 'already', no double count
+PASS: releasing an accepted reservation raises — … cannot release reservation … in state accepted
+PASS: reconciling a reservation that was never uncertain raises — … cannot reconcile_sent … in state reserved
+PASS: re-reconciling not_sent as sent raises — … in state reconciled
+PASS: unknown outcome raises — settle_capacity: unknown outcome resend
+PASS: ledger after all paths: quota 10, used 2, reserved 1, accepted 1, failed 1, reconciled 2
+
+--- idempotency keys ---
+PASS: same key twice → same reservation, replayed, one increment — reserved=1
+PASS: 10 concurrent calls, one key → one reservation — distinct=1 fresh=1
+PASS: …and exactly one increment — reserved=2
+PASS: replaying a released key returns it as released (no new capacity taken) — released reserved=1
+
+--- quota monotonicity and argument checks ---
+PASS: a lower quota lowers the day — quota=10
+PASS: a higher quota does not raise it — quota=10
+PASS: quota 0 → quota_exhausted
+PASS: n=3 reserves 3; a second n=3 against quota 5 is refused whole — 3/3
+PASS: n=0 is rejected — … p_n must be 1..1000, got 0
+PASS: negative quota is rejected — … p_quota must be 0..10000, got -1
+PASS: unknown send account is rejected (FK) — … violates foreign key constraint "capacity_ledger_send_account_id_fkey"
+PASS: CapacityLedgerError is the error class
+
+Cleanup: removed 1 fixture send account(s) (ledger and reservations cascade).
+AFTER   leads=34 touches=4 lead_events=219 jobs=0 send_accounts=0 capacity_ledger=0 capacity_reservations=0
+PASS: leads / touches / lead_events / jobs / send_accounts / capacity_ledger / capacity_reservations count unchanged   (7 checks)
+
+All 80 checks passed.
+```
+(What was trimmed: the tag, UUIDs and the full JSON settle payloads; rounds 2–3; the ramp and count-unchanged lines, collapsed to one line each. Nothing else was edited.)
+
+Result: **pass**, U3 DoD:
+1. 30 concurrent `reserve_capacity` at quota 15 → exactly 15 `ok`, 15 `quota_exhausted`, `capacity_ledger.reserved = 15`. Repeated over 3 dates.
+2. Releasing a reservation decrements, and a second release does not.
+3. Windows, table-driven:
+   - Sun 23:00 Vilnius → Tue 08:30–11:00
+   - Fri 16:30 → Mon secondary
+   - weekends excluded
+   - jitter within ±17 min over 1000 draws
+   - DST dates asserted explicitly in UTC: 2026-10-26 and 2027-03-29, plus the transition day itself
+
+The only fixture was one `send_accounts` row, `test.u3.<ts>@example.invalid`, on synthetic 2099 dates. No real row was read for mutation.
+
+**Decisions**
+- Window tier rule is the priority lookahead (operator decision this session). The two DoD cases conflict under a plain earliest-window rule (`06` §5).
+- Reservations are rows, so every counter change applies at most once across job re-runs (`06` §5).
+- An uncertain send keeps its capacity held until reconciled (`06` §5).
+- A day's quota only goes down, and quota is counted per sender per UTC day (`06` §5).
+- The ramp anchors on `send_accounts.ramp_started_on`; null means not started. `daily_quota` is not used (`06` §5).
+- The RPCs return `jsonb`, not `setof`, and `ledger.ts` Zod-parses the shape.
+- `DatabaseWithCapacity` uses `Omit<…, "public">`, not a plain intersection, so the widened `capacity_ledger` and `send_accounts` rows replace the generated ones instead of merging with them.
+
+**Problems hit**
+- A spec contradiction in `09` §U3's window DoD, described under Decisions. The operator resolved it before any code was written.
+- The first `DatabaseWithCapacity` draft intersected `DatabaseWithJobs` rather than omitting its `public`. That would have merged the old and new table shapes. Fixed before the first `tsc`.
+
+**Open, carried forward**
+- 🛒 Instantly Hypergrowth, mailboxes, MillionVerifier credits and `STEP-11-RUNBOOK.md` §B.0 DNS: operator task, still due. Each day of delay comes off U6's warmup.
+- **U5 must set `send_accounts.ramp_started_on`** for each mailbox when cold sending starts. Until then `rampQuota()` returns null and nothing can be reserved.
+- **Replaying an idempotency key returns the reservation in whatever state it is in.** A released or failed reservation comes back `ok: true, replayed: true` with that state. U5 must check `reservation.state` and must not treat a replay as fresh capacity.
+- `jitteredSendAt` returns the earliest jittered instant in a window. Spreading a day's volume across the window is U5's job.
+- The `app_users`/`jobs` items and the Vercel env items from Sessions 7–8 are unchanged.
+
+**Next action**
+- **U4: Instantly adapter** (`09` §U4). Read the current official Instantly API docs first. The contract suite runs over committed fixtures with `fetch` mocked, and the three-way error taxonomy is the load-bearing part. The live `--whoami` check needs the operator's Instantly key, which comes with the 🛒 purchase.
+
+---
+
 ### 2026-09-24 — Session 8 (addendum) — work directly on `main`
 
 **Step:** docs
