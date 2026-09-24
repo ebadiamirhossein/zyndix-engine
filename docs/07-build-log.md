@@ -58,6 +58,124 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-24 — Session 6 — U1 DoD passed
+
+**Unit:** U1 — Authentication, roles, dashboard shell
+**Status at end:** ✅ **tested locally**
+
+**Did**
+- The operator completed the four blocked steps from Session 4: applied `0005_app_users_roles.sql`, set `SUPABASE_ANON_KEY` and `DASHBOARD_ALLOWED_EMAILS`, and enabled the Supabase email provider with the localhost callback allow-listed.
+- The operator reported 48/48, a magic-link sign-in end to end as `admin`, and all ten dashboard areas rendering.
+- Re-ran the DoD script in this session so the log holds real output, not a summary. It reproduced 48/48.
+- Marked U1 **tested locally** in `06` §2; updated §1 prerequisites and closed two §6 rows.
+
+**Files touched**
+- `docs/06-build-progress.md` — header date, §1 (four U1 rows), §2 U1 row, §6 (two rows closed, one opened)
+- `docs/07-build-log.md` — this entry
+
+No code changed.
+
+**Verification**
+
+`.env.local`, key presence only — no value read or printed:
+```
+SUPABASE_ANON_KEY: present, non-empty
+DASHBOARD_ALLOWED_EMAILS: present, non-empty
+```
+
+```
+$ pnpm tsx scripts/test-u1-auth.ts --base-url http://localhost:3000
+
+--- allow-list parsing ---
+(10 PASS)
+
+--- assertRole matrix ---
+PASS: ROLE_RANK orders viewer < operator < admin — {"viewer":0,"operator":1,"admin":2}
+PASS: viewer may act as viewer
+PASS: viewer may NOT act as operator
+PASS: viewer may NOT act as admin
+PASS: operator may act as viewer
+PASS: operator may act as operator
+PASS: operator may NOT act as admin
+PASS: admin may act as viewer
+PASS: admin may act as operator
+PASS: admin may act as admin
+PASS: no role at all is forbidden, not allowed
+PASS: viewer is refused operator
+PASS: operator is refused admin
+
+--- route registry ---
+PASS: registry is non-empty — 2 route(s)
+PASS: every registry entry is classified session or machine
+PASS: every session route names a required role
+PASS: every mutating route on disk is in the registry — 3 route file(s) scanned
+
+--- app_users store ---
+BEFORE  leads=34 touches=4 lead_events=219 app_users=1
+PASS: three synthetic auth users created
+PASS: unprovisioned user has no app_users row
+PASS: ensureAppUser provisions with the given role — viewer
+PASS: getAppUser returns the provisioned row
+PASS: ensureAppUser does NOT overwrite an existing role from the env — role stayed viewer
+PASS: ensureAppUser is idempotent — no duplicate row
+PASS: role can be promoted by DB update
+PASS: promotion is visible to getAppUser — operator
+PASS: promoted user now passes the operator gate
+PASS: an unrecognised role is rejected by the check constraint — 23514: new row for relation "app_users" violates check constraint "
+Cleanup: removed 3 synthetic auth user(s).
+AFTER   leads=34 touches=4 lead_events=219 app_users=1
+PASS: leads count unchanged — 34 → 34
+PASS: touches count unchanged — 4 → 4
+PASS: lead_events count unchanged — 219 → 219
+PASS: app_users count unchanged — FK cascade cleaned up — 1 → 1
+
+--- source_cursors trigger ---
+PASS: service_role can still write source_cursors with RLS on
+PASS: insert keeps the app-supplied updated_at (trigger is BEFORE UPDATE only) — 2020-01-01T00:00:00+00:00
+PASS: source_cursors row updates
+PASS: update applied — 2
+PASS: trg_updated_at fired on update — updated_at advanced — 2026-09-24T16:13:36.717267+00:00
+Cleanup: removed fixture source_cursors row.
+
+--- HTTP surface ---
+PASS: GET /dashboard redirects to /login — 307 → /login
+PASS: unauthenticated POST /api/auth/signout → 401 — got 401
+
+All 48 checks passed.
+```
+Result: **pass** — U1 DoD. Non-fixture row counts identical before and after.
+
+The one pre-existing `app_users` row is the operator's own sign-in, and its role is as reported:
+```
+$ (service-role read of app_users: role, created_at)
+[{"role":"admin","created_at":"2026-09-24T16:12:27.213271+00:00"}]
+```
+
+**How each of `09` §U1's four DoD items was met**
+1. `/dashboard` → redirect to `/login` — **pass**, 307 (see the Session 4 note on 307 vs 302).
+2. A viewer is refused `operator` with a 403 and no DB write — **pass**. The rule is proven by the `assertRole` matrix, the 403 mapping by `ForbiddenError.status`, and "no write" by the unchanged row counts.
+3. An unauthenticated POST to every registered session route → 401 — **pass**, iterated over the registry, and the registry is itself checked against every `route.ts` on disk.
+4. `source_cursors` `relrowsecurity = true` — **inferred, not queried.** The migration applied: `app_users` exists and the `source_cursors` trigger fires, and both of those statements come after the `enable row level security` line. But the `relrowsecurity` query in the migration's trailer has not been run and pasted, so this item is not independently proven.
+
+**Operator-verified, not reproduced here**
+- Magic-link sign-in end to end, and the ten areas rendering while signed in. Both need a real inbox and a browser session, so they are recorded as the operator reported them. The `admin` row above corroborates the sign-in.
+
+**Decisions**
+- **U1 is "tested locally". Supabase Auth itself is not promoted to "verified with provider" in this entry.** — The real magic-link round trip meets the Session 4 bar for that label, but it was operator-run, on localhost, and the operator asked for "tested locally". Promoting it is a one-line change once the operator decides.
+
+**Problems hit**
+- None.
+
+**Open, carried forward**
+- Run the `relrowsecurity` query in `0005`'s trailer and paste the result here. It is the only DoD item with no direct evidence.
+- Whether `SUPABASE_ANON_KEY`, `DASHBOARD_ALLOWED_EMAILS` and the production callback URL exist on Vercel/Supabase cannot be checked from the repo. Check before any dashboard deploy (`06` §6).
+- Still outstanding since Session 2: the new `ANTHROPIC_API_KEY` is not in the Vercel env.
+
+**Next action**
+- **U2 — durable job system**, and at its start the 🛒 purchase: Instantly Hypergrowth, four Google Workspace mailboxes, MillionVerifier credits, then `STEP-11-RUNBOOK.md` §B.0 DNS on `zyndixhq.com` and `getzyndix.com` first. That purchase needs your go-ahead under the cost gate.
+
+---
+
 ### 2026-09-24 — Session 5 — Record the sending domain names
 
 **Unit:** docs — closes open operator input #4 from Session 4. No code changed.
