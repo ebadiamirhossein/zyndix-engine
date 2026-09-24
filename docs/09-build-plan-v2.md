@@ -51,16 +51,31 @@ One campaign sends reviewed email end to end through Instantly with every stop r
 
 U5 alone makes the engine *able* to send. It is not *safe* to send until U6's stop path is proven, which is why the milestone sits on U6.
 
-### 🛒 INSTANTLY PURCHASE TRIGGER — start of **U3** · cumulative session 5 · ≈ day 11
+### 🛒 INSTANTLY PURCHASE TRIGGER — start of **U2** · cumulative session 3 · ≈ day 7
 
-**Buy at U3:** Instantly Hypergrowth, the four mailboxes, MillionVerifier credits.
-**Do not buy at U3:** the sending domains. Those are bought **now** — see §4.
+**Buy at U2:** Instantly Hypergrowth, the four mailboxes, MillionVerifier credits.
+**Already bought (2026-09-21):** the two sending domains, with 301 redirects to `zyndix.com`. Their remaining DNS lands with the mailboxes at U2 — see §4.
 
-**The arithmetic.** At 3 sessions/week a session is ≈ 2.33 days. U1–U2 consume sessions 1–4. U3 opens at session 5 ≈ day 11. U6 closes at session 14 ≈ day 33. Because the domains and their DNS are already done, purchase day costs only mailbox creation and the Instantly connection — about one day. Warmup therefore runs ≈ **days 12–33: about 21 days**, which is the runbook's "14 minimum, 21 is better", landing exactly on U6's DoD.
+> **Moved from U3 to U2 on 2026-09-21** (operator decision, `06` §5). The reason is in the arithmetic below, and it is not the one the previous version gave.
 
-**Why not earlier or later.** Buying at U2 (≈ day 7) adds ~5 days of slack against a DNS mistake, for a few days of unused subscription — a reasonable trade if you want margin. Buying at U4 (≈ day 16) drops warmup to ~15 days, the bottom of the range with no slack at all.
+**Why the old rationale died.** The previous version said the domains' DNS would be done immediately, and that this was what let the purchase wait until U3. Two things are now true instead. The domains were bought on 2026-09-21 but **only registration and the 301 redirects were done** — the rest of their DNS was deferred. And more importantly, the deferral was not avoidable: **`STEP-11-RUNBOOK.md` §A.2's DKIM step runs through Google Workspace Admin, and Google Workspace is bought in clock B.** "Two sending domains + full DNS" at clock A was never achievable. Clock A could only ever deliver registration, the 301, and — optionally — MX, SPF and DMARC.
 
-**Doing the domain DNS now is what buys this margin.** It is the whole reason the trigger can sit as late as U3.
+So DNS authentication is inherently gated on the mailbox purchase. Moving the purchase earlier is what pays for that.
+
+**The arithmetic.** At 3 sessions/week a session is ≈ 2.33 days. U1 consumes sessions 1–2, so U2 opens at session 3 ≈ day 7. U6 closes at session 14 ≈ day 33. Purchase day now carries mailbox creation, the Instantly connection **and** MX/SPF/DKIM/DMARC, including DKIM propagation and clicking *Start authentication* — call it two days. Warmup therefore runs ≈ **days 9–33: about 24 days**, comfortably past the runbook's "14 minimum, 21 is better".
+
+| | old (buy at U3) | new (buy at U2) |
+|---|---|---|
+| Purchase | session 5, ≈ day 11 | **session 3, ≈ day 7** |
+| Purchase day covers | mailboxes + Instantly connection | mailboxes + Instantly connection **+ MX, SPF, DKIM, DMARC** |
+| Warmup starts | ≈ day 12 | ≈ day 9 |
+| Warmup before U6 (≈ day 33) | ≈ 21 days | **≈ 24 days** |
+
+The four days bought by moving the trigger are what fund the deferred DNS, with three days left over.
+
+**Why not earlier or later.** Buying at U1 (≈ day 3) buys four more days of warmup for four more days of idle subscription, and collides with the session that has the least slack in it. Buying back at U3 (≈ day 11) now means ~21 days of warmup *with the DNS work inside it*, leaving no margin for a DKIM record that does not propagate. Buying at U4 (≈ day 16) drops warmup to ~15 days, the bottom of the range with no slack at all.
+
+**The domains' age is already accruing** — that part of the early-purchase argument survives intact. What does not survive is the claim that their DNS could be finished without Google Workspace.
 
 ---
 
@@ -98,7 +113,7 @@ This unit's migration also closes a baseline finding: **`source_cursors` (migrat
 
 ---
 
-#### U2 — Durable job system
+#### U2 — Durable job system  🛒 **INSTANTLY PURCHASE TRIGGER**
 
 **Scope.** Implements §13 ("Do not run long crawls/OCR/imports inside a single upload request… A browser session or in-memory timer is not the job system") and the lease half of §10. A `jobs` table (type, payload, state `queued|leased|done|failed|dead|cancelled`, `run_after`, `lease_owner`, `lease_expires_at`, `attempts`, `max_attempts`, `last_error`, partial-unique `idempotency_key`). A `claim_jobs()` RPC using `FOR UPDATE SKIP LOCKED`. A worker runtime with a handler registry, capped exponential backoff, dead-letter state, and a wall-clock budget so a cron invocation returns before its platform timeout.
 
@@ -124,7 +139,7 @@ Every long-running thing after this unit runs on it.
 
 ---
 
-#### U3 — Scheduler: atomic capacity ledger and send windows  🛒 **INSTANTLY PURCHASE TRIGGER**
+#### U3 — Scheduler: atomic capacity ledger and send windows
 
 **Scope.** Implements §10's "atomic reservations… Quota accounting includes reserved, accepted, failed and reconciled attempts". `reserve_capacity()` RPC increments only when `used + reserved + n <= quota`, returning a reservation or a typed `quota_exhausted`. Extend `capacity_ledger` additively with `reserved`, `accepted`, `failed`, `reconciled` — the brief names all four. `windows.ts` computes the next allowed send instant from the recipient's IANA timezone, the seeded `send_windows` key (Tue–Thu priority, 08:30–11:00 local) and the ramp curve in `capacity_defaults` (15→30/day, +5 every 4 days).
 
@@ -242,6 +257,34 @@ Only after Part 2 may `06-build-progress.md` say **verified with provider**.
 **Reuses.** `src/lib/validation/llm.ts` (`replyClassifierOutputSchema` — written, unconsumed), the seeded `reply_classifier_prompt` v1, `src/lib/integrations/anthropic.ts`, `src/lib/stages/qualify/core.ts` (retry-once-then-hold pattern).
 
 **Effort.** 2 sessions. **Depends on.** U6.
+
+---
+
+#### UD — Apply design system
+
+**Scope.** Applies the design system authored in **Claude Design** to the structural shell U1 shipped: tokens, type scale, colour, spacing, states, and the first shared components. Completes the presentation half of §3 — "plain language, useful empty states and clearly visible failure reasons" — for the screens that exist. **No features, no new routes, no new data, no new queries.**
+
+U1 deliberately shipped the dashboard as plain semantic HTML with no colour, no spacing scale and no components (operator decision, 2026-09-21, `06` §5). The design system is being made outside the repo, so styling in code before it existed would have been thrown away.
+
+**Why here.** U8 is the first unit in execution order that renders real data (`/dashboard/pipeline`). Everything from U2 to U7 is jobs, adapters, sending and webhooks — no UI at all. Styling before this point means styling empty pages; styling after it means restyling.
+
+**Lettered, not numbered.** UD is not folded into the U1…U23 sequence so that every existing `depends on`, the §6 table and the `0005`→`0021` migration map stay valid.
+
+**Touches.** No migration. `src/app/globals.css` (Tailwind v4 `@theme`), `src/app/layout.tsx` (fonts), `src/app/dashboard/layout.tsx` and its ten pages, `src/app/login/`, new `src/components/`.
+
+**Provider.** None. **Completable with mocks: yes.**
+
+**Tests / DoD.**
+- All ten §3 areas render against an empty database, at a desktop **and** a mobile width.
+- Colour and type come only from the `@theme` tokens: `grep -rEn "#[0-9a-fA-F]{3,8}\b" src/app src/components` returns nothing outside `globals.css`.
+- Light and dark both render; the existing `prefers-color-scheme` block is honoured rather than bypassed.
+- `pnpm build && pnpm lint && pnpm exec tsc --noEmit` clean.
+- **Nothing behavioural changed**, asserted structurally: the unit's diff touches no file under `src/lib/`, no `route.ts` and no `actions.ts`.
+- `scripts/test-u1-auth.ts` still passes unchanged — the authorization surface is untouched.
+
+**Reuses.** U1's shell, `src/app/dashboard/nav.ts` (the ten areas, already a single list), the existing `@theme` block in `globals.css`.
+
+**Effort.** 2 sessions. **Depends on.** U1, plus the design system existing.
 
 ---
 
@@ -590,8 +633,9 @@ Two separate clocks. Conflating them is what the original runbook got wrong.
 
 | What | When | Why |
 |---|---|---|
-| **Two sending domains** + MX, SPF, DKIM (authentication *started*), DMARC, 301 redirect, tracking CNAME | **Now** | Cheap, and domain age is a deliverability input that only accrues with time. Doing the DNS now is what lets the Instantly purchase wait until U3. |
-| **Instantly Hypergrowth** + four Google Workspace mailboxes + MillionVerifier credits | **Start of U3** (≈ day 11) | Warmup is a calendar clock nothing shortens. Buying here puts ~21 days of warmup against a FIRST SEND READY at U6 (≈ day 33). |
+| **Two sending domains** + 301 redirect to `zyndix.com` | **Done 2026-09-21** | Cheap, and domain age is a deliverability input that only accrues with time. |
+| MX, SPF, DKIM (authentication *started*), DMARC, tracking CNAME | **With the mailboxes, at U2** | DKIM is generated in Google Workspace Admin, so it cannot exist before the mailboxes do. The rest follows it rather than being split across two visits. |
+| **Instantly Hypergrowth** + four Google Workspace mailboxes + MillionVerifier credits | **Start of U2** (≈ day 7) | Warmup is a calendar clock nothing shortens. Buying here puts ~24 days of warmup against a FIRST SEND READY at U6 (≈ day 33), and unblocks the DKIM record. |
 | Attio API key | Before **U19** | Step 8 was deferred; nothing before U19 needs it. |
 | Heyreach | Before **U18**, and external execution stays **off** | Adapter and tests complete without it. |
 | An embeddings provider | Decided in **U12**, optional | FTS ships first and remains the labeled fallback. |
@@ -613,6 +657,8 @@ Carried from `05-build-plan.md` §4, still valid:
 - Qualification rate ≈ 20%. Monitor; do **not** loosen `QUALIFY_MIN_SCORE` (currently 50) to raise throughput.
 - Re-test the crawler against `fantasticfrank.co`: `playwright:adaptive` (templates v3) is a mitigation that has never been verified.
 - `test-draft.ts` edit (✏️) and kill (❌) paths — each needs its own fixture, since an approved lead cannot transition to `parked`.
+- **`pnpm lint` has failed on `main` since before U1** — 17 `no-explicit-any` errors across `scripts/compare-prompt-versions.ts`, `rerun-qualifier-one.ts` and `test-qualify.ts`, plus 4 unused-var warnings in `src/lib`. `build` and `tsc --noEmit` are clean. One focused session, not a unit.
+- **`0002_transition_lead.sql` is `security definer` with no `set search_path`** — Supabase's linter calls this `function_search_path_mutable`. Fixing it means a new migration that replaces the function; it does not belong inside a feature unit.
 
 ---
 
@@ -621,12 +667,13 @@ Carried from `05-build-plan.md` §4, still valid:
 | Unit | Name | Brief phase | Sessions | Provider | Mockable | Depends on |
 |---|---|---|---|---|---|---|
 | U1 | Auth, roles, dashboard shell | 1 | 2 | Supabase Auth | yes | — |
-| U2 | Durable job system | 1 | 2 | — | yes | — |
-| **U3** | **Scheduler: ledger + send windows** 🛒 | 4 | 2 | — | yes | U1, U2 |
+| **U2** | **Durable job system** 🛒 | 1 | 2 | — | yes | — |
+| U3 | Scheduler: ledger + send windows | 4 | 2 | — | yes | U1, U2 |
 | U4 | Instantly adapter | 4 | 2 | Instantly | partial | U2 |
 | U5 | Send stage, preflight, guards | 4 | 3 | Instantly | yes | U3, U4 |
 | **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 3 | Instantly | yes | U2, U5 |
 | U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
+| **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |
 | U8 | Calendly, meetings, booking stop | 4 | 2 | Calendly | yes | U6 |
 | U9 | Orchestrator, crons, pause controls | 4 | 2 | Instantly, Telegram | partial | U7, U8 |
 | U10 | Storage, upload, extraction | 2 | 3 | Supabase Storage | yes | U1, U2 |
@@ -644,12 +691,14 @@ Carried from `05-build-plan.md` §4, still valid:
 | U22 | Dashboard pass, e2e, chaos, red-team | 6 | 3 | all, mocked | yes | U21 |
 | U23 | Fresh-project migrations, handoff | 6 | 2 | all | **no** | U22 |
 
-**Totals:** 23 units, **55 sessions ≈ 18 weeks** at 3 sessions/week.
-Phase 1 = 4 · first-send block (U3–U9) = 16 · Knowledge = 11 · Matching = 9 · Integrations/commercial = 12 · Verification = 5.
+**Totals:** 24 units, **57 sessions ≈ 19 weeks** at 3 sessions/week.
+Phase 1 = 4 · first-send block (U3–U9 + UD) = 18 · Knowledge = 11 · Matching = 9 · Integrations/commercial = 12 · Verification = 5.
+
+UD adds 2 sessions after U7. It therefore does **not** move either of the two milestones above it — 🛒 at U2 and 🚩 at U6 are unaffected — and pushes everything below it by two sessions.
 
 **Milestones:**
-🛒 buy Instantly + mailboxes at the **start of U3** — cumulative session 5, ≈ day 11
+🛒 buy Instantly + mailboxes at the **start of U2** — cumulative session 3, ≈ day 7
 🚩 **FIRST SEND READY at the end of U6** — cumulative session 14, ≈ week 4.7
-⭐ central acceptance criterion satisfied at **U16–U17** — cumulative session 38, ≈ week 12.7
+⭐ central acceptance criterion satisfied at **U16–U17** — cumulative session 40, ≈ week 13.3 *(was session 38 / week 12.7 before UD)*
 
 **Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009` (U6) · `0010` (U8) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.

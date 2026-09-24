@@ -137,6 +137,17 @@ export type ReplyClassification = (typeof REPLY_CLASSIFICATIONS)[number];
 export const replyClassificationSchema = z.enum(REPLY_CLASSIFICATIONS);
 
 // ---------------------------------------------------------------------------
+// Dashboard roles (brief §3 "authenticated roles: admin, operator, viewer")
+// Ordered least- to most-privileged; ROLE_RANK in lib/auth/core.ts depends on
+// this order, so append new roles in rank order, never in the middle.
+// ---------------------------------------------------------------------------
+
+export const APP_ROLES = ["viewer", "operator", "admin"] as const;
+
+export type AppRole = (typeof APP_ROLES)[number];
+export const appRoleSchema = z.enum(APP_ROLES);
+
+// ---------------------------------------------------------------------------
 // State machine transitions (doc 02 §5)
 // ---------------------------------------------------------------------------
 
