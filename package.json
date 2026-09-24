@@ -9,6 +9,7 @@
     "lint": "eslint",
     "ping": "tsx scripts/ping.ts",
     "gen:types": "supabase gen types typescript --db-url \"$SUPABASE_DB_URL\" --schema public > src/types/database.ts",
+    "test:jobs": "tsx scripts/test-u2-jobs.ts",
     "test:source-filters": "tsx --test src/lib/stages/source/filters.test.ts"
   },
   "dependencies": {
