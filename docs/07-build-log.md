@@ -58,6 +58,54 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-24 — Session 7 — `source_cursors` RLS verified
+
+**Unit:** U1 — closes the one DoD item Session 6 left as inferred. No code changed.
+**Status at end:** ✅ U1 **tested locally**, all four `09` §U1 DoD items now proven directly
+
+**Did**
+- The operator ran the verification query from `0005_app_users_roles.sql`'s trailer in the Supabase SQL editor.
+- Closed the carried item in `06` §6: the `source_cursors` RLS flag is now **proven**, not inferred.
+
+**Files touched**
+- `docs/06-build-progress.md` — §6 `source_cursors` row
+- `docs/07-build-log.md` — this entry
+
+**Verification**
+
+Run by the operator in the SQL editor. The result was reported in chat rather than pasted as raw output:
+```
+select relname, relrowsecurity
+  from pg_class
+ where relnamespace = 'public'::regnamespace
+   and relname in ('app_users', 'source_cursors', 'leads')
+ order by relname;
+
+ relname        | relrowsecurity
+----------------+----------------
+ app_users      | t
+ leads          | t
+ source_cursors | t
+```
+Result: **pass**. This is `09` §U1 DoD item 4. `leads` was included as a control: it has had RLS since `0001`.
+
+With this, Session 6's item 4 ("inferred, not queried") is closed. All four U1 DoD items have direct evidence.
+
+**Decisions**
+- None.
+
+**Problems hit**
+- None.
+
+**Open, carried forward**
+- Whether `SUPABASE_ANON_KEY`, `DASHBOARD_ALLOWED_EMAILS` and the production callback URL are on Vercel/Supabase cannot be checked from the repo. Check before any dashboard deploy (`06` §6).
+- The new `ANTHROPIC_API_KEY` is still not in the Vercel env (carried since Session 2).
+
+**Next action**
+- **U2 — durable job system.** It opens with the 🛒 purchase (Instantly Hypergrowth, four mailboxes, MillionVerifier credits, then `STEP-11-RUNBOOK.md` §B.0 DNS on `zyndixhq.com` and `getzyndix.com`), which needs the operator's go-ahead under the cost gate.
+
+---
+
 ### 2026-09-24 — Session 6 — U1 DoD passed
 
 **Unit:** U1 — Authentication, roles, dashboard shell
