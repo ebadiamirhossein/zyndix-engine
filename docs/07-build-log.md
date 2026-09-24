@@ -58,6 +58,176 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-24 — Session 8 — U2 durable job system
+
+**Unit:** U2 — Durable job system (`09` §U2), branch `feat/u2-jobs`
+**Status at end:** ✅ **tested locally** — all four `09` §U2 DoD items pass against Supabase. No provider is involved, so this is the highest status U2 can reach.
+
+**Did**
+- `jobs` table with a state check constraint, a partial-unique `idempotency_key`, partial indexes for the two claim predicates, `trg_updated_at` and RLS.
+- `claim_jobs(owner, types[], limit, lease_seconds)` RPC: `FOR UPDATE SKIP LOCKED`, re-claims expired leases, increments `attempts` at claim, dead-letters an expired lease on its final attempt. `security definer` with a pinned `search_path`; PUBLIC/anon/authenticated execute revoked.
+- `src/lib/jobs/`:
+  - `backoff.ts`: capped exponential backoff, 30s base, ×2, 1h cap, ±20% jitter clamped to the cap.
+  - `registry.ts`: `defineJob` with a Zod payload schema, `PermanentJobError`, duplicate-type rejection.
+  - `queue.ts`: enqueue with idempotent dedupe; claim; lease-fenced complete and fail; cancel only from `queued`.
+  - `worker.ts`: one bounded pass with a wall-clock budget, one claim at a time, a per-handler timeout with `AbortSignal`, and backoff or dead-letter on failure.
+  - `index.ts`: the `server-only` binding.
+- `scripts/test-u2-jobs.ts` plus `pnpm test:jobs`.
+- The operator applied both migrations in the SQL editor (the repo has no DB URL).
+- The 🛒 Instantly/mailbox/MillionVerifier purchase is the operator's separate task, per their instruction. U2's code did not wait on it. `06` §1 now says it is due.
+
+**Files touched**
+- `supabase/migrations/0006_jobs.sql`, `supabase/migrations/0006b_claim_jobs_rpc.sql`: new
+- `src/lib/jobs/{backoff,registry,queue,worker,index}.ts`: new
+- `src/types/enums.ts`: `JOB_STATES`, `jobStateSchema`
+- `src/types/database-extensions.ts`: `DatabaseWithJobs` (table + `claim_jobs`), same pattern as `DatabaseWithAppUsers`
+- `scripts/test-u2-jobs.ts`: new; `package.json`: `test:jobs`
+- `docs/06-build-progress.md`: header, §1 (purchase rows, migration row), §2 U2 row, §5 five decisions
+- `docs/07-build-log.md`: this entry
+
+**Verification**
+
+Before applying, the SQL was checked against a throwaway local Postgres 16 cluster in the session scratchpad. It confirmed:
+- lease and re-claim, with `attempts` going 1 → 2 under the same `idempotency_key`
+- the final-attempt dead-letter
+- grants: `postgres` and `service_role` only
+- `p_limit=0` rejected
+- two overlapping transactions: A held a transaction open on 15 rows while B claimed. B skipped them and got the other 5, 0 overlap.
+
+That was a pre-flight, not the DoD.
+
+Operator, after applying (reported in chat):
+```
+jobs            relrowsecurity = true
+claim_jobs      EXECUTE: postgres, service_role, supabase_admin   (anon, authenticated absent)
+```
+
+```
+$ pnpm exec tsc --noEmit        → clean
+$ pnpm build                    → clean
+$ pnpm lint                     → ✖ 21 problems (17 errors, 4 warnings) — identical to main (09 §5 backlog);
+                                  eslint on src/lib/jobs, src/types, scripts/test-u2-jobs.ts → exit 0
+
+$ pnpm test:jobs
+
+=== test-u2-jobs (tag=test.u2.1790268746566) ===
+
+--- backoff (pure) ---
+PASS: attempt 1 waits baseMs — 30000ms
+PASS: attempt 2 doubles — 60000ms
+PASS: delays are non-decreasing — 30000,60000,120000,240000,480000,960000,1920000,3600000,3600000,3600000
+PASS: cap is respected at attempt 50 — 3600000ms
+PASS: attempt 0 or negative treated as 1
+PASS: jitter stays within ±20% over 1000 draws — range 96034..143938
+PASS: jitter never pushes past the cap
+
+--- registry (pure) ---
+PASS: duplicate job type is rejected
+PASS: registry lists its types
+PASS: invalid payload throws PermanentJobError(invalid_payload) — invalid_payload: {"formErrors":[],"fieldErrors":{"n":["Inval
+
+BEFORE  leads=34 touches=4 lead_events=219 jobs=0
+
+--- DoD 1: concurrent claim_jobs return disjoint sets ---
+PASS: round 1: intersection = ∅ — A=15 B=5 ∩=0 ∪=20
+PASS: round 1: all 20 claimed exactly once
+PASS: round 1: every row leased to its claimer at attempts=1
+  (rounds 2–4 identical: A=15 B=5 ∩=0 ∪=20, 3 PASS each)
+PASS: round 5: intersection = ∅ — A=5 B=15 ∩=0 ∪=20
+PASS: round 5: all 20 claimed exactly once
+PASS: round 5: every row leased to its claimer at attempts=1
+
+--- DoD 2: a throwing handler re-queues with backoff ---
+PASS: worker reports one retry — {"claimed":1,"completed":0,"retried":1,"dead":0,"leaseLost":0,"stoppedReason":"max_jobs","elapsedMs":373}
+PASS: attempts = 1 — attempts=1
+PASS: state = 'queued' — queued
+PASS: run_after > now() — 2026-09-24T16:53:23.312+00:00
+PASS: last_error populated — Error: synthetic handler failure
+PASS: lease cleared
+
+--- DoD 3: dead after max_attempts ---
+PASS: handler ran exactly max_attempts times — calls=3
+PASS: state = 'dead' — dead
+PASS: attempts = max_attempts = 3 — attempts=3
+PASS: last_error populated with the final failure — Error: synthetic failure #3
+PASS: finished_at set
+PASS: summary: 2 retried, 1 dead — {"claimed":3,"completed":0,"retried":2,"dead":1,"leaseLost":0,"stoppedReason":"drained","elapsedMs":1173}
+PASS: PermanentJobError → dead after 1 attempt, no retry — state=dead attempts=1 calls=1
+PASS: invalid payload → dead with invalid_payload, handler never called — state=dead calls=0
+
+--- DoD 4: expired lease is re-claimable with the same idempotency_key ---
+PASS: first worker claims it
+PASS: a live lease is NOT re-claimable — claimed=0
+PASS: expired lease is re-claimed by another worker — 3b65b4b6-c9ae-4bff-898f-585a2c2f5c1d
+PASS: re-claimer sees the same idempotency_key — test.u2.1790268746566-idem-lease
+PASS: re-claim counts as attempt 2 — attempts=2
+PASS: lease now belongs to the re-claimer
+PASS: the crashed worker's late complete() is fenced off — result=lease_lost state=leased
+PASS: the re-claimer completes it
+PASS: expired lease at final attempt → dead, not re-claimed — claimed=0 state=dead last_error=lease_expired_after_final_attempt
+
+--- idempotent enqueue ---
+PASS: second enqueue is deduped
+PASS: exactly one row for the key — count=1
+
+--- cancel ---
+PASS: queued job cancels
+PASS: cancelled job is not claimable
+PASS: leased (in-flight) job is NOT cancelled
+
+--- wall-clock budget ---
+PASS: pass stops on budget, not by draining — {"claimed":3,"completed":3,"retried":0,"dead":0,"leaseLost":0,"stoppedReason":"budget","elapsedMs":1616}
+PASS: pass returns within budget — elapsed=1616ms budget=2500ms
+PASS: some but not all jobs ran — done=3
+PASS: no job stranded in 'leased' — done=3 queued=7 leased=0
+
+--- handler timeout ---
+PASS: timeout → retry with job_timeout recorded — state=queued last_error=JobTimeoutError: job_timeout: handler exceeded 200ms
+PASS: handler's AbortSignal fired
+
+Cleanup: removed 120 fixture job(s).
+AFTER   leads=34 touches=4 lead_events=219 jobs=0
+PASS: leads count unchanged — 34 → 34
+PASS: touches count unchanged — 4 → 4
+PASS: lead_events count unchanged — 219 → 219
+PASS: jobs count unchanged — 0 → 0
+
+All 63 checks passed.
+```
+(Worker `owner` UUIDs trimmed from the summaries; rounds 2–4 collapsed. Nothing else edited.)
+
+Result: **pass**, U2 DoD:
+1. disjoint concurrent claims, 5 rounds
+2. throw → `attempts=1`, `queued`, `run_after > now()`
+3. `dead` after `max_attempts` with `last_error`
+4. an expired lease is re-claimable with the same `idempotency_key`
+
+Every fixture used a `test.u2.<ts>.*` type, and every claim named only those types. No real row was selectable.
+
+**Decisions**
+- `attempts` increments at claim: a crash must spend an attempt, or a poison job loops forever (`06` §5).
+- Writes after claim are lease-fenced on `id + state + lease_owner + attempts`, so a superseded worker cannot overwrite the new holder (`06` §5).
+- The worker claims one job at a time, so a budget stop cannot strand a leased-but-unstarted job (`06` §5).
+- `jobs.state` has a check constraint: an unknown state is a silently lost job (`06` §5).
+- `claim_jobs` pins `search_path` and revokes PUBLIC. `transition_lead` stays as is; it is in the backlog, out of scope (`06` §5).
+- There is no cron route. `/api/cron/orchestrate` is U9's, and U2's `Touches` list names none.
+- Types extend `database-extensions.ts` rather than rerunning `gen:types`, because there is no `SUPABASE_DB_URL` locally. That matches the existing pattern.
+
+**Problems hit**
+- The local Postgres pre-flight hit three snags: `initdb` needed `LANG=C`; the scratchpad path exceeded the 103-byte Unix socket limit (fixed with a short temp socket dir); zsh does not word-split a `$P` command variable (fixed with a shell function). All were tooling only.
+- The first registry draft typed definitions as `JobDefinition<never>[]`, which Zod's covariant output type would reject. Replaced with a type-erased `RegisteredJob` whose `run()` Zod-parses the payload. Caught before the first `tsc`.
+
+**Open, carried forward**
+- 🛒 Instantly Hypergrowth, the four mailboxes, MillionVerifier credits and `STEP-11-RUNBOOK.md` §B.0 DNS: the operator's task, now due. Each day of delay comes off U6's warmup.
+- A handler that ignores its `AbortSignal` keeps running after its timeout, and its job is already re-queued. Every handler with side effects must be idempotent on `idempotencyKey`. U5 relies on this; its outbox row is written before the provider call.
+- No lease heartbeat. The lease is sized from each handler's `timeoutMs` plus a 30s margin. Add one only if a job type needs runs longer than its lease.
+- Vercel env items from Session 7 (`SUPABASE_ANON_KEY`, `DASHBOARD_ALLOWED_EMAILS`, callback URL, `ANTHROPIC_API_KEY`) are unchanged.
+
+**Next action**
+- **U3: scheduler, atomic capacity ledger and send windows.** Start with `0007_capacity_counters.sql` (additive `reserved`, `accepted`, `failed`, `reconciled` on `capacity_ledger`). Then `0007b_reserve_capacity.sql` on the `claim_jobs` RPC pattern (pinned `search_path`, PUBLIC revoked). The DoD needs exactly 15 `ok` out of 30 concurrent reservations.
+
+---
+
 ### 2026-09-24 — Session 7 — `source_cursors` RLS verified
 
 **Unit:** U1 — closes the one DoD item Session 6 left as inferred. No code changed.

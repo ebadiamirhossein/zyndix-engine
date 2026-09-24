@@ -1,6 +1,6 @@
 # Zyndix Engine — Build Progress
 
-**File:** `06-build-progress.md` · **Started:** 2026-07-08 · **Last reconciled:** 2026-09-24 (Session 6)
+**File:** `06-build-progress.md` · **Started:** 2026-07-08 · **Last reconciled:** 2026-09-24 (Session 8)
 **Tracks:** `09-build-plan-v2.md`, which implements `08-complete-build-brief.md`.
 
 **Status vocabulary** (`CLAUDE.md`, never collapsed):
@@ -27,17 +27,18 @@ Filled from `.env.local` **key presence only** — no value was read, printed or
 | Anthropic API key | ✅ ready | — | Replaced 2026-08-23 after a `401`. Verified live. **Vercel env still holds the dead key** |
 | Apollo API key + credits | 🟨 present, unverified | U15 | Plan/tier and remaining credits not confirmed |
 | Apify account + token | 🟨 present, unverified | U15 | Balance not confirmed |
-| MillionVerifier key | ✅ ready | U2 (credits) | `MILLIONVERIFIER_API_KEY` present. `NEVERBOUNCE_API_KEY` absent and superseded |
+| MillionVerifier key | ✅ ready | U5 (credits) — operator purchase, not a U2 code blocker | `MILLIONVERIFIER_API_KEY` present. `NEVERBOUNCE_API_KEY` absent and superseded |
 | Telegram bot + user IDs | ✅ ready | — | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ALLOWED_USER_IDS` present; approve path exercised 2026-09-21 |
 | **Two sending domains** | ✅ **bought 2026-09-21** | U5 | `zyndixhq.com` and `getzyndix.com`. 301 → `zyndix.com` live on both. These are U5's allowed-sender list. `STEP-11-RUNBOOK.md` §A.1 |
-| DNS authentication (MX, SPF, DKIM, DMARC) | ⬜ **at U2** | U4 | Moved out of clock A: DKIM is generated in Google Workspace Admin, which U2 buys. `STEP-11-RUNBOOK.md` §B.0 |
-| **Instantly Hypergrowth + 4 mailboxes** | ⬜ **buy at U2** (≈ day 7) | U4 | 🛒 purchase trigger, moved from U3 on 2026-09-21. ~24 days of warmup lands on FIRST SEND READY at U6. `STEP-11-RUNBOOK.md` §B |
+| DNS authentication (MX, SPF, DKIM, DMARC) | ⬜ **operator task, due with the mailboxes** | U4 | Moved out of clock A: DKIM is generated in Google Workspace Admin, which U2 buys. `STEP-11-RUNBOOK.md` §B.0 |
+| **Instantly Hypergrowth + 4 mailboxes** | ⬜ **operator task, due now** (U2 trigger passed) | U4 | 🛒 purchase trigger, moved from U3 on 2026-09-21. The operator owns this separately; U2's code did not wait on it (Session 8). Every day of delay comes straight off the ~24-day warmup before U6. `STEP-11-RUNBOOK.md` §B |
 | Mailboxes pass mail-tester ≥9/10 | ⬜ | U4 | Nothing to test yet; `send_accounts` has 0 rows |
 | `TELEGRAM_WEBHOOK_SECRET` | ⬜ | U9 | Unset → `/api/webhooks/telegram` 500s on every request. Approvals run via `scripts/telegram-poll.ts` |
 | `DASHBOARD_ALLOWED_EMAILS` | ✅ ready (local) | U1 | Present and non-empty in `.env.local`. Gates who may sign in and the role each is provisioned with (`email:role`; bare email = `viewer`). Vercel env **not verified** from inside the repo |
 | `SUPABASE_ANON_KEY` | ✅ ready (local) | U1 | Present and non-empty in `.env.local`. Anon key, **not** service-role, and deliberately not `NEXT_PUBLIC_`. Vercel env **not verified** from inside the repo |
 | Supabase Auth email provider + redirect URL | ✅ ready (localhost) | U1 | Magic-link round trip completed by the operator on localhost, 2026-09-24. Whether the production callback URL is allow-listed is **not verified** — check before deploy |
 | Migration `0005_app_users_roles.sql` applied | ✅ applied | U1 | Proven by `test-u1-auth.ts`: `app_users` readable, check constraint rejects a bad role (`23514`), `source_cursors` trigger fires |
+| Migrations `0006_jobs.sql` + `0006b_claim_jobs_rpc.sql` applied | ✅ applied 2026-09-24 | U2 | Applied by the operator in the SQL editor. `jobs.relrowsecurity = t`; `claim_jobs` executable by `postgres`, `service_role` and `supabase_admin` only (operator-reported). Exercised end to end by `test-u2-jobs.ts` |
 | Calendly webhook signing key | ⬜ | U8 | `CALENDLY_WEBHOOK_SIGNING_KEY` absent |
 | Attio API key | ⬜ | U19 | Deliberately deferred 2026-07-13; nothing before U19 needs it |
 | Heyreach account | ⬜ | U18 | External execution stays **off**; adapter completes without it |
@@ -56,7 +57,7 @@ Units run in execution order. Phase 4 precedes Phase 2 by operator decision (§5
 |---|---|---|---|
 | — | Repair + adopt brief *(Session 3)* | ✅ **tested locally** | `test-draft.ts` rewritten against fixtures, 32/32 pass, non-fixture counts identical. `ping.ts` added, 3/3 pass. Docs realigned |
 | U1 | Auth, roles, dashboard shell | ✅ **tested locally** | `scripts/test-u1-auth.ts --base-url http://localhost:3000` → **48/48**, non-fixture row counts unchanged (2026-09-24, `07` Session 6). Magic-link sign-in end to end as `admin`; all ten areas render (operator-verified) |
-| U2 | Durable job system 🛒 | ⬜ not started | 🛒 **Instantly purchase trigger** moved here from U3 on 2026-09-21 |
+| U2 | Durable job system 🛒 | ✅ **tested locally** | `pnpm test:jobs` → **63/63** against Supabase, all four `09` §U2 DoD items, non-fixture row counts and `jobs` count unchanged (2026-09-24, `07` Session 8). No provider, so this is the highest status U2 can reach. The 🛒 purchase is operator-owned and was not a code blocker |
 
 ### Phase 4 (early) — Campaign execution *(18 sessions, incl. UD)*
 
@@ -183,6 +184,11 @@ This depends on nothing in the build and is the cheapest source of real hypothes
 | **2026-09-21** | **`app_users.role` carries a `check` constraint — the schema's first** | The repo enforces state legality in application code and has no other check constraints. A role is a privilege boundary, so an unrecognised value must not be insertable at all. Recorded as a deliberate exception, not drift |
 | **2026-09-21** | **MillionVerifier replaces NeverBounce — docs corrected, not just contradicted** | The 2026-07-13 decision was real but docs 01–05 kept saying "NeverBounce" for two months. They now carry an explicit drift note |
 | **2026-09-21** | **Tests use isolated synthetic fixtures, never real prospects** | `test-draft.ts` reset 6 real leads and deleted their touches. Fixtures plus a before/after non-fixture row-count assertion make that class of bug detectable rather than silent |
+| **2026-09-24** | **`jobs.attempts` increments at claim, not at failure** | A handler that crashes its worker never reaches `fail()`. Counting at claim means a crash still spends an attempt, and `claim_jobs()` dead-letters an expired lease on its final attempt (`lease_expired_after_final_attempt`) instead of re-claiming a poison job forever |
+| **2026-09-24** | **Every job write after claim is lease-fenced** (`id + state='leased' + lease_owner + attempts`) | A worker that overran its lease and was superseded must not overwrite the new holder. Its late `complete()`/`fail()` returns `lease_lost` and changes nothing |
+| **2026-09-24** | **The worker claims one job at a time** | A budget stop can then never strand a job that was leased but not started. One RPC per job is negligible at this volume; revisit only if claim overhead shows up in a cron's budget |
+| **2026-09-24** | **`jobs.state` carries a check constraint** — the schema's second, after `app_users.role` | An unrecognised state is invisible to every claimer: the job would be silently lost. Same reasoning as the role constraint |
+| **2026-09-24** | **New `security definer` functions pin `search_path` and revoke PUBLIC execute** | `claim_jobs` does both. `0002`'s `transition_lead` does neither — still in the `09` §5 backlog, not fixed here |
 
 ---
 

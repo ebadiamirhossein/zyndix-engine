@@ -219,3 +219,12 @@ export function canTransition(from: LeadState, to: LeadState): boolean {
   }
   return LEAD_STATE_TRANSITIONS[from].includes(to);
 }
+
+// ---------------------------------------------------------------------------
+// Job queue states (09 §U2; check constraint in 0006_jobs.sql)
+// ---------------------------------------------------------------------------
+
+export const JOB_STATES = ["queued", "leased", "done", "failed", "dead", "cancelled"] as const;
+
+export type JobState = (typeof JOB_STATES)[number];
+export const jobStateSchema = z.enum(JOB_STATES);
