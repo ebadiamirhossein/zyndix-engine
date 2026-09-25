@@ -51,6 +51,8 @@ One campaign sends reviewed email end to end through Instantly with every stop r
 
 U5 alone makes the engine *able* to send. It is not *safe* to send until U6's stop path is proven, which is why the milestone sits on U6.
 
+> **2026-09-25 (Session 13, operator decision):** U6 makes the engine *safe to stop*. It does not make a draft *true*. **No prospect send happens until U6b (claim guard) passes.** The U6 drill (operator-owned recipient) is unaffected.
+
 ### 🛒 INSTANTLY PURCHASE TRIGGER — start of **U2** · cumulative session 3 · ≈ day 7
 
 **Buy at U2:** Instantly Hypergrowth, the four mailboxes, MillionVerifier credits.
@@ -295,6 +297,70 @@ Only after Part 2 may `06-build-progress.md` say **verified with provider**.
 - **Traversal.** `scripts/test-u6-traversal.ts` (`pnpm test:traversal`, 62/62). Stages gained an optional `leadIds` scope and verify an injectable Apollo client, so tests never pick real leads.
 - **Operator items.** The 2 Make.com webhooks deleted; the 4 drafts redrafted under v8 (new `pending_approval → drafting` / `approved → drafting` edges, `scripts/redraft-drafts.ts`).
 - **Remaining for session 3.** The Part 2 live drill with its gates (fresh tunnel webhook with approval, operator-owned recipient only, threading headers, first live `leads:create` / `emails:create` / `campaigns:update`), and confirming webhook `email_id` = `GET /emails` `id`.
+- **After the claim audit (same session).** The 4 v8 drafts were killed and the leads parked (`stale_evidence_2026-07-13`). The first **prospect** send is now gated on **U6b** (below).
+
+---
+
+#### U6b — Claim guard (interim slice)  ⛔ **gates the first prospect send**
+
+**Why (operator decision, 2026-09-25, Session 13).** A read-only audit of the 4 v8 drafts found that every draft contained claims its stored evidence did not support:
+- invented timings ("9pm on a Saturday", "Tuesday evening");
+- an invented place ("Beaumont");
+- "I've mapped out … fixes" when no such asset existed;
+- a claim contradicted by the site itself (REBG says "try the chat icon" while the body says nothing answers them);
+- auction dates that had already ended.
+
+All of that evidence came from one crawl on 2026-07-13. The drafts were killed and the leads parked (`stale_evidence_2026-07-13`). **No prospect send happens until this unit's DoD passes.** The U6 live drill is unaffected, because its only recipient is operator-owned.
+
+**Scope.** This is an interim, deterministic slice of the full design in U15/U17. It is built on what exists today: `qualification.evidence` and `enrichment_payloads.fetched_at`.
+- **Claim ledger from the writer.** The writer output grows from `{subject, body}` to `{subject, body, claims[]}`. Each claim has:
+  - `span`, verbatim from the body;
+  - `kind`: `prospect_fact` | `inference` | `offer` | `question`;
+  - `evidence_ids`: interim ids `E1…En`, indexing that lead's `qualification.evidence`.
+
+  Zod-validated. Malformed output → retry once → hold.
+- **The guard never trusts the model's tags.** It rejects the draft, with a named reason, when:
+  - `span_not_in_body`: a span is not in the body.
+  - `unknown_evidence_id`: a cited id does not exist for this lead.
+  - `uncovered_fact`: a number, money amount, place name, tool/vendor, weekday or time of day in the body is not inside a claim span. This reuses `checkInventedNumbers` and `findConcreteMatch` from `stages/draft/guard.ts`.
+  - `unsupported_prospect_fact`: a prospect fact's numbers and proper nouns do not appear in the cited evidence text.
+  - `invented_timing`: the body contains a weekday or time of day, or phrasing like "at 9pm", "overnight" or "until Monday", as an assertion about the prospect. No stored evidence can support one: public crawls cannot see response times (brief §7).
+  - `unbacked_asset_claim`: phrases like "I've mapped out", "I've prepared", "I put together", "I've drafted", "I built" for anything that is not a real, stored asset. Until the knowledge library exists (U10–U13), no such asset exists, so these phrases are always refused.
+  - `unapproved_offer`: an `offer` claim whose text is not the active `cta_variants` text or an approved `proof_points` entry. Until U13 there is no other approved offer text.
+  - `stale_evidence`: cited evidence older than the freshness limit. The limit is 30 days, held in a versioned setting and never hardcoded. Interim age is the lead's latest `enrichment_payloads.fetched_at`.
+  - `contradicted_evidence`: the lead's evidence conflicts on the claimed attribute. Interim rule: a site quote showing the thing the tech scan says is missing (a chat icon versus `hasChatWidget:false`, a booking link versus no scheduler, a contact form versus no form) holds any claim about that attribute. **The REBG case is the regression fixture.**
+  - `failed_crawl_evidence`: an evidence item that is a failed or missing fetch. This matches the qualifier's existing rule.
+- **Retries.** One revision retry per failure class, as with the existing word-count and number retries. A second failure → hold (`manual_hold`, operator alerted). The draft is never sent.
+- **Approval re-runs the guard.** `bindApproval` (Telegram approve and edit) re-runs it on the exact body being approved, operator edits included, and refuses with the list of failing claims. The claim ledger goes into `approval_snapshot`, so the hash binds it.
+- **The Telegram card shows the evidence.** Each claim is listed with its evidence id, excerpt and fetch date.
+
+**Touches.** Migration `0009c_claim_ledger.sql` (additive: `touches.claim_ledger jsonb`). Lib: `stages/draft/{core,guard}.ts`, `validation/llm.ts` (writer schema), `sending/approval.ts` (snapshot), `telegram/handler.ts`, `integrations/telegram-approval.ts`. Setting: `writer_prompt_email` v9 (claims output, and no timings or asset claims), plus an `evidence_policy` key (`max_age_days: 30`).
+
+**Provider.** Anthropic (writer only; the guard is code). **Completable with mocks: yes.**
+
+**Tests / DoD** (mocked writer, synthetic fixtures). Each case asserts **zero** `pending_approval` touches reach approval:
+1. "9pm on a Saturday" → `invented_timing`.
+2. "I've mapped out a few fixes" → `unbacked_asset_claim`.
+3. An offer sentence that is not the CTA → `unapproved_offer`.
+4. Evidence fetched 31 days ago → `stale_evidence`; 29 days → passes.
+5. The REBG fixture (a "try the chat icon" quote plus `hasChatWidget:false`) with a body saying no chat or acknowledgment exists → `contradicted_evidence`.
+6. "Beaumont", a place in no evidence → `uncovered_fact`.
+7. "$1.2M" absent from the cited excerpt → `unsupported_prospect_fact`.
+8. A failed-crawl evidence item cited → `failed_crawl_evidence`.
+9. A clean draft passes.
+10. An operator Telegram edit that adds an uncovered claim is refused at approval.
+
+All existing guard, draft and approval tests stay green. A live `test-draft --limit 1` is one cheap call, reported.
+
+**Cost.**
+- 1 session.
+- About +$0.003 per draft: roughly 150–250 extra output tokens and 300 input tokens at Sonnet 4.6, $3 in / $15 out per MTok. The guard itself costs $0.
+- More held drafts are expected. Their rate is measured, not estimated.
+- Re-crawling stale leads is a separate, costed operator decision.
+
+**Superseded by.** U15 (typed evidence: real ids, URL, timestamp, verbatim excerpt, observed/inferred/contradicted labels) and U17 (the guard over approved knowledge facts and prospect evidence). Those replace the interim `E1…En` ids and the fetch-date proxy. The DoD fixtures above carry over unchanged.
+
+**Effort.** 1 session. **Depends on.** U6 (it may run before the U6 drill; it must finish before any prospect send).
 
 ---
 
@@ -498,6 +564,8 @@ Prospect import: CSV and manual, column mapping, preview before commit, deduplic
 
 **Provider.** Apify + Anthropic, both already wired. **Completable with mocks: yes.**
 
+**Claim guard, full version (2026-09-25, from U6b).** Evidence records carry the stable ids the writer's claim ledger cites (replacing U6b's interim `E1…En`), plus `fetched_at` per item for the freshness rule and a `contradicted` label produced when sources disagree on one attribute (the REBG chat-icon case). The qualifier must not paraphrase a quote: an `observed` item's excerpt is verbatim from the stored page, or the item is `inferred`.
+
 **Tests / DoD.** A 404 crawl produces **zero** evidence rows plus a `crawl_failed` note, a null hypothesis, and a park with a `disqualify_reason` — this regression-locks the behavior observed live on lead `200c7e06` and recorded in `07-build-log.md`. A prospect-confirmed fact beats a contradicting inferred fact both in the assembled prompt payload (assert ordering) and in the stored qualification. Company-level evidence is reused across two contacts with **exactly one** crawl — Apify mock call count = 1.
 
 **Reuses.** `src/lib/stages/enrich/core.ts` (540 lines), `src/lib/stages/qualify/core.ts` (661 lines), `src/lib/integrations/apify.ts`, `qualification_history` from `0001`.
@@ -547,11 +615,13 @@ Plus: any `asset_id` or `knowledge_fact_id` absent from the database fails valid
 
 **Provider.** Anthropic. **Completable with mocks: yes.**
 
+**Claim guard, full version (2026-09-25, from U6b).** The guard extends from product claims to **prospect claims**. Every `prospect_fact` in the claim ledger cites U15 evidence ids with verbatim excerpts; every `offer` cites `approved_for_outreach` knowledge fact ids (U11/U13), which lifts U6b's CTA-only restriction; asset claims ("I've prepared…") require a real asset id. U6b's DoD fixtures carry over unchanged. The Approvals screen shows the ledger next to the evidence. Effort: **+1 session** (2 → 3).
+
 **Tests / DoD.** A draft containing a number absent from every approved fact is killed with `unsourced_number`. A draft produced under a `no_relevant_asset` decision contains **zero** product mentions — assert every catalog item name is absent. **All existing guard tests still pass unchanged.** Updating a source document sets affected pending drafts to `needs_review`, creates review tasks, and enqueues **zero** send jobs.
 
 **Reuses.** `src/lib/stages/draft/core.ts` (542), `src/lib/stages/draft/guard.ts` (325), `src/lib/telegram/handler.ts`, `src/lib/settings/{cta,proof,compliance}.ts`.
 
-**Effort.** 2 sessions. **Depends on.** U16.
+**Effort.** 3 sessions (was 2; +1 for the full claim guard, 2026-09-25). **Depends on.** U16.
 
 ---
 
@@ -732,6 +802,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U4 | Instantly adapter | 4 | 2 | Instantly | partial | U2 |
 | U5 | Send stage, preflight, guards | 4 | 3 | Instantly | yes | U3, U4 |
 | **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 3 | Instantly | yes | U2, U5 |
+| **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends | 4 | 1 | Anthropic | yes | U6 |
 | U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
 | **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |
 | U8 | Calendly, meetings, booking stop | 4 | 2 | Calendly | yes | U6 |
@@ -743,7 +814,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U14 | Campaigns, enrollments, prospect import | 3 | 2 | — | yes | U9, U13 |
 | U15 | Typed evidence model | 3 | 2 | Apify, Anthropic | yes | U14 |
 | **U16** | **Matching and recommendations** ⭐ | 3 | 3 | Anthropic | yes | U15 |
-| U17 | Draft rewired to matching, approvals UI | 3 | 2 | Anthropic | yes | U16 |
+| U17 | Draft rewired to matching, approvals UI | 3 | 3 | Anthropic | yes | U16 |
 | U18 | Heyreach + manual LinkedIn mode (OFF) | 5 | 3 | Heyreach | partial | U9 |
 | U19 | Attio two-way sync | 5 | 3 | Attio | partial | U14 |
 | U20 | Inbox, briefs, pipeline, opportunities | 5 | 3 | Anthropic | yes | U8, U19 |
@@ -758,7 +829,7 @@ UD adds 2 sessions after U7. It therefore does **not** move either of the two mi
 
 **Milestones:**
 🛒 buy Instantly + mailboxes at the **start of U2** — cumulative session 3, ≈ day 7
-🚩 **FIRST SEND READY at the end of U6** — cumulative session 14, ≈ week 4.7
-⭐ central acceptance criterion satisfied at **U16–U17** — cumulative session 40, ≈ week 13.3 *(was session 38 / week 12.7 before UD)*
+🚩 **FIRST SEND READY at the end of U6** — cumulative session 14, ≈ week 4.7 · **first *prospect* send additionally requires U6b** (+1 session, 2026-09-25)
+⭐ central acceptance criterion satisfied at **U16–U17** — cumulative session 40, ≈ week 13.3 *(was session 38 / week 12.7 before UD)* · **+2 sessions from 2026-09-25** (U6b +1, U17 +1): cumulative session ≈ 42
 
-**Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009`, `0009b` (U6: send prereqs, exceptions) · `0010` (U8) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.
+**Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009`, `0009b` (U6: send prereqs, exceptions) · `0009c` (U6b: claim ledger) · `0010` (U8) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.

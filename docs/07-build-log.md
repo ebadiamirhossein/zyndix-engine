@@ -58,13 +58,14 @@ Result: pass / fail
 
 ## Sessions
 
-### 2026-09-25 — Session 13 — U6 (2 of 3): reconcile, traversal + 8 stop rules, redraft, legacy webhooks
+### 2026-09-25 — Session 13 — U6 (2 of 3): reconcile, traversal + 8 stop rules, redraft, legacy webhooks; claim audit → drafts killed, U6b added
 
 **Unit:** U6, Instantly webhooks, reply freeze, suppression and reconciliation (`09` §U6), session 2 of 3, on `main`. The operator added two items: redraft the 4 drafts under v8, and delete the 2 legacy Make.com webhooks.
 **Status at end:** 🟨 **U6 in progress.**
 - **Part 1 is complete and tested locally:** `test:traversal` 62/62 (traversal, 8 stop-rule siblings, reconcile).
 - Part 2, the live drill, is session 3.
 - 🚩 not reached. Nothing was sent to anyone, and nothing can send (no worker until U9).
+- **After a read-only claim audit** (addendum below), the 4 v8 drafts were **killed** and their leads **parked** (`stale_evidence_2026-07-13`). **No prospect send happens until the new unit U6b (claim guard) passes.**
 
 **Did**
 - **Step 0, provider docs.**
@@ -215,13 +216,62 @@ $ pnpm exec eslint <every new/changed file> → 0 errors (2 pre-existing unused-
 
 **Open, carried forward**
 - **Operator:**
-  - Review and re-approve the 4 v8 drafts in Telegram, Steffen's included. Approval only binds the touch and sender; nothing sends before U9.
+  - ~~Re-approve the 4 v8 drafts~~. Superseded: killed after the claim audit (addendum).
+  - Decide on, and cost, a re-crawl and re-qualify of the parked 4 and the 10 `qualifying` leads. All their evidence is from 2026-07-13.
   - Add `INSTANTLY_WEBHOOK_SECRET` to the Vercel env at deploy.
 - **U6 session 3, the Part 2 live drill.** Gates: a fresh tunnel webhook (with approval); an operator-owned recipient only; threading headers checked; the first live `leads:create`, `emails:create` and `campaigns:update`; and confirming webhook `email_id` equals the `GET /emails` `id`.
 - **Backlog (`09` §5):** `scripts/draft-target-leads.ts` is deprecated (it hard-deletes touches).
 
+**Addendum (same session): claim audit → kill and park → U6b**
+- **The read-only audit** (operator request): for each of the 4 v8 drafts, every factual claim in the body was checked against the stored `qualification.evidence` item and then against the raw crawled page text in `enrichment_payloads`. Results:
+  - **All evidence is from one crawl on 2026-07-13**, 74 days old. The items are model paraphrases with only a source label: no URL, date, verbatim excerpt or observed/inferred label.
+  - **REBG:**
+    - The body's "no instant acknowledgment, nothing to keep them…" is **contradicted**: the broker page says "Better yet try the chat icon", while the tech scan says `hasChatWidget:false`, and the qualifier kept both.
+    - "Beaumont" is in no evidence and no page.
+    - "I've mapped out a few specific fixes" is unbacked.
+  - **Gottesman:**
+    - The $6.9M top price is confirmed in the raw page, but the $1.2M floor is not found.
+    - "only way … is a generic contact form" is overstated.
+    - "9pm on a Saturday … Monday" is unsupported.
+    - The offer sentence has no approved fact behind it.
+  - **Steffen:**
+    - "Running 9+ concurrent auctions" is stale and overstated: the raw page has 13 dated lines, July 5 → August 23, 2026, all ended and run one after another.
+    - "through a contact form" is contradicted by its own E3 ("no visible online intake form"). The 3 pages have no form, email or phone.
+    - E3's quote "contact us to schedule a preview" is not in the stored pages.
+  - **Stride:**
+    - "no visible routing layer" rests on one 3 KB homepage plus E3, **"Tech stack fetch failed"**: a failed crawl used as evidence (prompt v1).
+    - "hits your contact form" has no form in the page.
+    - "I mapped out three specific fixes" is unbacked.
+  - **All 4** state response delays as fact ("9pm", "Tuesday evening/night"). No evidence of response times exists.
+- **Operator decision, applied through `lib/state` only.** No spend. The one-off script ran from the scratchpad; dry run first, then `--apply`.
+```
+DRY   lead 5976b68f-… pending_approval · touch 693700dd-… pending_approval      (×4, all preconditions ok)
+APPLY lead 5976b68f-… pending_approval · touch 693700dd-… pending_approval
+       → touch killed · lead parked (stale_evidence_2026-07-13)
+APPLY lead 041142cc-… · touch 84d6323d-… → touch killed · lead parked (stale_evidence_2026-07-13)
+APPLY lead 0f20b919-… · touch 63ab1fd3-… → touch killed · lead parked (stale_evidence_2026-07-13)
+APPLY lead b48ad46e-… · touch 5f70d72e-… → touch killed · lead parked (stale_evidence_2026-07-13)
+re-read: lead states { parked: 23, qualifying: 10, enriching: 1 } · all 8 touches for the 4 leads (pv 7 and pv 8) status killed, rows kept
+qualifying leads: 10 · latest fetch dates {"2026-07-13":10}   (same stale crawl)
+```
+  - Event `parked`, detail `{park_reason: "stale_evidence_2026-07-13", killed_touch_id, reason}`. The leads can be re-crawled later (`parked → enriching` is legal). Company rows were not touched.
+- **U6b: claim guard (interim slice)** was added to `09` after U6, and it gates every prospect send. The writer returns a claim ledger (span, kind, `E1…En` ids), and a deterministic guard refuses on these named reasons:
+  - `invented_timing`: weekdays or times of day asserted about the prospect;
+  - `unbacked_asset_claim`: "I've mapped out / prepared …" with no real asset;
+  - `unapproved_offer`: offer text other than the approved CTA until U13;
+  - `stale_evidence`: older than 30 days, from a versioned setting;
+  - `contradicted_evidence`: with REBG's chat icon as the fixture;
+  - `uncovered_fact`, `unsupported_prospect_fact`, `failed_crawl_evidence`.
+
+  Approval re-runs the guard, and the ledger is part of the approval hash. Migration `0009c_claim_ledger.sql`. 1 session, about +$0.003 per draft. The full version is recorded under U15 (typed evidence ids, verbatim excerpts, per-item dates, contradiction labels) and U17 (the guard over prospect claims; 2 → 3 sessions). The ⭐ milestone moves by about 2 sessions.
+- **Docs.**
+  - `06`: a U6b tracker row; 2 decisions (no prospect send before U6b; stale drafts killed and leads parked); a 🟥 issue (all current evidence is stale; claims unsupported); the redraft row closed.
+  - `09`: §2 milestone note, the §U6b unit, U15/U17 full-version notes, summary row, migration numbering.
+
 **Next action**
-- **U6 session 3: the Part 2 live drill** (`09` §U6). Use plan mode: it sends, and it writes to Instantly. Start with the gate list in `06` §6: create the tunnel webhook, then enroll the operator-owned mailbox only, observe the provider message id, `touches.status=sent`, `accepted=1` and `leads.state=sent`, then reply and observe the freeze before any classifier.
+- **Operator's choice of order.** U6 session 3 (the Part 2 live drill, operator-owned recipient only) and U6b (claim guard) are independent. Both must pass before any prospect send.
+  - **The drill:** use plan mode (it sends and writes to Instantly). Start with the gate list in `06` §6: create the tunnel webhook; enroll the operator-owned mailbox only; observe the provider message id, `touches.status=sent`, `accepted=1` and `leads.state=sent`; then reply and observe the freeze before any classifier.
+  - **U6b:** use plan mode (it touches approval). Follow `09` §U6b, starting from the REBG fixture.
 
 ---
 
