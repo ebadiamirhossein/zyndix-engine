@@ -24,7 +24,7 @@ import { threadedSubject, type SendPolicy, type SendWindowsConfig } from "../src
 import { normalizeEmail } from "../src/lib/sending/suppression";
 import { isValidTimeZone } from "../src/lib/sending/timezone";
 import { createSettingsStore } from "../src/lib/settings/core";
-import { enqueueSend, RECONCILE_JOB_TYPE, SEND_JOB_TYPE, type SendDeps } from "../src/lib/stages/send/core";
+import { addressList, enqueueSend, RECONCILE_JOB_TYPE, SEND_JOB_TYPE, type SendDeps } from "../src/lib/stages/send/core";
 import { sendJobDefinitions } from "../src/lib/stages/send/jobs";
 import { createStateStore } from "../src/lib/state/core";
 import { type InstantlyWebhookDeps, processInstantlyEvent } from "../src/lib/webhooks/instantly";
@@ -37,8 +37,13 @@ import type {
 } from "../src/types/database-extensions";
 import type { LeadState } from "../src/types/enums";
 
-// U6 Part 2 live drill (09 §U6, Session 14). One operator-owned recipient, one
-// sender, fixed test text — never a prospect, never a generated draft.
+// U6 Part 2 live drill (09 §U6, Session 14; re-test Session 16 as drill:s14b).
+// One operator-owned recipient, one sender, fixed test text — never a
+// prospect, never a generated draft.
+//
+// Session 16 recipient is a Gmail +alias of the Session 14 address (same
+// inbox): the old drill lead 7fd018fa keeps the base address and is only ever
+// read here (PREVIOUS_DRILL_RECIPIENT), never written.
 //
 //   --check                  read-only: sender, campaign + schedule, workspace
 //                            leads for the recipient, health, open windows by zone
@@ -48,6 +53,9 @@ import type { LeadState } from "../src/types/enums";
 //   --send <touchId>         SENDS MAIL through the real send stage (queue + worker)
 //   --reconcile              runs a queued send.reconcile job for the drill, if any
 //   --status                 read-only: the drill lead's rows
+//   --verify-hash <touchId>  read-only: stored approval_hash vs the hash preflight recomputes
+//   --lead-status            read-only: GET /leads/{id} for the drill enroll (status, domain_complete)
+//   --emails                 read-only: GET /emails/{id} for the drill emails + To/Cc verdict
 //   --poll                   runReplyPoll for this sender, GET /emails id comparison,
 //                            then the polled reply replayed through processInstantlyEvent
 //   --cancel-jobs            cancels queued jobs for the drill touches only
@@ -55,15 +63,17 @@ import type { LeadState } from "../src/types/enums";
 // Every write is guarded: recipient == DRILL_RECIPIENT, sender == DRILL_SENDER,
 // lead tagged drill. Secrets are never printed.
 
-const DRILL_RECIPIENT = "ebadiamirhoseineng@gmail.com";
+const DRILL_RECIPIENT = "ebadiamirhoseineng+s14b@gmail.com";
+/** Session 14 drill address (lead 7fd018fa). Read-only: attribution and stop_for_company checks. */
+const PREVIOUS_DRILL_RECIPIENT = "ebadiamirhoseineng@gmail.com";
 const DRILL_SENDER = "amir@zyndixhq.com";
 const DRILL_CAMPAIGN = "5392fcac-8d29-432b-84ab-c9a50f626ab9";
-const DRILL_DOMAIN = "drill-s14.zyndix-drill.invalid";
-const DRILL_TAG = "drill:s14";
-const SUBJECT = "Zyndix engine drill S14";
+const DRILL_DOMAIN = "drill-s14b.zyndix-drill.invalid";
+const DRILL_TAG = "drill:s14b";
+const SUBJECT = "Zyndix engine drill S14b";
 const BODIES: Record<1 | 2, string> = {
-  1: "Hi Amir,\n\nThis is a Zyndix engine drill (Session 14, step 1): a fixed test message sent by the engine to an operator-owned mailbox. No action needed.",
-  2: "Hi Amir,\n\nDrill follow-up (Session 14, step 2), sent as a threaded reply to step 1. Please reply to this thread from Gmail to test the reply freeze.",
+  1: "Hi Amir,\n\nThis is a Zyndix engine drill (Session 16 / S14b, step 1): a fixed test message sent by the engine to an operator-owned mailbox. No action needed.",
+  2: "Hi Amir,\n\nDrill follow-up (Session 16 / S14b, step 2), sent as a threaded reply to step 1. Please reply to this thread from Gmail to test the reply freeze.",
 };
 const MIN_SEND_MINUTES = 20;
 const MIN_DRILL_MINUTES = 60;
@@ -123,6 +133,104 @@ async function getActiveSetting(k: string): Promise<{ version: number; value: un
   return { version: s.version, value: s.value };
 }
 const alert = (text: string) => telegram.sendAlert(text);
+
+// ---------------------------------------------------------------------------
+// Read-only Instantly diagnostics outside the typed client (Session 16)
+// ---------------------------------------------------------------------------
+
+/** POST is allowed only for list endpoints, which read. Nothing here mutates. */
+const READ_ONLY_POSTS = new Set(["/api/v2/leads/list"]);
+
+async function instantlyRead(path: string, body?: unknown): Promise<{ status: number; json: unknown }> {
+  const method = body === undefined ? "GET" : "POST";
+  guard(method === "GET" || READ_ONLY_POSTS.has(path), `read-only helper refuses POST ${path}`);
+  const res = await fetch(new URL(path, INSTANTLY_BASE_URL), {
+    method,
+    headers: {
+      Authorization: `Bearer ${process.env.INSTANTLY_API_KEY}`,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  return { status: res.status, json: await res.json().catch(() => null) };
+}
+
+type InstantlyLeadRow = {
+  id: string;
+  email?: string;
+  campaign?: string | null;
+  status?: number;
+  company_domain?: string;
+  status_summary?: { domain_complete?: boolean; lastStep?: { from?: string; stepID?: string; timestamp_executed?: string } };
+};
+
+const LEAD_STATUS: Record<string, string> = { "1": "Active", "2": "Paused", "3": "Completed", "-1": "Bounced", "-2": "Unsubscribed", "-3": "Skipped" };
+
+function describeInstantlyLead(l: InstantlyLeadRow): string {
+  const last = l.status_summary?.lastStep;
+  return (
+    `${s8(l.id)} campaign=${s8(l.campaign ?? null)} status=${l.status ?? "?"}(${LEAD_STATUS[String(l.status)] ?? "?"}) ` +
+    `domain_complete=${l.status_summary?.domain_complete ?? "—"} company_domain=${l.company_domain ?? "—"} ` +
+    `lastStep=${last ? `${last.from ?? "?"}@${last.timestamp_executed ?? "?"}` : "none"}`
+  );
+}
+
+/** Workspace-wide leads for an address (skip_if_in_workspace would turn an existing one into `uncertain`). */
+async function workspaceLeads(email: string): Promise<{ status: number; matches: InstantlyLeadRow[] }> {
+  const r = await instantlyRead("/api/v2/leads/list", { contacts: [email], limit: 10 });
+  const items = ((r.json as { items?: InstantlyLeadRow[] } | null)?.items ?? []).filter((l) => normalizeEmail(l.email ?? "") === email);
+  return { status: r.status, matches: items };
+}
+
+/**
+ * The sender's Instantly budget today: campaign emails sent (accounts/analytics/daily)
+ * against the account's daily_limit. Unknown is a stop, never "fine".
+ *
+ * Operator decision (Session 16): the gate applies to step 1 (the campaign
+ * enroll) only. A step >= 2 goes out via emails/reply, which Instantly does not
+ * cap by daily_limit: in Session 14 step 2 was accepted after 1/1 was used
+ * (GET /emails shows it) and analytics still reports sent=1 for that day. For
+ * a follow-up the numbers are printed and the send is not stopped — the
+ * engine's capacity ledger is then the only cap (06 §6).
+ */
+async function senderBudget(
+  accountId: string,
+  dailyLimit: number | null | undefined,
+  now: Date,
+  scope: "step1" | "follow-up",
+): Promise<boolean> {
+  const day = now.toISOString().slice(0, 10);
+  const q = new URLSearchParams({ start_date: day, end_date: day });
+  q.append("emails", DRILL_SENDER);
+  const r = await instantlyRead(`/api/v2/accounts/analytics/daily?${q.toString()}`);
+  const rows = Array.isArray(r.json) ? (r.json as Array<{ date?: string; email_account?: string; sent?: number }>) : null;
+  const mine = rows?.filter((x) => normalizeEmail(x.email_account ?? "") === DRILL_SENDER && (x.date ?? "").slice(0, 10) === day) ?? [];
+  const sentToday = rows === null ? null : mine.reduce((sum, x) => sum + (x.sent ?? 0), 0);
+  const engineDay = await ledger.getDay(accountId, ledgerDate(now));
+  console.log(
+    `sender budget ${day} (UTC date queried): instantly sent_today=${sentToday ?? "null"}` +
+      `${rows !== null && mine.length === 0 ? " (no row returned for this date)" : ""} · daily_limit=${dailyLimit ?? "null"} · analytics HTTP ${r.status}`,
+  );
+  console.log(
+    `  engine capacity_ledger ${ledgerDate(now)}: ` +
+      (engineDay ? `quota=${engineDay.quota} used=${engineDay.used} reserved=${engineDay.reserved} accepted=${engineDay.accepted}` : "no row"),
+  );
+  console.log("  caveat: the spec does not state the analytics date's timezone; emails/reply is treated as not capped by daily_limit (Session 14 evidence)");
+  if (scope === "follow-up") {
+    console.log("  not gated: a step >= 2 goes out via emails/reply, which daily_limit does not cap (Session 16 decision)");
+    return true;
+  }
+  if (sentToday === null || dailyLimit === null || dailyLimit === undefined) {
+    console.log("  BUDGET UNKNOWN — stop and ask before any write");
+    return false;
+  }
+  if (sentToday >= dailyLimit) {
+    console.log(`  BUDGET STOP (step 1): sender at daily limit (${sentToday} >= ${dailyLimit}) — no write`);
+    return false;
+  }
+  console.log(`  budget ok: ${dailyLimit - sentToday} left today`);
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Windows: engine (recipient tz) and the Instantly campaign schedule
@@ -266,20 +374,22 @@ async function check(): Promise<void> {
   const campaignLeft = campaignMinutesLeft(schedule, now);
   console.log(`  campaign schedule open now: ${campaignLeft > 0 ? `yes, ${campaignLeft} min left` : "NO"}`);
 
-  // Workspace-wide: skip_if_in_workspace would turn an existing lead into `uncertain`.
-  const res = await fetch(new URL("/api/v2/leads/list", INSTANTLY_BASE_URL), {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.INSTANTLY_API_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({ contacts: [DRILL_RECIPIENT], limit: 10 }),
-  });
-  const leadPage = (await res.json().catch(() => ({}))) as { items?: Array<{ id: string; email?: string; campaign?: string | null }> };
-  const matches = (leadPage.items ?? []).filter((l) => normalizeEmail(l.email ?? "") === DRILL_RECIPIENT);
-  console.log(
-    `instantly workspace leads for recipient: HTTP ${res.status} · ${matches.length} match(es)` +
-      (matches.length ? ` → ${matches.map((l) => `${s8(l.id)}@campaign ${s8(l.campaign ?? null)}`).join(", ")}` : ""),
-  );
+  // --check gates the start of the drill, i.e. the step-1 enroll.
+  const budgetOk = await senderBudget(account.id, liveAccount.daily_limit, now, "step1");
+
+  const current = await workspaceLeads(DRILL_RECIPIENT);
+  console.log(`instantly workspace leads for recipient ${DRILL_RECIPIENT}: HTTP ${current.status} · ${current.matches.length} match(es)`);
+  for (const l of current.matches) console.log(`  ${describeInstantlyLead(l)}`);
+  // stop_for_company: the docs do not say whether a gmail.com reply completes later gmail.com leads.
+  const previous = await workspaceLeads(PREVIOUS_DRILL_RECIPIENT);
+  console.log(`instantly leads for the previous drill address (read-only): HTTP ${previous.status} · ${previous.matches.length} match(es)`);
+  for (const l of previous.matches) console.log(`  ${describeInstantlyLead(l)}`);
+  const domainComplete = previous.matches.some((l) => l.status_summary?.domain_complete === true);
+  if (domainComplete) console.log("  FLAG: domain_complete=true on the previous drill lead — stop_for_company may block the alias");
 
   const { data: sup } = await baseDb.from("suppression_list").select("id").ilike("email", DRILL_RECIPIENT);
+  const { data: domainSup } = await baseDb.from("suppression_list").select("id").is("email", null).ilike("domain", "gmail.com");
+  console.log(`engine: gmail.com domain suppression rows=${(domainSup ?? []).length}`);
   const { data: others } = await baseDb.from("leads").select("id, state").ilike("email", DRILL_RECIPIENT);
   console.log(`engine: suppression rows=${(sup ?? []).length} · leads with recipient email=${(others ?? []).length}`);
   const existing = await drillLead().catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
@@ -294,8 +404,9 @@ async function check(): Promise<void> {
     console.log(`  ${r.tz.padEnd(20)} ${r.local.padEnd(10)} engine=${String(r.engine).padStart(3)} min · combined=${String(r.combined).padStart(3)} min`);
   }
   const best = rows[0]!;
+  if (!budgetOk) console.log("\nSTOP (step 1): sender budget is exhausted or unknown (above) — no write");
   if (best.combined >= MIN_DRILL_MINUTES) {
-    console.log(`\nPICK ${best.tz}: ${best.combined} min left (≥ ${MIN_DRILL_MINUTES})`);
+    console.log(`${budgetOk ? "\n" : ""}PICK ${best.tz}: ${best.combined} min left (≥ ${MIN_DRILL_MINUTES})${budgetOk ? "" : " — but budget STOP"}`);
     return;
   }
   console.log(`\nNO zone has ≥ ${MIN_DRILL_MINUTES} combined min now (best ${best.tz}: ${best.combined}).`);
@@ -323,7 +434,7 @@ async function fixture(): Promise<void> {
 
   const { data: company, error } = await baseDb
     .from("companies")
-    .insert({ name: "ZX DRILL S14", domain: DRILL_DOMAIN, segment: "drill", country: null, timezone: null })
+    .insert({ name: "ZX DRILL S14B", domain: DRILL_DOMAIN, segment: "drill", country: null, timezone: null })
     .select("id")
     .single();
   if (error || !company) throw new Error(`company: ${error?.message}`);
@@ -333,7 +444,7 @@ async function fixture(): Promise<void> {
     .insert({
       company_id: company.id,
       first_name: "Amir",
-      last_name: "Drill S14",
+      last_name: "Drill S14b",
       email: DRILL_RECIPIENT,
       email_status: "valid",
       email_verified_at: now,
@@ -387,7 +498,7 @@ async function touch(): Promise<void> {
       approval_hash: approvalHash(snapshot),
       approval_snapshot: snapshot as never,
       approved_at: new Date().toISOString(),
-      approved_by: "operator:drill-s14",
+      approved_by: "operator:drill-s14b",
     })
     .eq("id", row.id);
   if (approveError) throw new Error(`approve: ${approveError.message}`);
@@ -424,6 +535,9 @@ async function send(): Promise<void> {
   const campaign = campaignMinutesLeft(live.schedule, now);
   console.log(`gate: engine window (${lead.timezone}) ${engine} min left · campaign schedule ${campaign} min left · campaign status=${live.status}`);
   guard(engine >= MIN_SEND_MINUTES && campaign >= MIN_SEND_MINUTES, `both windows need ≥ ${MIN_SEND_MINUTES} min`);
+  const liveAccount = await instantly.getAccount(DRILL_SENDER);
+  const budgetOk = await senderBudget(account.id, liveAccount.daily_limit, now, t!.step_no === 1 ? "step1" : "follow-up");
+  guard(budgetOk, "sender budget exhausted or unknown for the step-1 enroll");
 
   const { data: otherJobs } = await (raw as unknown as SupabaseClient<DatabaseWithJobs>)
     .from("jobs")
@@ -491,17 +605,105 @@ async function status(): Promise<void> {
   }
   const { data: events } = await baseDb.from("lead_events").select("event, detail, created_at").eq("lead_id", lead.id).order("created_at");
   console.log(`lead_events: ${(events ?? []).map((e) => e.event).join(" → ")}`);
-  const { data: hooks } = await webhookDb
+  for (const h of await webhooksFor(DRILL_RECIPIENT, null)) console.log(describeWebhook(h));
+  // Attribution check (Session 16): events for the previous drill address since this fixture
+  // would mean Instantly tied the alias's mail to the old lead.
+  const stray = await webhooksFor(PREVIOUS_DRILL_RECIPIENT, lead.created_at);
+  console.log(`webhooks for the previous drill address since this fixture: ${stray.length}`);
+  for (const h of stray) console.log(`  ${describeWebhook(h)}`);
+}
+
+async function webhooksFor(email: string, since: string | null) {
+  let q = webhookDb
     .from("webhook_events")
     .select("id, event_type, processed, processing_error, payload, created_at")
     .eq("provider", "instantly")
-    .ilike("payload->>lead_email", DRILL_RECIPIENT)
+    .ilike("payload->>lead_email", email);
+  if (since) q = q.gte("created_at", since);
+  const { data, error } = await q.order("created_at");
+  if (error) throw new Error(`webhook_events: ${error.message}`);
+  return data ?? [];
+}
+
+function describeWebhook(h: { id: string; event_type: string | null; processed: boolean | null; processing_error: string | null; payload: unknown }): string {
+  const p = h.payload as Record<string, unknown>;
+  return (
+    `webhook ${s8(h.id)} ${h.event_type} processed=${h.processed} source=${p.source ?? "webhook"} lead_email=${p.lead_email ?? "—"} email_id=${p.email_id ?? "null"} ` +
+    `step=${p.step ?? "—"} campaign=${s8(p.campaign_id as string | null)} ts=${p.timestamp ?? "—"} is_auto_reply=${p.is_auto_reply ?? "—"} err=${h.processing_error ?? "—"}`
+  );
+}
+
+/** Read-only: the stored approval hash vs the one preflight recomputes before the send. */
+async function verifyHash(): Promise<void> {
+  const touchId = value("--verify-hash");
+  const { lead } = await requireDrillLead();
+  const account = await sender();
+  const t = (await drillTouches(lead.id)).find((x) => x.id === touchId);
+  guard(Boolean(t), "touch is not a drill touch");
+  // Exactly the touch fields send/core.ts buildContext hands preflight (claim_ledger included, 09 §U6b).
+  const snapshot = buildApprovalSnapshot(
+    {
+      id: t!.id,
+      step_no: t!.step_no,
+      channel: t!.channel,
+      subject: t!.subject,
+      body: t!.body,
+      prompt_version: t!.prompt_version,
+      claim_ledger: t!.claim_ledger,
+    },
+    { id: lead.id, email: lead.email },
+    account,
+  );
+  const recomputed = approvalHash(snapshot);
+  console.log(`touch ${s8(t!.id)} step=${t!.step_no} status=${t!.status} claim_ledger=${t!.claim_ledger === null ? "null" : "set"}`);
+  console.log(`stored     ${t!.approval_hash ?? "null"}`);
+  console.log(`recomputed ${recomputed}`);
+  console.log(`match=${t!.approval_hash === recomputed}`);
+}
+
+/** Read-only: Instantly's view of the drill enroll (stop_for_company would show as Completed/Skipped). */
+async function leadStatus(): Promise<void> {
+  const { lead } = await requireDrillLead();
+  const { data: outbox } = await sendDb.from("outbox").select("id, operation, provider_lead_id").eq("lead_id", lead.id).not("provider_lead_id", "is", null);
+  guard((outbox ?? []).length > 0, "no enroll with a provider_lead_id yet");
+  for (const o of outbox ?? []) {
+    const r = await instantlyRead(`/api/v2/leads/${encodeURIComponent(o.provider_lead_id!)}`);
+    const l = r.json as InstantlyLeadRow | null;
+    if (!l?.id) {
+      console.log(`outbox ${s8(o.id)} lead ${o.provider_lead_id}: HTTP ${r.status}, no lead body`);
+      continue;
+    }
+    console.log(`outbox ${s8(o.id)} ${o.operation} → HTTP ${r.status} ${describeInstantlyLead(l)}`);
+    const ranAStep = Boolean(l.status_summary?.lastStep);
+    if ((l.status === 3 || l.status === -3) && !ranAStep) console.log("  BLOCKED: completed/skipped before any step ran — stop and ask");
+    else if (l.status_summary?.domain_complete) console.log("  FLAG: domain_complete=true — stop and ask");
+    else console.log(`  ok: ${ranAStep ? "a step has run" : "active, no step run yet"}`);
+  }
+}
+
+/** Read-only: who each drill email was actually addressed to (the Session 16 PASS/STOP evidence). */
+async function emails(): Promise<void> {
+  const { lead } = await requireDrillLead();
+  const { data: outbox } = await sendDb
+    .from("outbox")
+    .select("id, operation, provider_email_id, created_at")
+    .eq("lead_id", lead.id)
+    .not("provider_email_id", "is", null)
     .order("created_at");
-  for (const h of hooks ?? []) {
-    const p = h.payload as Record<string, unknown>;
+  guard((outbox ?? []).length > 0, "no drill email with a provider_email_id yet");
+  for (const o of outbox ?? []) {
+    const r = await instantlyRead(`/api/v2/emails/${encodeURIComponent(o.provider_email_id!)}`);
+    const e = (r.json ?? {}) as Record<string, unknown>;
+    const to = addressList(e.to_address_email_list as string | null);
+    const cc = addressList(e.cc_address_email_list as string | null);
+    const bcc = addressList(e.bcc_address_email_list as string | null);
+    console.log(`\n${o.operation} · GET /api/v2/emails/${o.provider_email_id} → HTTP ${r.status}`);
+    console.log(`  from=${e.from_address_email ?? "—"} eaccount=${e.eaccount ?? "—"} lead=${e.lead ?? "—"}`);
+    console.log(`  to="${e.to_address_email_list ?? ""}" cc="${e.cc_address_email_list ?? ""}" bcc="${e.bcc_address_email_list ?? ""}"`);
+    console.log(`  thread_id=${e.thread_id ?? "—"} message_id=${e.message_id ?? "—"} ue_type=${e.ue_type ?? "—"} step=${e.step ?? "—"} subject="${e.subject ?? ""}"`);
     console.log(
-      `webhook ${s8(h.id)} ${h.event_type} processed=${h.processed} source=${p.source ?? "webhook"} email_id=${p.email_id ?? "null"} ` +
-        `step=${p.step ?? "—"} campaign=${s8(p.campaign_id as string | null)} ts=${p.timestamp ?? "—"} is_auto_reply=${p.is_auto_reply ?? "—"} err=${h.processing_error ?? "—"}`,
+      `  verdict: lead in To: ${to.includes(DRILL_RECIPIENT) ? "y" : "n"} · ${DRILL_SENDER} in To/Cc: ${to.includes(DRILL_SENDER) || cc.includes(DRILL_SENDER) ? "y" : "n"}` +
+        ` · in Bcc: ${bcc.includes(DRILL_SENDER) ? "y" : "n"}`,
     );
   }
 }
@@ -578,9 +780,12 @@ async function main(): Promise<void> {
   if (args.includes("--send")) return send();
   if (args.includes("--reconcile")) return reconcile();
   if (args.includes("--status")) return status();
+  if (args.includes("--verify-hash")) return verifyHash();
+  if (args.includes("--lead-status")) return leadStatus();
+  if (args.includes("--emails")) return emails();
   if (args.includes("--poll")) return poll();
   if (args.includes("--cancel-jobs")) return cancelJobs();
-  console.log("usage: --check | --fixture --tz <IANA> | --touch 1|2 | --activate | --pause | --send <touchId> | --reconcile | --status | --poll | --cancel-jobs");
+  console.log("usage: --check | --fixture --tz <IANA> | --touch 1|2 | --activate | --pause | --send <touchId> | --reconcile | --status | --verify-hash <touchId> | --lead-status | --emails | --poll | --cancel-jobs");
 }
 
 main().catch((error: unknown) => {
