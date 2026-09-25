@@ -56,6 +56,8 @@ U5 alone makes the engine *able* to send. It is not *safe* to send until U6's st
 > **2026-09-25 (Session 13, operator decision):** U6 makes the engine *safe to stop*. It does not make a draft *true*. **No prospect send happens until U6b (claim guard) passes.** The U6 drill (operator-owned recipient) is unaffected.
 >
 > **2026-09-25 (Session 15):** U6b passed locally (87/87 + 45/45, one live writer call). The first real prospect send now also waits for **UR** (research sources via Apify, operator decision), plus warmup + inbox placement (Session 14) and fresh evidence.
+>
+> **2026-09-25 (Sessions 16–17):** 🚩 moves to the **end of U6c** (Instantly-owned follow-up steps), ≈ cumulative session 22. The U6 re-test showed that `emails/reply` follow-ups keep our own mailbox in To.
 
 ### 🛒 INSTANTLY PURCHASE TRIGGER — start of **U2** · cumulative session 3 · ≈ day 7
 
@@ -322,7 +324,7 @@ Only after Part 2 may `06-build-progress.md` say **verified with provider**.
 - **Decision (operator, `06` §5):** follow-ups move to **Instantly-owned sequence steps**, every text approved up front. `emails/reply` stays only for answering a RECEIVED email (U7). The post-send check will fail closed when any of our own mailboxes is in To/Cc. The reply step was skipped (the freeze was already verified live in Session 14).
 - **Session 4 done. 🚩 not reached.** The `06` §6 ⛔ row stays open until U6c passes a live drill.
 
-**Next: U6c — Instantly-owned follow-up steps.** Step ≥ 2 goes out as an Instantly campaign sequence step instead of `emails/reply`; all step texts approved up front and bound to the approval; the post-send check tightened (own mailboxes in To/Cc → fail closed). Scope, DoD and effort to be planned in its own session (plan mode). 🚩 moves to the end of U6c.
+**Next: U6c — Instantly-owned follow-up steps** (§U6c below, planned in Session 17). Step ≥ 2 goes out as an Instantly campaign sequence step instead of `emails/reply`. All step texts are approved up front and bound to the approval. The post-send check is tightened: any own mailbox in To/Cc → fail closed. 🚩 moves to the end of U6c.
 
 ---
 
@@ -398,6 +400,182 @@ All existing guard, draft and approval tests stay green. A live `test-draft --li
 - **Tests:** `pnpm test:claims` 45/45, `pnpm test:claim-guard` 87/87, live `test-draft --limit 1` 39/39.
 - **Deviations:** the DoD's "$1.2M" case runs as the audit's Gottesman pattern (in the evidence paraphrase, not on the page); a figure in no evidence at all is parked by the generic guard before the claim guard. Interim gaps (token-based, not semantic) are listed in `06` §6.
 - **Still blocking prospect sends:** the U6 re-test, warmup + inbox placement, stale evidence (re-crawl is a costed decision), and **UR**.
+
+---
+
+#### U6c — Instantly-owned follow-up steps  🚩 **FIRST SEND READY moves here** *(planned Session 17, 2026-09-25)*
+
+**Why (operator decision, Session 16).** `POST /api/v2/emails/reply` to our own step 1 always keeps our mailbox in To. The spec has no `to` field, and `additional_recipients` adds to the default recipient; it never replaces it. This was proven live twice (Sessions 14 and 16). Steps ≥ 2 therefore become **Instantly campaign sequence steps**, with every step's text approved up front. `emails/reply` stays only for answering a **received** email (U7). Brief §10 allows this: "If Instantly/Heyreach owns a provider campaign sequence, the engine enrolls once and coordinates it; it must not independently send the same follow-ups." Brief §8 adds: "A fully reviewed sequence can execute within its approved scope."
+
+**Provider facts (Step 0, official docs read 2026-09-25; quotes in `07` Session 17).**
+- `sequences[0].steps[] = {type:"email", delay, delay_unit?, variants[{subject, body}]}`. `delay_unit` ∈ `minutes|hours|days` (default days). The spec sets no minimum; help discourages 0.
+- The delay counts from when the previous step was sent, per lead, and uses calendar days.
+- **Threading:** help says an empty follow-up subject "carr[ies] over the subject line from the previous step" (same thread). The spec marks `subject` as required, so **whether the API accepts `""` is undocumented** → S18 spike.
+- **Who a step is addressed to is undocumented** → S18 spike.
+- A missing per-lead variable is replaced "with an empty string", and the step is **not** documented as skipped → **an empty `{{zx_body_N}}` sends a blank email.**
+- Adding steps to a campaign: "previously completed leads will be reactivated". Campaign `5392fcac` holds 2 Completed drill leads.
+- The schedule timezone is **per campaign only**, from a fixed enum (no `America/New_York`, no `UTC`). The Lead has no timezone field.
+- Stopping one lead: `DELETE /api/v2/leads/{id}` (timing undocumented); block list; `update-interest-status` (202, asynchronous); `stop_on_reply`. There is no single-lead pause.
+- `email_sent` webhook: `step` is 1-indexed, plus `variant` and `email_id` ("if available").
+- `text_only` removes HTML "for all steps".
+- Follow-ups count against `daily_limit` and are prioritised over new leads by default. `prioritize_new_leads` needs Hypergrowth.
+
+**Operator decisions (Session 17).**
+- **Drafting: hybrid.** The writer writes step 1 and step 2 in one call; step 3 is a fixed, versioned "honest close" template. `attach_pdf` is dropped.
+- **Timing: 7-day multiples, days 0/7/14.** The 24/7 `Europe/Helsinki` schedule stays unchanged. Each follow-up lands on the same weekday and local time as step 1, which the engine placed inside the recipient's window, for any timezone. The sequence setting refuses any production delay that is not a whole multiple of 7 days. Caveats: ±1 h across DST; `email_gap`/`random_wait_max` drift, negligible at current volume.
+- **The drill uses a separate campaign** `zx-drill-s17-amir-zyndixhq` (same mailbox and settings, delays in minutes). The production campaigns are PATCHed only after the drill passes.
+- **Sender pause: pause the campaign first, then DELETE every in-flight lead of that sender.** Their follow-ups are killed and the leads go to `manual_hold`. A resume never silently continues old sequences.
+- **Operator additions:**
+  - an **S18 live spike** before any engine code;
+  - **per-step evidence freshness**: a step's claims pass only if evidence age at approval + that step's cumulative delay ≤ `evidence_policy.max_age_days`. So step 2 at +7 d needs evidence ≤ 23 days old at 30 max. A template step that cites no evidence is exempt.
+
+**Scope.**
+1. **Drafting.**
+   - The writer output becomes `{steps:[{step_no, subject?, body, claims}]}` for steps 1–2 (`writer_prompt_email` v10). Step 3 comes from `followup_templates` v1.
+   - The sequence comes from a new setting `email_sequence` v1: `{steps:[{step_no, delay, delay_unit, source: writer|template}]}`.
+   - The claim guard runs on **every** step: step 2 in full; step 3 in template mode (no `no_cited_evidence` requirement, but fact tokens, timing, asset claims and offers outside the approved line are refused). Per-step freshness applies.
+   - A wrong step count → `sequence_shape_invalid` → retry once → hold. A guard failure names the step (`claim_guard_hold {step, reasons}`).
+   - All 3 touches are inserted `pending_approval`, and one Telegram card is sent.
+2. **Approval.**
+   - One approval covers the sequence. The `SequenceApprovalSnapshot` holds recipient, sender, signature, campaign id, sequence setting version and, per step, `{touch_id, step_no, subject, composed body, delay, delay_unit, claim_ledger}`.
+   - One hash is written on every step's touch, fenced on all being `pending_approval`.
+   - The card shows every step ("Step 2 · +7 days · same thread") with its claims.
+   - `/edit N` edits one step, re-runs the guard and re-hashes the sequence.
+   - Freshness is re-checked at the approval instant.
+3. **Enrollment (step 1 only).**
+   - Enrollment happens inside the recipient's window, into the bound sender's campaign, as today.
+   - `custom_variables = {zx_subject, zx_body, zx_body_2, zx_body_3, zx_touch_id}`.
+   - Campaign steps: step 1 `{{zx_subject}}`/`{{zx_body}}`; steps 2–3 subject `""` (the fallback is whatever S18 proves) and `{{zx_body_N}}`.
+   - New preflight refusals:
+     - `sequence_incomplete`: a missing or killed step, or an empty/whitespace body. This is the blank-email guard.
+     - `campaign_sequence_drift`: the live campaign's steps ≠ the approved sequence setting.
+     - `provider_daily_limit` (deferrable): see 5.
+   - Texts are frozen at enroll: no `PATCH` of lead variables. A change means stop and redraft.
+4. **Stops.**
+   - `stopSequence(leadId, reason)` (`lib/sending/stop.ts`): kill the unsent follow-ups → `DELETE /leads/{id}` → confirm with `GET` 404 / `leads/list` 0 → enrollment `removed`.
+   - A 5xx or timeout on DELETE is uncertain: GET first, never assume. A failure after one retry → escalated `stop_failed` + that sender's campaign paused.
+   - Called on: reply (beside `stop_on_reply`), unsubscribe/complaint (+ block list), bounce, manual hold, suppression, booking (U8 hook), and sender pause (pause, then delete all).
+   - Reconcile sweep `reconcile.instantly_leads`:
+     - a stopped engine lead still present in Instantly → delete + an escalated `stopped_lead_active`;
+     - an Active Instantly lead unknown to the engine in a `zx-sender-*` campaign → `unknown_active_lead` (report only).
+5. **Tracking and capacity.**
+   - `email_sent` step N → touch N `sent` (`provider_message_id` = `email_id`). No `step` → escalated `sent_step_unknown`, no touch change.
+   - New RPC `record_provider_send` counts each follow-up in the ledger exactly once (key `provider_sent:<email_id>`).
+   - Step-1 preflight reads the account `daily_limit` and today's `sent`, adds the follow-ups due today, and refuses `provider_daily_limit` when sent + due + 1 > limit. The engine quota = min(ramp, `daily_limit`). This closes the two open `06` §6 rows (not synced; `emails/reply` not capped).
+6. **Post-send recipient check on every `email_sent`** (step 1 included), via `GET /emails/{id}` (new adapter `getEmail`):
+   - Pass only when To = exactly [lead] and Cc/Bcc are empty.
+   - **Any own address** in To/Cc → `recipient_misaddressed`: every `send_accounts.email`, and any `zyndix.com` / `zyndixhq.com` / `getzyndix.com` address or subdomain. The consequences: touch `failed` (capacity counted), escalated exception + alert, lead `manual_hold`, `stopSequence`, and the sender's campaign paused.
+7. **The `emails/reply` path for step ≥ 2 is removed.**
+   - `runSendJob` refuses `step_no > 1` with `followup_engine_send_disabled` before any reservation.
+   - `replyToEmail` leaves the send-stage deps type; it stays in the adapter for U7.
+   - The anchor and "Re:" preflight checks are retired.
+8. **Campaign tooling.**
+   - Adapter: `updateCampaign` (PATCH), `getLead`, `getEmail`.
+   - `instantly-sender-campaigns.ts`: `diffCampaign` learns the 3-step shape, and a new `--update` **refuses unless the campaign is paused and holds 0 leads** (`campaign_not_paused` / `campaign_has_leads`, the reactivation risk).
+
+**Touches.**
+- Migration **`0009d_instantly_enrollments.sql`** (additive; `0010` stays reserved for U8):
+  - table `instantly_enrollments` (`lead_id`, `send_account_id`, `campaign_id`, `provider_lead_id`, `sequence_hash`, `steps_total`, `state` active|stopping|removed|completed|stop_failed, `stop_reason`, `removed_at`, `last_checked_at`; RLS + the `updated_at` trigger);
+  - function `record_provider_send`.
+  - Exceptions need no migration (`kind` is unconstrained).
+- Lib: `stages/draft/{core,claims,claims-context}.ts`, `validation/llm.ts`, `sending/{approval,preflight,stop}.ts`, `stages/send/core.ts`, `webhooks/instantly.ts`, `reconcile/core.ts`, `integrations/instantly.ts`, `telegram/handler.ts`, `integrations/telegram-approval.ts`.
+- Settings: `writer_prompt_email` v10, `email_sequence` v1, `followup_templates` v1.
+- Scripts: `spike-u6c.ts` (S18), `instantly-sender-campaigns.ts`, a drill script for S22.
+
+**Provider.** Instantly (+ Anthropic for the writer). **Completable with mocks: yes**, except the provider mechanics, which S18 proves first.
+
+**S18 — live spike, before any engine code** (operator addition). A guarded script (`scripts/spike-u6c.ts`) with no engine stages. Hard-checked constants: recipient `ebadiamirhoseineng+s17@gmail.com`, sender `amir@zyndixhq.com`, campaign `zx-drill-s17-amir-zyndixhq`. **Every Instantly write is asked for separately.**
+- `--check` (read-only): the sender's `daily_limit` vs today's `sent`, **ending with the value to set in the UI (≥ sent_today + 3)**; schedule open now; no workspace lead for the alias; no campaign with the drill name; webhook count.
+- `--create`: the campaign, paused.
+  - Settings: the `zx-sender` settings (`text_only` and `first_email_text_only` true, tracking off, `stop_on_reply`, `stop_for_company`, `insert_unsubscribe_header`, 24/7 Helsinki).
+  - 3 fixed literal steps: step 1 subject "Zyndix engine drill S17"; steps 2 and 3 with an **empty subject**, delays 5 min / 5 min (`delay_unit: minutes`).
+  - It records whether the empty subject is accepted. On a 400 → stop and propose the fallback.
+- Then: webhook create/test via a quick tunnel → activate → `leads/add` of the alias → `--watch`. When step 2's `email_sent` arrives, the script prompts at once for `--delete-lead`, because step 3 is due only 5 min later.
+- **Verdicts:**
+  1. the empty subject is accepted;
+  2. step 2 `GET /emails/{id}`: To = the alias only, Cc and Bcc empty, no own address;
+  3. same `thread_id` as step 1;
+  4. Gmail raw: `In-Reply-To`/`References` = step 1's Message-ID, one conversation, **text/plain only**, and the subject form;
+  5. `DELETE` → `GET /leads/{id}` 404;
+  6. past step 3's due time + 15 min: no step 3 in `GET /emails` or Gmail;
+  7. the step-1 and step-2 emails are still readable after the delete (U7 needs this).
+- If step 3 goes out before the delete, that is a timing finding: record it, and re-run only the stop part with a longer delay, after asking.
+- Cleanup: pause, delete the webhook, keep the campaign (paused) for S22. The operator sets `daily_limit` back to 1.
+- **Any failed verdict → stop and bring options before S19.**
+
+**Tests / DoD** (mocked Instantly and writer, synthetic fixtures, exact reasons):
+
+| # | Case | Expected |
+|---|---|---|
+| D1 | writer returns steps 1–2 clean + template step 3 | 3 touches `pending_approval`, 1 card |
+| D2 | step 2 says "9pm on a Saturday" | `invented_timing` (step 2) → `manual_hold`, 0 touches |
+| D3 | step 2 offer outside the approved line | `unapproved_offer` (step 2) |
+| D4 | wrong step count / malformed | `sequence_shape_invalid` → retry → hold |
+| F1 | evidence 23 d at approval, step 2 at +7 d | passes (30 ≤ 30) |
+| F2 | evidence 24 d at approval, step 2 at +7 d | `stale_evidence` "step 2: 24d + 7d > 30d", approval refused |
+| F3 | evidence 24 d, step-3 template cites no evidence | step 3 not refused; step 2 refused (F2) |
+| F4 | 22 d at draft, 24 d at approval | refused at approval (`stale_evidence`, step 2) |
+| A1 | approve | all 3 `approved`, one shared hash; snapshot binds every subject, body, delay, sender, signature |
+| A2 | `/edit 2` adds "Beaumont" | `uncovered_fact`, "Edit not applied" |
+| A3 | valid `/edit 2` | new hash; the old one stale |
+| A4 | delay setting or signature changed after approval | `stale_approval` |
+| E1 | enroll | `leads/add` ×1, every `zx_body_N` non-empty, bound campaign, in window |
+| E2 | a follow-up touch killed or missing | `sequence_incomplete`, 0 adapter calls |
+| E3 | empty or whitespace step body | `sequence_incomplete` |
+| E4 | live campaign steps or delays differ | `campaign_sequence_drift`, 0 enroll |
+| E5 | sent + due follow-ups ≥ `daily_limit` | `provider_daily_limit`, deferred |
+| E6 | a step-2 send job | `followup_engine_send_disabled`, 0 calls, 0 reservations; `stages/send/**` never references `replyToEmail` |
+| T1 | `email_sent` step 2 (+ redelivery) | touch 2 `sent`; ledger +1 exactly once |
+| T2 | `email_sent` without `step` | `sent_step_unknown` escalated, no touch change |
+| T3 | To = [own mailbox, lead] / own-domain Cc / lead missing | `recipient_misaddressed` + hold + delete + campaign paused |
+| S1–S7 | reply / unsubscribe / bounce / manual hold / suppression / sender pause / booking state | `DELETE` ×1, enrollment `removed`, follow-ups `killed`, 0 Anthropic |
+| S8 | `DELETE` 500 | `stop_failed` escalated + sender campaign paused |
+| S9 | `DELETE` timeout, then GET 404 | `removed`, no second DELETE |
+| R1 | engine `replied`, Instantly still Active | sweep deletes + `stopped_lead_active` |
+| R2 | unknown Active lead in a `zx-sender` campaign | `unknown_active_lead`, no mutation |
+| C1 | `--update` with leads > 0 or not paused | `campaign_has_leads` / `campaign_not_paused` |
+
+- Existing suites green: `test:send` (step-2 reply cases rewritten to E6), `test:webhooks`, `test:traversal`, `test:claim-guard`, `test:claims`, `test:sending`, `test:instantly`, `test:jobs`, `test:scheduler`, `tsc`, `build`.
+- One live writer v10 call on a synthetic fixture (≈ $0.01–0.02).
+
+**S22 — full engine drill.** New lead on the alias, tag `drill:s17`.
+- The drill campaign is PATCHed to the variable templates (paused, 0 leads): step 2 +5 min, step 3 +20 min.
+- The run:
+  1. step 1 enrolled in an open window via the real send stage;
+  2. recipient check passes;
+  3. Instantly sends step 2 → touch 2 `sent`, and the ledger counts it;
+  4. To = the lead only, same `thread_id`, Gmail raw `In-Reply-To` = step 1, text/plain only;
+  5. manual hold → `DELETE` → 404;
+  6. past step 3's due time + 15 min: no step 3.
+- **Pass closes the `06` §6 ⛔ row and reaches 🚩.**
+- Then, each write asked for separately:
+  - `DELETE` the 2 Completed drill leads in `5392fcac` (`01a0d900…`, `01a0d9d8…`);
+  - PATCH each of the 4 `zx-sender-*` campaigns to the 3-step 0/7/14 sequence, **one at a time**, paused and holding 0 leads, each followed by `--verify`.
+- Prospect sends still wait for warmup + inbox placement, fresh evidence, and UR.
+
+**Live Instantly writes, each one asked for separately.**
+- S18: create the drill campaign · webhook create/test · activate · `leads/add` (alias) · `DELETE` lead · pause · webhook delete.
+- S22: PATCH the drill campaign · webhook create/test · activate · engine enroll · engine `DELETE` · pause · webhook delete · the 2 prod-prep lead deletes · 4 prod PATCHes.
+- Operator UI: amir@zyndixhq.com `daily_limit` for each drill, then back to 1.
+
+**Effort.** 1 planning session (S17) + **5 sessions**:
+- S18: spike;
+- S19: migration, settings, writer v10, per-step guard + freshness, approval, card and edit;
+- S20: enroll variables, preflight, reply path disabled, adapter + campaign `--update`;
+- S21: tracking, recipient check, `stopSequence`, reconcile sweep;
+- S22: engine drill + prod PATCHes.
+
+S20 and S21 may merge. **🚩 moves to ≈ cumulative session 22.**
+
+**Knock-on.**
+- U9 gets simpler: it enqueues step-1 sends only, plus crons for the recipient-check, stop-sweep, stale-stop and reply-poll jobs.
+- U7 keeps `emails/reply` for received mail and reuses the recipient check.
+- U8 calls `stopSequence` on booking.
+- U14: per-campaign cadences mean one Instantly campaign per (sender × engine campaign × sequence).
+- UR is unaffected, except that writer v10 is revised when new evidence types land.
+- UR, U7, UD, U8 and U9 all shift by about 5 sessions.
+
+**Depends on.** U6, U6b.
 
 ---
 
@@ -866,6 +1044,9 @@ Carried from `05-build-plan.md` §4, still valid:
 - **Exclude drill leads everywhere** (Session 14): `segment='drill'` companies (lead `7fd018fa`, `drill:s14`; lead `387b413d`, `drill:s14b`, Session 16) must be excluded from U7 classification, digests, Attio sync and any lead listing.
 - **Preflight does not re-run the claim guard** (Session 15): the approval hash binds the ledger, and the guard ran at approval time. If evidence ages past `evidence_policy` between approval and send, the send still goes. Decide at U9 whether preflight should re-check freshness.
 - **Claim guard interim gaps** (Session 15): token-based, not semantic; lowercase place names; number words below three; three contradiction attributes only (`06` §6). Closed by U15/U17.
+- **Sequence completion state** (Session 17): after the last Instantly step, `campaign_completed_for_lead_without_reply` could move a lead `sent → no_reply` (→ `sequence_done`). U6c records the event only. Decide the transition at U7/U9.
+- **Per-campaign cadences need one Instantly campaign per (sender × engine campaign × sequence)** (Session 17). Today there is one campaign per sender. U14 must design the mapping and the migration of `send_accounts.instantly_campaign_id`.
+- **`GET /emails` `step` format `0_0_0` is undocumented** (Session 17). Use the webhook's 1-indexed `step`; confirm the mapping in the S18 spike.
 - **Durable webhook endpoint** (Session 14): quick tunnels drop; the next live drill should probe the tunnel before each provider event, and U9's deploy URL replaces them.
 
 ---
@@ -880,7 +1061,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U4 | Instantly adapter | 4 | 2 | Instantly | partial | U2 |
 | U5 | Send stage, preflight, guards | 4 | 3 | Instantly | yes | U3, U4 |
 | **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 4 (re-test done Session 16 → STOP; 🚩 moves to U6c) | Instantly | yes | U2, U5 |
-| **U6c** | **Instantly-owned follow-up steps** 🚩 — next (Session 16 decision) | 4 | to plan | Instantly | yes | U6 |
+| **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; **S18 live spike next** | 4 | 1 plan + 5 (S18 spike · S19–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven by the S18 spike) | U6, U6b |
 | **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends — ✅ tested locally (Session 15) | 4 | 1 | Anthropic | yes | U6 |
 | U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
 | **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |
@@ -902,7 +1083,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U22 | Dashboard pass, e2e, chaos, red-team | 6 | 3 | all, mocked | yes | U21 |
 | U23 | Fresh-project migrations, handoff | 6 | 2 | all | **no** | U22 |
 
-**Totals:** 24 units, **57 sessions ≈ 19 weeks** at 3 sessions/week. *UR (added 2026-09-25) is not yet in the totals; its sessions are estimated at its planning session.*
+**Totals:** 24 units, **57 sessions ≈ 19 weeks** at 3 sessions/week. *UR (added 2026-09-25) is not yet in the totals; its sessions are estimated at its planning session.* *Not yet folded in either: U6c (Session 17 plan) = 1 planning + 5 sessions, and U6 ran 4 sessions against the 3 planned. So the first-send block is ≈ +7 sessions against the figures here, and 🚩 sits at ≈ cumulative session 22.*
 Phase 1 = 4 · first-send block (U3–U9 + UD) = 18 · Knowledge = 11 · Matching = 9 · Integrations/commercial = 12 · Verification = 5.
 
 UD adds 2 sessions after U7. It therefore does **not** move either of the two milestones above it — 🛒 at U2 and 🚩 at U6 are unaffected — and pushes everything below it by two sessions.
@@ -912,4 +1093,4 @@ UD adds 2 sessions after U7. It therefore does **not** move either of the two mi
 🚩 **FIRST SEND READY at the end of U6** — cumulative session 14, ≈ week 4.7 · **first *prospect* send additionally requires U6b** (+1 session, 2026-09-25; ✅ tested locally Session 15) **and UR** (research sources, operator decision Session 15), plus warmup + inbox placement (Session 14)
 ⭐ central acceptance criterion satisfied at **U16–U17** — cumulative session 40, ≈ week 13.3 *(was session 38 / week 12.7 before UD)* · **+2 sessions from 2026-09-25** (U6b +1, U17 +1): cumulative session ≈ 42
 
-**Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009`, `0009b` (U6: send prereqs, exceptions) · `0009c` (U6b: claim ledger) · `0010` (U8) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.
+**Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009`, `0009b` (U6: send prereqs, exceptions) · `0009c` (U6b: claim ledger) · `0009d` (U6c: Instantly enrollments + `record_provider_send`) · `0010` (U8) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.

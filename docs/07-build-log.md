@@ -58,6 +58,92 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-25 — Session 17 — U6c planned: follow-ups become Instantly-owned sequence steps (docs only)
+
+**Step:** U6c, planning session (`09` §U6c), on `main`. Plan mode.
+- Operator decisions were asked in the session.
+- The operator added two changes to the plan before approving it: an S18 live spike before any engine code, and per-step evidence freshness.
+
+**Status at end:** 🟦 **planned.** No code, no live writes, no sends, no Anthropic calls. The ⛔ row in `06` §6 stays open; 🚩 not reached.
+
+**Did**
+- **Step 0: official docs, read-only.** Sources: the OpenAPI spec (`https://api.instantly.ai/openapi/api_v2.json`, read 2026-09-25) and `help.instantly.ai`. No authenticated call was made.
+  - **a) Steps and delay.**
+    - `sequences`: "only the first element is used".
+    - `delay`: "The delay value before sending the NEXT email. The unit is determined by the delay_unit field (defaults to days)"; `delay_unit` ∈ `minutes|hours|days`. The spec sets no minimum.
+    - Help (`7916860`): "We recommend not setting this value to 0"; "The wait time counts from when the previous step was sent … applied per lead"; "counts all calendar days (including weekends and non-sending days)".
+  - **a) Threading.**
+    - Help (`7914807`): "Leave the subject line of your follow-up steps empty to automatically carry over the subject line from the previous step … If the subject line differs … new thread."
+    - The spec marks `subject` required, so **an empty subject via the API is undocumented**.
+    - **Who a step is addressed to is undocumented.**
+  - **a) Adding steps.** Help (`13924383`): "Always pause your campaign before adding new steps … previously completed leads will be reactivated."
+  - **b) Variables.**
+    - `custom_variables` values are string/number/boolean/null; "We do NOT allow objects or arrays".
+    - Help: "When a mail merge variable isn't available for a lead, we replace it with an empty string." Skipping the step is not documented, so an empty `{{zx_body_N}}` means **a blank email**.
+    - Whether a `PATCH` of lead variables affects unsent steps is undocumented.
+  - **c) Timezone.**
+    - `campaign_schedule.schedules[].timezone` is a per-campaign, fixed enum of about 100 zones. `America/New_York` and `UTC` are absent; `America/Chicago` and `America/Detroit` are present.
+    - The Lead has no timezone field. Help (`6573695`) advises separate campaigns per timezone.
+  - **d) Stopping one lead.**
+    - `DELETE /api/v2/leads/{id}` (timing undocumented).
+    - Block list: "checked … throughout ongoing campaigns".
+    - `POST /leads/update-interest-status` returns **202** (asynchronous).
+    - `stop_on_reply`. No single-lead pause endpoint.
+    - Lead `status` 1 Active / 2 Paused / 3 Completed / -1 Bounced / -2 Unsubscribed / -3 Skipped.
+    - Help: after a pause or update, "typically a 10–15 minute delay before sending resumes".
+  - **e) Webhook step.** `email_sent` has `"step": 1 // Step number in the campaign (starting at 1)`, `variant` (from 1) and `email_id` ("if available"). The `GET /emails` `0_0_0` format is undocumented.
+  - **f) Text-only.** Help (`6222396`): text-only = "Remove the HTML styling for all steps"; `first_email_text_only` = the first email only.
+  - **g) Daily limits.** Help (`6759494`): "By default, Instantly prioritizes follow-ups over new leads". Follow-ups count against `daily_limit`. `prioritize_new_leads` is Hypergrowth only.
+- **Code read** (read-only map):
+  - **nothing in the engine creates step ≥ 2 touches**; only `test-u5-send.ts` and `drill-u6.ts` do;
+  - `runDraftStage` uses only `cadence_default` step 1;
+  - step ≥ 2 = `replyToEmail` at `stages/send/core.ts:644` with the lead-only misaddressed check at `:656`;
+  - Telegram approve/edit handles one touch;
+  - `handleSent` ignores `step`;
+  - `deleteLead` exists and is never used;
+  - no `updateCampaign`/`getLead`/`getEmail` in the adapter;
+  - `diffCampaign` enforces one step.
+- **Plan written** into `09` §U6c: scope, a 27-row DoD table (33 cases) with exact reasons, the S18 spike, the S22 engine drill, the live-write list, effort and knock-on effects.
+  - Also updated: the `09` summary row, the migration numbering (`0009d`), the 🚩 note, and 3 backlog items.
+
+**Files touched**
+- `docs/09-build-plan-v2.md`: §U6c (new); the U6 "Next" line; the §2 🚩 note; the §5 backlog (+3); the §6 summary row, totals note and migration numbering.
+- `docs/06-build-progress.md`: the U6c row → planned; §5 +10 rows (4 operator decisions, 2 operator additions, 4 design rules); §6 +2 open rows (completed-lead reactivation risk in `5392fcac`; unproven provider mechanics → S18).
+- `docs/07-build-log.md`: this entry.
+
+**Verification**
+```
+$ git diff --stat   (before commit)
+ docs/06-build-progress.md |  16 +++-
+ docs/07-build-log.md      |  85 +++++++++++++++++++++
+ docs/09-build-plan-v2.md  | 189 +++++++++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 284 insertions(+), 6 deletions(-)
+```
+Result: docs only. No code, test, migration or settings change, so no test run was needed.
+
+**Decisions** (full rows in `06` §5)
+- **Drafting is hybrid:** the writer writes steps 1–2; step 3 is a fixed "honest close" template; `attach_pdf` is dropped. Reason: step 2 stays evidence-specific and the close carries no claim risk.
+- **Delays are whole multiples of 7 days (0/7/14) on the unchanged 24/7 schedule.** Reason: Instantly has no per-lead timezone, and 7-day delays keep each follow-up on step 1's in-window weekday and local time.
+- **The drill uses a separate campaign `zx-drill-s17-amir-zyndixhq`.** Reason: prod campaigns are PATCHed once, after the drill.
+- **A sender pause pauses its campaign, then DELETEs every in-flight lead.** Reason: a resume must never silently continue old sequences.
+- **S18 is a live spike before any engine code** (operator). Reason: the empty subject, the addressing, text-only and DELETE timing are undocumented.
+- **Per-step evidence freshness** (operator): age at approval + step delay ≤ `max_age_days`.
+- **Design rules:** the blank-email guard (`sequence_incomplete`); no step change while a campaign holds leads; every stop DELETEs and confirms; the recipient check on every sent email; the engine `emails/reply` path for step ≥ 2 hard-disabled.
+- **The migration is `0009d_instantly_enrollments.sql`,** not `0010` as the plan draft said, because `0010` is reserved for U8 in `09`'s numbering.
+
+**Problems hit**
+- None in the session. **Found in the docs:**
+  - Adding steps reactivates completed leads, and campaign `5392fcac` holds 2 Completed drill leads. Recorded in `06` §6; they are deleted (with approval) before its PATCH.
+  - An empty variable sends a blank email. The `sequence_incomplete` guard covers it.
+- **Still pending from Session 16:** the operator sets amir@zyndixhq.com's Instantly daily limit back to 1, if not already done. S18's `--check` will read it.
+
+**Next action**
+- **S18 — the U6c live spike** (`09` §U6c "S18"). Write `scripts/spike-u6c.ts` (guarded, no engine stages), then run `--check`: it reports the budget and the `daily_limit` to set in the UI.
+- Then ask for each Instantly write, one at a time: create the drill campaign (paused, 3 literal steps, empty follow-up subjects, 5 min / 5 min) → webhook → activate → enroll `ebadiamirhoseineng+s17@gmail.com` → DELETE after step 2 → prove there is no step 3.
+- Any failed verdict → stop and bring options before S19.
+
+---
+
 ### 2026-09-25 — Session 16 — U6 live re-test: the follow-up still names our mailbox → STOP; follow-ups move to U6c
 
 **Step:** U6, session 4 of 4: the live re-test of the follow-up recipient fix (`09` §U6), on `main`. Plan mode first. Operator changes to the plan:
