@@ -298,6 +298,7 @@ export const PREFLIGHT_REFUSALS = [
   "email_invalid",
   "email_unverified",
   "sender_unhealthy",
+  "sender_signature_missing",
   "duplicate_company_active",
   "thread_anchor_missing",
   "timezone_unknown",

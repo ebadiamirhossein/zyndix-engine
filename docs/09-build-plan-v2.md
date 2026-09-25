@@ -183,6 +183,7 @@ Record which plan and permissions are required, and which requested operations t
 - *Scopes the key needs.* `workspaces:read`, `accounts:read`, `campaigns:read`, `leads:read` (proven live except `leads:read`); U5 adds `leads:create`, `leads:delete`, `campaigns:update`; U6 adds `block_list_entries:create` and webhook scopes. A missing scope surfaces as `InstantlyPermanentError` `kind:'scope'`.
 - *Unsupported, so designed around.* No idempotency-key header (enrollment dedupes with `skip_if_in_workspace`/`skip_if_in_campaign` on `POST /api/v2/leads/add`). No per-lead pause (stops are `DELETE /api/v2/leads/{id}` or the block list). **No per-lead sending-account field** (drives U5's sender pinning). No documented `Retry-After` or rate-limit headers (limit is 100 req/s, 6,000 req/min per workspace; parsed if present, else U2 backoff). The live webhook event list differs from both the spec and the guide — U6 uses the live list.
 - *Taxonomy refinement.* For **mutations**, any 5xx is `InstantlyUncertainOutcomeError`, not retryable — the write may have been committed (`06` §5, 2026-09-25). Reads keep 5xx → retryable.
+- *Webhooks (Session 12, official spec + guide, then live).* `POST/GET /api/v2/webhooks`, `DELETE /api/v2/webhooks/{id}`, `POST /api/v2/webhooks/{id}/test`, `…/resume`; scopes `webhooks:*`. **Creation works on Growth** (proven live, then deleted). **No HMAC or signing secret exists**; the only auth is the webhook's `headers` map, which we fill with a static token. **The payload has no event id** (the delivery log `GET /api/v2/webhook-events` has one; the payload does not). Retries exist (`retry_count`, `will_retry` in the log) but the policy, ordering and delivery guarantee are undocumented; a webhook is auto-disabled (`status -1`) after repeated failures, with the threshold undocumented. The live test payload carries `event_type test_event`, `is_test`, `webhook_id`, `test_message`, `lead_email test@example.com`. `GET /api/v2/emails` (reconcile) is limited to **20 requests/min**.
 
 ---
 
@@ -260,6 +261,32 @@ Only after Part 2 may `06-build-progress.md` say **verified with provider**.
 **Reuses.** `webhook_events` table and its unique index from `0001`, `src/lib/validation/external.ts` (`instantlyWebhookSchema` — already written, currently unconsumed), `src/app/api/webhooks/telegram/route.ts` (route shape), `src/lib/state.ts`, `src/lib/jobs/queue.ts`.
 
 **Effort.** 3 sessions. **Depends on.** U2, U5.
+
+**As built, session 1 of 3 (2026-09-25, Session 12)** — Part 1 core `tested locally`; webhook creation `verified with provider`. Evidence in `07` Session 12.
+- **Pre-items added by the operator before the webhook work.**
+  - US timezone fill from the HQ state: `sending/us-timezones.ts`, Apollo `enrichOrganization`, `scripts/fill-us-timezones.ts`. Applied to 4 leads.
+  - Per-mailbox plain-text signature inside the approval hash: `sending/approval.ts`, `sending/sender.ts`, the Telegram approve/edit path. The sender is now fixed at approval.
+  - `compliance_footer` v3, `writer_prompt_email` v8, `send_policy` v2 (`assignable_senders`).
+- **Migrations.** `0009_send_prereqs.sql` (the pre-items) and `0009b_exceptions.sql` (the planned `0009_exceptions.sql`, renamed because the pre-items took `0009`).
+- **Route and processor.** `src/app/api/webhooks/instantly/route.ts` is a thin wrapper around `lib/webhooks/instantly.ts` `handleInstantlyWebhook`, so the DoD script exercises the exact route path without `server-only` wiring (`lib/webhooks/instantly-server.ts`).
+- **Behaviour.** Everything below is in `06` §5, Session 12:
+  - token auth
+  - persist-first with hash dedupe and replay of unprocessed events
+  - a reply freezes before any model call
+  - an auto-reply is recorded only (operator)
+  - unsubscribe and bounce suppression
+  - bounce-rate auto-pause
+  - exceptions `unmatched_recipient` / `foreign_campaign` / `stop_failed` (escalated) / `invalid_payload` / `unexpected_state`
+- **Deviation.** A reply on a `queued` lead moves it `queued → sent → replied`. The uncertain outbox row and its capacity are still settled by the existing `send.reconcile` job from the provider, rather than by the webhook, so the ledger has one owner.
+- **Folded in from the backlog.** The suppression-scope fix in verify, plus the same bug found in source.
+- **Remaining for sessions 2–3.**
+  - `src/lib/reconcile/core.ts`: `stop_processing_stale` → pause, and missed-reply polling via `GET /api/v2/emails` (20 rpm).
+  - The sourced→sent traversal with 8 stop-rule siblings.
+  - Part 2 live drill. Gates before it:
+    - the 2 legacy Make.com webhooks must be deleted or confirmed (`06` §6);
+    - a fresh tunnel webhook is created (with operator approval);
+    - the threading-header check;
+    - the first live `leads:create` / `emails:create` / `campaigns:update`.
 
 ---
 
@@ -677,8 +704,11 @@ Carried from `05-build-plan.md` §4, still valid:
 - Re-test the crawler against `fantasticfrank.co`: `playwright:adaptive` (templates v3) is a mitigation that has never been verified.
 - `test-draft.ts` edit (✏️) and kill (❌) paths — each needs its own fixture, since an approved lead cannot transition to `parked`.
 - **`pnpm lint` has failed on `main` since before U1** — 17 `no-explicit-any` errors across `scripts/compare-prompt-versions.ts`, `rerun-qualifier-one.ts` and `test-qualify.ts`, plus 4 unused-var warnings in `src/lib`. `build` and `tsc --noEmit` are clean. One focused session, not a unit.
-- **Verify stage suppression scope** (`stages/verify/core.ts` `isSuppressed`): any `domain` match counts as suppressed, including the domain written beside a person-level invalid email. Align it with U5's person-level versus company-wide rule (`sending/suppression.ts`). Natural home: U6, which owns suppression.
-- **Recipient timezone for US leads**: all current leads are US with null timezones, so each would be held `timezone_unknown`. Populate `leads.timezone` from Apollo location data (U15).
+- ~~**Verify stage suppression scope**~~ — **done in U6 (Session 12)**, together with the same bug in the source stage.
+- **Recipient timezone for US leads**: the 4 send candidates were filled in Session 12 (Apollo org enrichment, 4 credits); the other 30 stay held.
+- **Store location at sourcing/verify** (operator, Session 12): persist the person's city/state/country and the company's `hq_state`/`hq_city` from the Apollo data already fetched, so future leads get a timezone at no extra credit cost. **The person's own location wins over HQ** when both exist. Natural home: U15 (or earlier, as a small fix).
+- **Per-sender writer persona**: drafts are written as Amir, so `send_policy.assignable_senders` limits approval to the amir@ mailboxes. Enabling ingrida@ needs a persona per sender (the writer prompt and the signature must agree).
+- **Exclude `/api/webhooks/*` from the proxy matcher** at deploy: today every webhook delivery triggers a Supabase `getUser()` round trip (harmless, wasted).
 - **`0002_transition_lead.sql` is `security definer` with no `set search_path`** — Supabase's linter calls this `function_search_path_mutable`. Fixing it means a new migration that replaces the function; it does not belong inside a feature unit.
 
 ---
@@ -722,4 +752,4 @@ UD adds 2 sessions after U7. It therefore does **not** move either of the two mi
 🚩 **FIRST SEND READY at the end of U6** — cumulative session 14, ≈ week 4.7
 ⭐ central acceptance criterion satisfied at **U16–U17** — cumulative session 40, ≈ week 13.3 *(was session 38 / week 12.7 before UD)*
 
-**Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009` (U6) · `0010` (U8) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.
+**Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009`, `0009b` (U6: send prereqs, exceptions) · `0010` (U8) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.

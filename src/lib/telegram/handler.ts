@@ -2,8 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { TelegramClient } from "@/lib/integrations/telegram";
 import { parseAllowedUserIds } from "@/lib/integrations/telegram";
-import { approvalHash, buildApprovalSnapshot } from "@/lib/sending/approval";
+import { escapeTelegramHtml } from "@/lib/integrations/telegram-format";
+import { approvalHash, buildApprovalSnapshot, composeOutboundBody, findSignOff } from "@/lib/sending/approval";
+import { chooseSenderForApproval } from "@/lib/sending/sender";
 import { createStateStore } from "@/lib/state/core";
+import { sendPolicySchema } from "@/lib/validation/jsonb";
 import type { Database, Json } from "@/types/database";
 import type { DatabaseWithSending } from "@/types/database-extensions";
 
@@ -215,33 +218,65 @@ async function resolvePendingEdit(
 }
 
 /**
- * Approves a pending touch AND binds the approval to its exact content and
- * recipient (09 §U5): approval_hash / approval_snapshot / approved_at /
+ * Approves a pending touch AND binds the approval to its exact content,
+ * recipient, sending account and signature (09 §U5; Session 12):
+ * send_account_id / approval_hash / approval_snapshot / approved_at /
  * approved_by. Fenced on status = pending_approval, so a stale or repeated
- * button press changes nothing. Returns false when nothing was approved.
+ * button press changes nothing.
  */
+type BindResult =
+  | { ok: true; sender: { identifier: string; signature: string | null }; outbound: string }
+  | { ok: false; message: string };
+
+const SENDER_REFUSAL: Record<string, string> = {
+  bound_sender_missing: "the lead's bound sending account no longer exists",
+  bound_sender_no_signature: "the lead's bound sending account has no signature configured",
+  no_eligible_sender: "no sending account is eligible (health ok, Instantly campaign, signature)",
+  follow_up_unbound: "this follow-up's lead has no bound sending account",
+};
+
 async function bindApproval(
   db: SupabaseClient<Database>,
+  getSetting: TelegramHandlerDeps["getActiveSetting"],
   touchId: string,
   leadId: string,
   body: string,
   approvedBy: number,
-): Promise<boolean> {
+): Promise<BindResult> {
   const sendDb = db as unknown as SupabaseClient<DatabaseWithSending>;
   const { data: touch } = await sendDb
     .from("touches")
-    .select("id, step_no, channel, subject, prompt_version")
+    .select("id, step_no, channel, subject, prompt_version, status")
     .eq("id", touchId)
     .maybeSingle();
-  const { data: lead } = await sendDb.from("leads").select("id, email").eq("id", leadId).maybeSingle();
-  if (!touch || !lead) return false;
+  const { data: lead } = await sendDb.from("leads").select("id, email, send_account_id").eq("id", leadId).maybeSingle();
+  if (!touch || !lead) return { ok: false, message: "Touch or lead not found — nothing approved." };
 
-  const snapshot = buildApprovalSnapshot({ ...touch, body }, lead);
+  const signOff = findSignOff(body);
+  if (signOff) {
+    return {
+      ok: false,
+      message: `Not approved: the body signs itself ("${signOff}"). The mailbox signature is added at send — edit the body to remove the sign-off, or redraft.`,
+    };
+  }
+
+  const policy = sendPolicySchema.parse((await getSetting("send_policy")).value);
+  const choice = await chooseSenderForApproval(sendDb, {
+    leadSendAccountId: lead.send_account_id,
+    step: touch.step_no ?? 1,
+    assignable: policy.assignable_senders,
+  });
+  if (!choice.ok) {
+    return { ok: false, message: `Not approved: ${SENDER_REFUSAL[choice.reason] ?? choice.reason}.` };
+  }
+
+  const snapshot = buildApprovalSnapshot({ ...touch, body }, lead, choice.sender);
   const { data, error } = await sendDb
     .from("touches")
     .update({
       body,
       status: "approved",
+      send_account_id: choice.sender.id,
       approval_hash: approvalHash(snapshot),
       approval_snapshot: snapshot as unknown as Json,
       approved_at: new Date().toISOString(),
@@ -251,7 +286,24 @@ async function bindApproval(
     .eq("status", "pending_approval")
     .select("id");
   if (error) throw new Error(`approve touch ${touchId}: ${error.message}`);
-  return (data ?? []).length === 1;
+  if ((data ?? []).length !== 1) {
+    return { ok: false, message: `Touch is ${touch.status ?? "unknown"}, not pending_approval — nothing approved.` };
+  }
+  return {
+    ok: true,
+    sender: { identifier: choice.sender.identifier ?? "", signature: snapshot.signature },
+    outbound: composeOutboundBody(body, snapshot.signature),
+  };
+}
+
+/** What the approved touch will send, shown back to the operator. */
+function approvedFooter(bound: Extract<BindResult, { ok: true }>, label: string): string {
+  return [
+    "",
+    `${label} · From: ${escapeTelegramHtml(bound.sender.identifier)}`,
+    "<b>Final text (with signature):</b>",
+    `<pre>${escapeTelegramHtml(bound.outbound)}</pre>`,
+  ].join("\n");
 }
 
 async function handleApprove(
@@ -277,8 +329,9 @@ async function handleApprove(
     return;
   }
 
-  if (!(await bindApproval(deps.db, touchId, touch.lead_id, touch.draft_body, userId))) {
-    await deps.telegram.sendMessage(chatId, `Touch is ${touch.status ?? "unknown"}, not pending_approval — nothing approved.`);
+  const bound = await bindApproval(deps.db, deps.getActiveSetting, touchId, touch.lead_id, touch.draft_body, userId);
+  if (!bound.ok) {
+    await deps.telegram.sendMessage(chatId, bound.message);
     return;
   }
 
@@ -287,7 +340,7 @@ async function handleApprove(
     source: "telegram",
   });
 
-  const suffix = "\n\n✅ APPROVED";
+  const suffix = `\n${approvedFooter(bound, "✅ APPROVED")}`;
   if (originalText) {
     await deps.telegram.editMessage(
       chatId,
@@ -357,8 +410,9 @@ async function handleEditedBody(
     return;
   }
 
-  if (!(await bindApproval(deps.db, pending.touchId, pending.leadId, newBody.trim(), userId))) {
-    await deps.telegram.sendMessage(chatId, `Touch is ${touch.status ?? "unknown"}, not pending_approval — edit not applied.`);
+  const bound = await bindApproval(deps.db, deps.getActiveSetting, pending.touchId, pending.leadId, newBody.trim(), userId);
+  if (!bound.ok) {
+    await deps.telegram.sendMessage(chatId, `${bound.message} Edit not applied.`);
     return;
   }
 
@@ -371,7 +425,8 @@ async function handleEditedBody(
 
   await deps.telegram.sendMessage(
     chatId,
-    `✏️ EDITED — touch ${pending.touchId} approved with your edits.`,
+    `✏️ EDITED — touch ${pending.touchId} approved with your edits.\n${approvedFooter(bound, "✅ APPROVED")}`,
+    { parseMode: "HTML" },
   );
 }
 

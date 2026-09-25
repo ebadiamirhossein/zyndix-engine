@@ -205,6 +205,9 @@ function jobCtx(touchId: string, id = randomUUID()): JobContext<{ touch_id: stri
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/** Synthetic plain-text signature for a fixture mailbox (0009, Session 12). */
+const fixtureSignature = (identifier: string): string => `Test ${identifier.split("@")[0]}\nZyndix, Vilnius\nzyndix.com`;
+
 async function createAccount(identifier: string, campaign: string): Promise<string> {
   const { data, error } = await db
     .from("send_accounts")
@@ -216,6 +219,7 @@ async function createAccount(identifier: string, campaign: string): Promise<stri
       health: "ok",
       ramp_started_on: "2026-09-01",
       instantly_campaign_id: `${TAG}.${campaign}`,
+      signature_text: fixtureSignature(identifier),
     })
     .select("id")
     .single();
@@ -302,12 +306,19 @@ async function createApprovedTouch(
   if (error || !touch) throw new Error(`fixture touch: ${error?.message}`);
   fixture.touchIds.push(touch.id);
 
+  // The sender is fixed at approval (Session 12): the given account, else the
+  // lead's binding — what the Telegram handler does.
   const body = touch.draft_body!;
-  const snapshot = buildApprovalSnapshot({ ...touch, body }, { id: f.leadId, email: f.email });
+  const senderId = opts.sendAccountId ?? (await leadRow(f.leadId)).send_account_id;
+  const { data: sender } = senderId
+    ? await db.from("send_accounts").select("id, signature_text").eq("id", senderId).single()
+    : { data: null };
+  const snapshot = buildApprovalSnapshot({ ...touch, body }, { id: f.leadId, email: f.email }, sender);
   const { error: approveError } = await db
     .from("touches")
     .update({
       body,
+      send_account_id: senderId,
       status: "approved",
       approval_hash: approvalHash(snapshot),
       approval_snapshot: snapshot as never,
@@ -385,6 +396,11 @@ async function happyPathAndPinning(accountA: string, accountB: string): Promise<
       enrolled.lead.custom_variables?.zx_subject === "Your listing pages" &&
       String(enrolled.lead.custom_variables?.zx_body).includes("<br/>"),
   );
+  assert(
+    "happy: step 1 body ends with the bound mailbox's signature (Session 12)",
+    String(enrolled.lead.custom_variables?.zx_body).endsWith(`Want the three?<br/><br/>${fixtureSignature(SENDER_A).replace(/\n/g, "<br/>")}`),
+    String(enrolled.lead.custom_variables?.zx_body).slice(-80),
+  );
   const queuedEvents = await events(f.leadId, "send_queued");
   const qd = queuedEvents[0]?.detail as Record<string, unknown> | undefined;
   assert("happy: send_queued event names the lead's own timezone", qd?.time_zone === "Europe/Vilnius" && qd?.time_zone_source === "lead");
@@ -445,6 +461,11 @@ async function happyPathAndPinning(accountA: string, accountB: string): Promise<
     lastReply?.eaccount === SENDER_A && lastReply.replyToUuid === anchorId && lastReply.subject === "Re: Your listing pages",
   );
   const [stepOneOutbox] = await outboxFor(touch);
+  assert(
+    "thread: follow-up text ends with the same mailbox's signature (Session 12)",
+    lastReply?.body.text === `Hi Test,\n\nA specific observation.\n\nWant the three?\n\n${fixtureSignature(SENDER_A)}`,
+    lastReply?.body.text?.slice(-60),
+  );
   assert("thread: anchor persisted on the step-1 outbox row", stepOneOutbox?.provider_email_id === anchorId && stepOneOutbox.provider_thread_id === `${TAG}.thread`);
   assert("thread: lead stays sent", (await leadRow(f.leadId)).state === "sent");
   assert("thread: ledger accepted = 2 on the bound account", (await ledgerDay(accountA))?.accepted === 2);
@@ -602,6 +623,26 @@ async function suppressionBetween(accountC: string): Promise<void> {
   assert("suppression: send_refused event records the final-preflight verdicts", refused.length === 1 && (refused[0].detail as Record<string, unknown>).phase === "final_preflight");
 }
 
+async function signatureEditedAfterApproval(accountC: string): Promise<void> {
+  console.log("\n--- signature edited after approval → stale_approval (Session 12) ---");
+  const f = await createLead("sig-edit");
+  const touch = await createApprovedTouch(f, { sendAccountId: accountC });
+  const { error } = await db.from("send_accounts").update({ signature_text: "Someone Else\nZyndix" }).eq("id", accountC);
+  if (error) throw new Error(`signature edit: ${error.message}`);
+  const before = mock.enroll.length;
+  const outcome = await runSendJob(deps(INSIDE), jobCtx(touch));
+  const restore = await db.from("send_accounts").update({ signature_text: fixtureSignature(`u5-${STAMP}-ingrida@zyndixhq.com`) }).eq("id", accountC);
+  if (restore.error) throw new Error(`signature restore: ${restore.error.message}`);
+  assert(
+    "signature: refused stale_approval, no provider call, lead still approved",
+    outcome.kind === "refused" &&
+      outcome.verdicts.map((v) => v.reason).join() === "stale_approval" &&
+      mock.enroll.length === before &&
+      (await leadRow(f.leadId)).state === "approved",
+    JSON.stringify(outcome.kind === "refused" ? outcome.verdicts : outcome),
+  );
+}
+
 async function timezoneCases(accountC: string): Promise<void> {
   console.log("\n--- timezone_unknown is a HOLD, never a deferral (operator rule) ---");
   const f = await createLead("tz-unknown", { country: "US", leadTimezone: null });
@@ -674,7 +715,8 @@ async function migrationApplied(): Promise<boolean> {
   const { error } = await db.from("outbox").select("id").limit(1);
   if (!error) {
     const { error: colError } = await db.from("touches").select("approval_hash").limit(1);
-    return !colError;
+    const { error: sigError } = await db.from("send_accounts").select("signature_text").limit(1);
+    return !colError && !sigError;
   }
   if (error.code === "PGRST205" || /schema cache/i.test(error.message)) return false;
   throw new Error(`outbox probe: ${error.message}`);
@@ -713,7 +755,7 @@ async function cleanup(): Promise<void> {
 async function main(): Promise<void> {
   console.log(`\n=== test-u5-send (tag=${TAG}) ===`);
   if (!(await migrationApplied())) {
-    skip("all U5 DB checks", "outbox / touches.approval_hash not found — apply 0008_touch_approval_binding.sql and 0008b_outbox.sql");
+    skip("all U5 DB checks", "outbox / touches.approval_hash / send_accounts.signature_text not found — apply 0008, 0008b and 0009_send_prereqs.sql");
   } else {
     const before: Record<string, number> = {};
     for (const t of TABLES) before[t] = await countRows(t);
@@ -726,6 +768,7 @@ async function main(): Promise<void> {
       await uncertainOutcomes(accountA);
       await workerCrash(accountA);
       await suppressionBetween(accountC);
+      await signatureEditedAfterApproval(accountC);
       await timezoneCases(accountC);
     } catch (error) {
       assert("no unexpected exception", false, error instanceof Error ? `${error.name}: ${error.message}` : String(error));

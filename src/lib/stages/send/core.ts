@@ -12,7 +12,7 @@ import {
 } from "@/lib/integrations/instantly";
 import type { CapacityLedger } from "@/lib/scheduler/ledger";
 import { jitteredSendAt, ledgerDate, nextSendWindow, rampQuota } from "@/lib/scheduler/windows";
-import { sendIdempotencyKey } from "@/lib/sending/approval";
+import { composeOutboundBody, sendIdempotencyKey } from "@/lib/sending/approval";
 import { checkSenderDomain } from "@/lib/sending/guard";
 import {
   DEFERRABLE_REFUSALS,
@@ -303,6 +303,7 @@ async function buildContext(
       identifier: sender.identifier ?? "",
       health: sender.health,
       instantly_campaign_id: sender.instantly_campaign_id,
+      signature_text: sender.signature_text,
     },
     providerHealth: await providerHealth(deps, sender.identifier ?? "", settings.policy),
     suppression: { email: suppression.email, domain: suppression.domain },
@@ -569,6 +570,8 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
       send_account_id: sender.id,
       time_zone: result.timezone?.timeZone ?? null,
       time_zone_source: result.timezone?.source ?? null,
+      // How leads.timezone itself was derived (0009), e.g. hq_state.
+      lead_timezone_source: loaded.lead.timezone_source ?? null,
     });
   }
 
@@ -592,6 +595,9 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
   if (keyError) throw new SendStageError(`touch idempotency key: ${keyError.message}`);
 
   // 9. The provider call — the only line that can put mail in an inbox.
+  // The text is the approved body plus the sender's signature, exactly as
+  // hashed at approval (preflight has just re-verified the hash).
+  const outboundText = composeOutboundBody(loaded.touch.body ?? "", sender.signature_text);
   try {
     if (operation === "enroll") {
       const enrolled = await deps.instantly.enrollLead({
@@ -603,7 +609,7 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
           company_name: loaded.company?.name ?? undefined,
           custom_variables: {
             zx_subject: loaded.touch.subject ?? "",
-            zx_body: toHtmlBody(loaded.touch.body ?? ""),
+            zx_body: toHtmlBody(outboundText),
             zx_touch_id: loaded.touch.id,
           },
         },
@@ -625,7 +631,7 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
       eaccount: sender.identifier!,
       replyToUuid: built.anchor!.emailId,
       subject: loaded.touch.subject ?? "",
-      body: { html: toHtmlBody(loaded.touch.body ?? ""), text: loaded.touch.body ?? "" },
+      body: { html: toHtmlBody(outboundText), text: outboundText },
     });
     await deps.hooks?.afterDispatch?.();
     return accept(

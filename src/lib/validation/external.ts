@@ -56,20 +56,39 @@ export const apifyRunResultSchema = z
   .passthrough();
 
 // ---------------------------------------------------------------------------
-// Instantly webhook envelope (doc 03 §4, build plan step 12)
+// Instantly webhook envelope (09 §U6). Fields per the official webhook guide
+// (developer.instantly.ai, read 2026-09-25); the OpenAPI spec has no payload
+// schema. Only event_type is required: every other field is optional and may
+// be null. Unknown fields (lead custom variables) pass through untouched.
 // ---------------------------------------------------------------------------
+
+const optionalText = z.string().nullable().optional();
 
 export const instantlyWebhookSchema = z
   .object({
-    event_type: z.string(),
-    lead_email: z.string().optional(),
-    email: z.string().optional(),
-    campaign_id: z.string().optional(),
-    email_id: z.string().optional(),
-    message_id: z.string().optional(),
-    timestamp: z.union([z.string(), z.number()]).optional(),
+    event_type: z.string().min(1),
+    timestamp: z.union([z.string(), z.number()]).nullable().optional(),
+    workspace: optionalText,
+    campaign_id: optionalText,
+    campaign_name: optionalText,
+    lead_email: optionalText,
+    email: optionalText,
+    email_account: optionalText,
+    email_id: optionalText,
+    message_id: optionalText,
+    step: z.union([z.number(), z.string()]).nullable().optional(),
+    variant: z.union([z.number(), z.string()]).nullable().optional(),
+    is_first: z.boolean().nullable().optional(),
+    is_auto_reply: z.union([z.boolean(), z.number(), z.string()]).nullable().optional(),
+    email_subject: optionalText,
+    reply_subject: optionalText,
+    reply_text: optionalText,
+    reply_text_snippet: optionalText,
+    unibox_url: optionalText,
   })
   .passthrough();
+
+export type InstantlyWebhookPayload = z.infer<typeof instantlyWebhookSchema>;
 
 // ---------------------------------------------------------------------------
 // Calendly webhook envelope (doc 03 §4: invitee.created)

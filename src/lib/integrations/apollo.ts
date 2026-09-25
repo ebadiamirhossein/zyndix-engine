@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import {
+  apolloOrgEnrichmentSchema,
+  apolloOrgEnrichResponseSchema,
   apolloOrgSearchResponseSchema,
   apolloPeopleMatchResponseSchema,
   apolloPeopleSearchResponseSchema,
@@ -140,6 +142,7 @@ async function apolloRequest(
   path: string,
   params: URLSearchParams,
   context: string,
+  method: "GET" | "POST" = "POST",
 ): Promise<unknown> {
   const apiKey = requireApiKey();
   const query = params.toString();
@@ -160,7 +163,7 @@ async function apolloRequest(
 
     try {
       const response = await fetch(url, {
-        method: "POST",
+        method,
         headers: {
           "Cache-Control": "no-cache",
           accept: "application/json",
@@ -253,6 +256,8 @@ function buildOrgSearchParams(
 }
 
 export type ApolloClient = ReturnType<typeof createApolloClient>;
+
+export type ApolloOrgEnrichment = z.infer<typeof apolloOrgEnrichmentSchema>;
 
 export type ApolloOrgSearchResult = {
   organizations: z.infer<typeof apolloOrgSchema>[];
@@ -379,11 +384,30 @@ export function createApolloClient() {
     return parseOrThrow(apolloPersonSchema, response.person, "apollo:revealedPerson");
   }
 
+  /**
+   * Organization Enrichment (`GET /organizations/enrich?domain=`). Apollo docs:
+   * **1 credit per organization.** Callers cap and gate it; this function does
+   * not. Returns null when Apollo has no organization for the domain.
+   */
+  async function enrichOrganization(domain: string): Promise<ApolloOrgEnrichment | null> {
+    const clean = domain.trim().toLowerCase();
+    if (!clean) throw new Error("Apollo enrichOrganization: domain is required");
+    const json = await apolloRequest(
+      "/organizations/enrich",
+      buildSearchParams({ domain: clean }),
+      "enrichOrganization",
+      "GET",
+    );
+    const response = parseOrThrow(apolloOrgEnrichResponseSchema, json, "apollo:enrichOrganization");
+    return response.organization ?? null;
+  }
+
   return {
     searchOrganizations,
     searchOrganizationsWithMeta,
     searchPeople,
     matchPersonRaw,
     revealPersonEmail,
+    enrichOrganization,
   };
 }

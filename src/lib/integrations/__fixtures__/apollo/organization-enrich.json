@@ -1,0 +1,16 @@
+{
+  "organization": {
+    "id": "000000000000000000000001",
+    "name": "Synthetic Realty Group",
+    "website_url": "http://www.synthetic-realty.example.invalid",
+    "primary_domain": "synthetic-realty.example.invalid",
+    "industry": "real estate",
+    "estimated_num_employees": 40,
+    "street_address": "100 Example Ave",
+    "city": "El Paso",
+    "state": "Texas",
+    "postal_code": "79901",
+    "country": "United States",
+    "raw_address": "100 Example Ave, El Paso, Texas 79901, United States"
+  }
+}

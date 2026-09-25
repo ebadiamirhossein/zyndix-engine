@@ -620,6 +620,71 @@ describe("U5 additions: campaigns and threaded replies", () => {
   });
 });
 
+describe("U6 additions: webhooks", () => {
+  const HOOK_SECRET = "WEBHOOK_SECRET_SENTINEL_0123456789abcdef0123456789";
+  const TARGET = "https://synthetic-tunnel.example.invalid/api/webhooks/instantly";
+  const auth = { name: "x-zyndix-webhook-token", value: HOOK_SECRET };
+
+  test("createWebhook POSTs target, event type and our auth header; the result never carries the secret", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("webhook-created")));
+    const hook = await client(impl).createWebhook({ targetUrl: TARGET, eventType: "all_events", name: "zyndix-engine", authHeader: auth });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "POST");
+    assert.ok(calls[0]!.url.endsWith("/api/v2/webhooks"));
+    assert.deepEqual(calls[0]!.body, {
+      target_hook_url: TARGET,
+      event_type: "all_events",
+      name: "zyndix-engine",
+      campaign: null,
+      headers: { "x-zyndix-webhook-token": HOOK_SECRET },
+    });
+    assert.equal(hook.id, "00000000-0000-4000-8000-0000000000w1");
+    assert.deepEqual(hook.header_names, ["x-zyndix-webhook-token"]);
+    assert.ok(!JSON.stringify(hook).includes(HOOK_SECRET), "secret echoed back to the caller");
+  });
+
+  test("listWebhooks strips header values too", async () => {
+    const { impl } = mockFetch(() => jsonResponse(200, fixture("webhooks-list")));
+    const page = await client(impl).listWebhooks();
+    assert.equal(page.items.length, 1);
+    assert.ok(!JSON.stringify(page).includes(HOOK_SECRET));
+  });
+
+  test("createWebhook refuses a non-https target and a short secret before any request", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("webhook-created")));
+    await assert.rejects(client(impl).createWebhook({ targetUrl: "http://x.example.invalid/h", eventType: "all_events", authHeader: auth }), InstantlyPermanentError);
+    await assert.rejects(client(impl).createWebhook({ targetUrl: TARGET, eventType: "all_events", authHeader: { name: "x", value: "short" } }), InstantlyPermanentError);
+    assert.equal(calls.length, 0);
+  });
+
+  test("a 402/403 plan refusal is permanent, and an error echoing the body is redacted", async () => {
+    const { impl } = mockFetch(() => jsonResponse(402, { message: `Webhooks require a higher plan (got headers ${HOOK_SECRET})` }));
+    const error = (await capture(() => client(impl).createWebhook({ targetUrl: TARGET, eventType: "all_events", authHeader: auth }))) as Error;
+    assert.ok(error instanceof InstantlyPermanentError, error.name);
+    assert.ok(!error.message.includes(HOOK_SECRET), error.message);
+  });
+
+  test("createWebhook 5xx is an uncertain outcome (the webhook may exist) — never retried", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(503, { message: "unavailable" }));
+    await assert.rejects(client(impl).createWebhook({ targetUrl: TARGET, eventType: "all_events", authHeader: auth }), InstantlyUncertainOutcomeError);
+    assert.equal(calls.length, 1);
+  });
+
+  test("testWebhook and deleteWebhook hit the documented paths", async () => {
+    const { impl, calls } = mockFetch(
+      () => jsonResponse(200, fixture("webhook-test-result")),
+      () => jsonResponse(200, fixture("webhook-created")),
+    );
+    const result = await client(impl).testWebhook("w1");
+    await client(impl).deleteWebhook("w1");
+    assert.equal(result.success, true);
+    assert.equal(calls[0]!.method, "POST");
+    assert.ok(calls[0]!.url.endsWith("/api/v2/webhooks/w1/test"));
+    assert.equal(calls[1]!.method, "DELETE");
+    assert.ok(calls[1]!.url.endsWith("/api/v2/webhooks/w1"));
+  });
+});
+
 describe("read-only client", () => {
   test("exposes every read operation and no mutating operation", () => {
     const read = createInstantlyReadClient({ apiKey: SENTINEL_KEY }) as Record<string, unknown>;

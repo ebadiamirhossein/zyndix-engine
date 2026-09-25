@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "id": "00000000-0000-4000-8000-0000000000w1",
+      "name": "zyndix-engine",
+      "target_hook_url": "https://synthetic-tunnel.example.invalid/api/webhooks/instantly",
+      "event_type": "all_events",
+      "campaign": null,
+      "headers": { "x-zyndix-webhook-token": "WEBHOOK_SECRET_SENTINEL_0123456789abcdef0123456789" },
+      "status": 1
+    }
+  ],
+  "next_starting_after": null
+}

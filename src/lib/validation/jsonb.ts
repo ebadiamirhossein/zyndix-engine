@@ -208,6 +208,12 @@ export const sendPolicySchema = z
     min_warmup_score: z.number().min(0).max(100),
     /** Another lead at the same company in active outreach within this window is `duplicate_company_active`. */
     duplicate_company_window_days: z.number().int().positive(),
+    /**
+     * v2 (Session 12): mailboxes approval may assign a first touch to. Absent =
+     * every eligible account. Drafts are written in one person's voice, so
+     * only that person's mailboxes are listed. A lead's existing binding wins.
+     */
+    assignable_senders: z.array(z.string().email()).min(1).optional(),
   })
   .strict();
 

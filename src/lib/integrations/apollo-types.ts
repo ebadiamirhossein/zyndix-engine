@@ -48,6 +48,26 @@ export const apolloPeopleMatchResponseSchema = z
   })
   .passthrough();
 
+/** Organization Enrichment: only the location fields the timezone fill consumes are validated. */
+export const apolloOrgEnrichmentSchema = z
+  .object({
+    id: z.string(),
+    name: z.string().nullable().optional(),
+    primary_domain: z.string().nullable().optional(),
+    city: z.string().nullable().optional(),
+    state: z.string().nullable().optional(),
+    country: z.string().nullable().optional(),
+    postal_code: z.string().nullable().optional(),
+    raw_address: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export const apolloOrgEnrichResponseSchema = z
+  .object({
+    organization: apolloOrgEnrichmentSchema.nullable().optional(),
+  })
+  .passthrough();
+
 export type ApolloSegmentQuery = {
   industry?: string[];
   employee_range?: string[];

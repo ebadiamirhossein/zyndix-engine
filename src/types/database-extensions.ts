@@ -176,6 +176,21 @@ type Touches = CapTables["touches"];
 type Leads = CapTables["leads"];
 type SendAccountsCap = CapTables["send_accounts"];
 
+/** 0009_send_prereqs.sql (Session 12): HQ location, timezone provenance, signature. */
+type LeadSendColumns = {
+  send_account_id: string | null;
+  timezone_source: string | null;
+  timezone_derived_at: string | null;
+};
+type SendAccountSendColumns = { instantly_campaign_id: string | null; signature_text: string | null };
+type CompanyHqColumns = {
+  hq_state: string | null;
+  hq_city: string | null;
+  hq_location_source: string | null;
+  hq_location_fetched_at: string | null;
+};
+type Companies = CapTables["companies"];
+
 type TouchApprovalColumns = {
   approval_hash: string | null;
   approval_snapshot: Json | null;
@@ -212,11 +227,18 @@ export type OutboxRowShape = {
 
 /**
  * Columns and table added in 0008_touch_approval_binding.sql and
- * 0008b_outbox.sql (09 §U5) — merge into database.ts after gen:types.
+ * 0008b_outbox.sql (09 §U5), plus the columns of 0009_send_prereqs.sql
+ * (Session 12) — merge into database.ts after gen:types.
  */
 export type DatabaseWithSending = Omit<DatabaseWithCapacity, "public"> & {
   public: Omit<DatabaseWithCapacity["public"], "Tables"> & {
-    Tables: Omit<CapTables, "touches" | "leads" | "send_accounts"> & {
+    Tables: Omit<CapTables, "touches" | "leads" | "send_accounts" | "companies"> & {
+      companies: {
+        Row: Companies["Row"] & CompanyHqColumns;
+        Insert: Companies["Insert"] & Partial<CompanyHqColumns>;
+        Update: Companies["Update"] & Partial<CompanyHqColumns>;
+        Relationships: Companies["Relationships"];
+      };
       touches: {
         Row: Touches["Row"] & TouchApprovalColumns;
         Insert: Touches["Insert"] & Partial<TouchApprovalColumns>;
@@ -224,15 +246,15 @@ export type DatabaseWithSending = Omit<DatabaseWithCapacity, "public"> & {
         Relationships: Touches["Relationships"];
       };
       leads: {
-        Row: Leads["Row"] & { send_account_id: string | null };
-        Insert: Leads["Insert"] & { send_account_id?: string | null };
-        Update: Leads["Update"] & { send_account_id?: string | null };
+        Row: Leads["Row"] & LeadSendColumns;
+        Insert: Leads["Insert"] & Partial<LeadSendColumns>;
+        Update: Leads["Update"] & Partial<LeadSendColumns>;
         Relationships: Leads["Relationships"];
       };
       send_accounts: {
-        Row: SendAccountsCap["Row"] & { instantly_campaign_id: string | null };
-        Insert: SendAccountsCap["Insert"] & { instantly_campaign_id?: string | null };
-        Update: SendAccountsCap["Update"] & { instantly_campaign_id?: string | null };
+        Row: SendAccountsCap["Row"] & SendAccountSendColumns;
+        Insert: SendAccountsCap["Insert"] & Partial<SendAccountSendColumns>;
+        Update: SendAccountsCap["Update"] & Partial<SendAccountSendColumns>;
         Relationships: SendAccountsCap["Relationships"];
       };
       outbox: {
@@ -240,6 +262,47 @@ export type DatabaseWithSending = Omit<DatabaseWithCapacity, "public"> & {
         Insert: Partial<OutboxRowShape> &
           Pick<OutboxRowShape, "touch_id" | "lead_id" | "send_account_id" | "operation" | "idempotency_key" | "approval_hash">;
         Update: Partial<OutboxRowShape>;
+        Relationships: [];
+      };
+    };
+  };
+};
+
+type SendTables = DatabaseWithSending["public"]["Tables"];
+type WebhookEvents = SendTables["webhook_events"];
+
+export type ExceptionRowShape = {
+  id: string;
+  kind: string;
+  provider: string | null;
+  webhook_event_id: string | null;
+  lead_id: string | null;
+  detail: Json | null;
+  status: "open" | "escalated" | "resolved";
+  escalated_at: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+/**
+ * Table and column added in 0009b_exceptions.sql (09 §U6) — merge into
+ * database.ts after gen:types.
+ */
+export type DatabaseWithWebhooks = Omit<DatabaseWithSending, "public"> & {
+  public: Omit<DatabaseWithSending["public"], "Tables"> & {
+    Tables: Omit<SendTables, "webhook_events"> & {
+      webhook_events: {
+        Row: WebhookEvents["Row"] & { processing_error: string | null };
+        Insert: WebhookEvents["Insert"] & { processing_error?: string | null };
+        Update: WebhookEvents["Update"] & { processing_error?: string | null };
+        Relationships: WebhookEvents["Relationships"];
+      };
+      exceptions: {
+        Row: ExceptionRowShape;
+        Insert: Partial<ExceptionRowShape> & Pick<ExceptionRowShape, "kind">;
+        Update: Partial<ExceptionRowShape>;
         Relationships: [];
       };
     };

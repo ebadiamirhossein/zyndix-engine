@@ -4,6 +4,11 @@ import { createHash } from "node:crypto";
 // content and recipient: the hash covers the canonical snapshot below, stored
 // on the touch at approval time and recomputed by preflight immediately before
 // every send. Any difference is `stale_approval`.
+//
+// Session 12: the snapshot also covers the sending account and its plain-text
+// signature, because the signature is part of what the recipient reads. The
+// sender is fixed at approval (touches.send_account_id), and the body that
+// leaves is exactly composeOutboundBody(body, signature).
 
 export type ApprovalSnapshot = {
   touch_id: string;
@@ -14,6 +19,8 @@ export type ApprovalSnapshot = {
   subject: string;
   body: string;
   prompt_version: number | null;
+  send_account_id: string | null;
+  signature: string | null;
 };
 
 export function buildApprovalSnapshot(
@@ -26,6 +33,7 @@ export function buildApprovalSnapshot(
     prompt_version: number | null;
   },
   lead: { id: string; email: string | null },
+  sender: { id: string; signature_text: string | null } | null,
 ): ApprovalSnapshot {
   return {
     touch_id: touch.id,
@@ -36,7 +44,58 @@ export function buildApprovalSnapshot(
     subject: (touch.subject ?? "").trim(),
     body: touch.body ?? "",
     prompt_version: touch.prompt_version ?? null,
+    send_account_id: sender?.id ?? null,
+    signature: normalizeSignature(sender?.signature_text),
   };
+}
+
+/** Trimmed signature, or null when there is none. */
+export function normalizeSignature(signature: string | null | undefined): string | null {
+  const s = (signature ?? "").replace(/\r\n/g, "\n").trim();
+  return s ? s : null;
+}
+
+const OPT_OUT_LINE = /reply stop/i;
+
+/**
+ * The plain-text body that actually leaves (Session 12, operator decision):
+ * the signature goes immediately BEFORE the compliance footer — the final
+ * paragraph when it carries the opt-out line — else at the very end:
+ *
+ *   <body>\n\n<signature>\n\n<address + "Reply STOP" footer>
+ *
+ * It depends only on the approved body and the signature, both of which are
+ * in the approval hash, so what is hashed is exactly what is sent.
+ */
+export function composeOutboundBody(body: string, signature: string | null | undefined): string {
+  const sig = normalizeSignature(signature);
+  const text = body.replace(/\s+$/, "");
+  if (!sig) return text;
+  const cut = text.lastIndexOf("\n\n");
+  const last = cut >= 0 ? text.slice(cut + 2) : "";
+  if (cut >= 0 && OPT_OUT_LINE.test(last)) {
+    return `${text.slice(0, cut).replace(/\s+$/, "")}\n\n${sig}\n\n${last}`;
+  }
+  return `${text}\n\n${sig}`;
+}
+
+const NAME = "\\p{Lu}[\\p{L}.'’-]*(?:\\s+\\p{Lu}[\\p{L}.'’-]*){0,2}";
+// "— Amir" / "-- Amir Ebadi" on a line of its own. A single hyphen is a bullet, not a sign-off.
+const SIGN_OFF_LINE = new RegExp(`^[ \\t]*(?:—|–|--)[ \\t]*${NAME}[ \\t]*$`, "mu");
+// "Best,\\nAmir" — a valediction line followed by a name-only line.
+const VALEDICTION = new RegExp(
+  `^[ \\t]*(?:[Bb]est|[Bb]est [Rr]egards|[Kk]ind [Rr]egards|[Rr]egards|[Cc]heers|[Tt]hanks|[Tt]hank you|[Ww]armly|[Ss]incerely),?[ \\t]*\\n[ \\t]*${NAME}[ \\t]*$`,
+  "mu",
+);
+
+/**
+ * A body that still signs itself ("— Amir", "Best,\nAmir") would name the
+ * sender twice once the mailbox signature is appended, and may name the wrong
+ * person. Approval refuses it; the operator edits or redrafts.
+ */
+export function findSignOff(body: string): string | null {
+  const m = body.match(SIGN_OFF_LINE) ?? body.match(VALEDICTION);
+  return m ? m[0].trim() : null;
 }
 
 /** JSON with keys sorted at every level, so the hash never depends on key order. */

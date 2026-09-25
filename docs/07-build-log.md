@@ -58,6 +58,213 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-25 — Session 12 — U6 (1 of 3): timezone fill, signatures, webhooks, reply freeze, suppression
+
+**Unit:** U6, Instantly webhooks, reply freeze, suppression and reconciliation (`09` §U6), session 1 of 3, on `main`. The operator added two pre-items: the US timezone fill and plain-text signatures.
+**Status at end:** 🟨 **U6 in progress.**
+- The Part 1 core is **tested locally**: `test:webhooks` 58/58, `test:webhook-rules` 10/10.
+- Webhook creation on Growth is **verified with provider**: created, a test delivery came through a tunnel, then deleted.
+- Still to do: the reconcile job, the traversal plus stop-rule siblings, and the Part 2 live drill.
+- 🚩 not reached. Nothing was sent to anyone, and nothing can send (no worker until U9).
+
+**Did**
+- **Operator facts, verified or recorded:**
+  - Link tracking off: confirmed in the UI (operator).
+  - Mail-tester on the getzyndix mailboxes passed after DMARC (operator).
+  - `daily_limit 1` and `enable_slow_ramp false` on all four accounts: **re-read via the API** (below).
+- **Pre-item 1, US timezone fill.** The read-only probe showed **HQ state stored nowhere**: `companies.city` is null ×34, there is no state column, and the enrichment payloads have no geo fields. So the baseline dry-run was **0/34 resolved**.
+  - The operator chose Apollo Organization Enrichment for the 4 send candidates only: 4 calls, 1 credit each per the docs, approved.
+  - `sending/us-timezones.ts` holds the state→IANA table. A split state needs a listed city, and nothing is guessed.
+  - `fill-us-timezones.ts` is dry-run by default. The enrichment cache is written outside the repo, and `--apply` does not touch lead state.
+  - Result: **4/34 resolved, 30 held (`state_missing`)**. Applied with approval.
+- **Pre-item 2, signatures.** The sender is now fixed at Telegram approval (operator decision).
+  - The approval snapshot and hash cover `send_account_id` and `signature`.
+  - `composeOutboundBody` is shared by the hash and the send.
+  - New preflight refusal: `sender_signature_missing`.
+  - 4 signatures written with approval.
+  - Then the regression found a conflict: the v2 compliance footer already signed "— Amir". The operator decided:
+    - the signature goes right before the footer;
+    - `compliance_footer` v3 drops "— Amir";
+    - `writer_prompt_email` v8 forbids a sign-off, and approval refuses a self-signed body;
+    - `send_policy` v2 `assignable_senders` = the amir@ mailboxes only (the writer persona is Amir).
+- **U6 core.**
+  - `0009_send_prereqs.sql` and `0009b_exceptions.sql`, applied by the operator after a local Postgres 16 pre-flight.
+  - `lib/webhooks/instantly.ts` plus the `/api/webhooks/instantly` route:
+    - token auth (Instantly has no HMAC), constant-time compare;
+    - persist-first with a hash `external_id` (the payload has no event id);
+    - a reply freezes before any model call; an auto-reply is recorded only;
+    - unsubscribe and bounce suppression, bounce-rate auto-pause;
+    - the exceptions queue.
+  - Instantly adapter additions: `listWebhooks`, `createWebhook` (secret stripped from every response and error), `testWebhook`, `deleteWebhook`.
+  - The verify and source stages now use `checkSuppression`. The backlog item, plus the same bug found in source.
+- **Found:** 2 legacy Instantly webhooks from 2025-10-15 posting `email_sent` and `reply_received` to Make.com with no auth. Left untouched per the operator; they must be deleted or confirmed before the drill.
+
+**Files touched**
+- `supabase/migrations/0009_send_prereqs.sql`, `0009b_exceptions.sql`: new
+- `src/lib/webhooks/instantly.ts`, `instantly-server.ts`, `instantly.test.ts`: new. `src/app/api/webhooks/instantly/route.ts`: new (replaces `.gitkeep`)
+- `src/lib/sending/us-timezones.ts`, `sender.ts`: new. `approval.ts`, `preflight.ts`, `sending.test.ts`: signature, sender and sign-off guard
+- `src/lib/stages/send/core.ts`: composed outbound body, `lead_timezone_source` on `send_queued`
+- `src/lib/telegram/handler.ts`: sender at approval, sign-off refusal, APPROVED footer. `src/lib/integrations/telegram-approval.ts`: card note
+- `src/lib/integrations/apollo.ts`, `apollo-types.ts`, `apollo.test.ts`, `__fixtures__/apollo/organization-enrich.json`: `enrichOrganization`
+- `src/lib/integrations/instantly.ts`, `instantly-types.ts`, `instantly.test.ts`, `__fixtures__/instantly/{webhook-created,webhooks-list,webhook-test-result}.json`
+- `src/lib/validation/external.ts`: Instantly payload envelope. `jsonb.ts`: `send_policy.assignable_senders`
+- `src/lib/settings/seed-content.ts`: footer v3, writer COMPLIANCE line, `send_policy` v2
+- `src/lib/stages/verify/core.ts`, `src/lib/stages/source/core.ts`: suppression scope
+- `src/types/enums.ts` (`sender_signature_missing`), `src/types/database-extensions.ts` (0009 columns, `DatabaseWithWebhooks`)
+- `scripts/fill-us-timezones.ts`, `instantly-webhooks.ts`, `test-u6-webhooks.ts`, `update-signature-settings.ts`: new. `seed-send-accounts.ts` (`--signatures`), `test-u5-send.ts`, `test-draft.ts`
+- `package.json` (`test:apollo`, `test:webhooks`, `test:webhook-rules`), `.env.local.example` (`INSTANTLY_WEBHOOK_SECRET`), `.claude/launch.json` (dev server, `autoPort`)
+- `docs/06-build-progress.md`, `docs/09-build-plan-v2.md`, `docs/07-build-log.md`
+
+**Verification**
+
+Operator facts, read-only (`GET /api/v2/accounts`, limit fields only):
+```
+ingrida@getzyndix.com  first=Ingrida last=Silobrit    daily_limit=1 enable_slow_ramp=false sending_gap=1 signature=(absent)
+amir@getzyndix.com     first=Amir last=Ebadi          daily_limit=1 enable_slow_ramp=false sending_gap=1 signature=(absent)
+ingrida@zyndixhq.com   first=Ingrida last=Silobrit    daily_limit=1 enable_slow_ramp=false sending_gap=1 signature=(absent)
+amir@zyndixhq.com      first=Amirhossein last=Ebadi   daily_limit=1 enable_slow_ramp=false sending_gap=1 signature=(absent)
+```
+
+Timezone fill (baseline, then Apollo with approval, then apply with approval):
+```
+$ pnpm tsx scripts/fill-us-timezones.ts                         → TOTAL leads=34 · get a timezone=0 · stay held=34 {"state_missing":34}
+$ pnpm tsx scripts/fill-us-timezones.ts --enrich steffengrp.com,gottesmanresidential.com,rebgrouponline.com,striderealestate.com
+[apollo] enrichOrganization: ok (no credit metadata in response)            ×4
+ENRICH steffengrp.com → state=Indiana city=Fort Wayne country=United States
+ENRICH gottesmanresidential.com → state=Texas city=Austin country=United States
+ENRICH rebgrouponline.com → state=Texas city=Houston country=United States
+ENRICH striderealestate.com → state=Texas city=Plano country=United States
+approved         Steffen Group Auctioneers and Real  Indiana  Fort Wayne  America/Indiana/Indianapolis (hq_state_city)
+pending_approval Gottesman Residential Real Estate   Texas    Austin      America/Chicago (hq_state_city)
+pending_approval Real Estate Brokerage Group         Texas    Houston     America/Chicago (hq_state_city)
+pending_approval Stride Real Estate                  Texas    Plano       America/Chicago (hq_state_city)
+TOTAL leads=34 · get a timezone=4 · stay held=30 {"state_missing":30}
+$ … --apply   → WROTE companies ×4 (+ enrichment_payloads ×4), WROTE lead timezone ×4
+$ … (re-run)  → get a timezone=0 · stay held=30 · already set=4
+```
+
+Signatures and settings (dry-run shown, then applied with approval):
+```
+$ pnpm tsx scripts/seed-send-accounts.ts --signatures --apply   → WROTE send_accounts.signature_text ×4; re-run → SKIP ×4
+$ pnpm tsx scripts/update-signature-settings.ts --apply
+WROTE  compliance_footer v3      (was v2 "— Amir\nZyndix, MB · Gerosios Vilties …\nNot useful? Reply STOP …")
+WROTE  writer_prompt_email v8    (v7 + "Do NOT sign off and do NOT write your name at the end …")
+WROTE  send_policy v2            (+ assignable_senders ["amir@zyndixhq.com","amir@getzyndix.com"])
+re-run → SKIP ×3
+```
+
+Migrations, local pre-flight (throwaway Postgres 16), then applied by the operator:
+```
+== 0009_send_prereqs.sql ok
+== 0009b_exceptions.sql ok     (0005 fails locally only: no Supabase `auth` schema — expected)
+8 new columns present · exceptions relrowsecurity t · status check rejects 'bogus'
+```
+
+Webhook DoD against Supabase (mocked Instantly, fetch guard, synthetic fixtures; UUIDs → `<uuid>`):
+```
+$ pnpm test:webhooks
+BEFORE  leads=34 touches=4 lead_events=219 jobs=0 companies=34 send_accounts=4 suppression_list=0 webhook_events=3 exceptions=0
+PASS: auth: no token → 401 · wrong token → 401 · secret not configured → 500 · invalid JSON → 400
+PASS: auth: ZERO rows written by any rejected delivery — {"events":3,"exceptions":0,"leadEvents":219} → same
+PASS: dup: first delivery processed → replied · second → duplicate · same webhook_events row · no second lead_events row · no second inbound touch
+PASS: order: reply on a queued lead → queued → sent → replied · the late email_sent never regresses the state
+PASS: reply: lead sent → replied · queued send job cancelled · lead-level job cancelled · follow-up touch killed · inbound touch
+PASS: reply: ZERO network calls — Anthropic (and everything else) uncalled
+PASS: ooo: lead stays sent · queued job intact · follow-up touch intact · no inbound touch · return_date 2026-10-12
+PASS: ooo: "Automatic reply:" subject on reply_received treated the same · year-less date → 2026-10-05
+PASS: unsub: person-level suppression row · lead suppressed + do_not_contact · email job AND linkedin_msg job cancelled · both touches killed · block list ×1
+PASS: stop_failed: exception escalated + operator alerted; lead still suppressed
+PASS: unknown: exactly one exceptions row · zero lead mutations (leads, lead_events, touches unchanged) · foreign campaign → foreign_campaign · no event_type → invalid_payload
+PASS: bounce: sent → bounced, email invalid · suppression · touch bounced · 1/1 > 3% → paused · campaign paused (mock) + alert
+AFTER   leads=34 touches=4 lead_events=219 jobs=0 companies=34 send_accounts=4 suppression_list=0 webhook_events=3 exceptions=0
+All 58 checks passed.
+```
+(Grouped: several PASS lines are joined with `·`; nothing else edited.)
+
+Webhook creation on Growth (operator-approved writes), through a Cloudflare quick tunnel to local `pnpm dev`:
+```
+$ curl -X POST https://allows-improving-bears-faster.trycloudflare.com/api/webhooks/instantly   → 401 (no token)
+$ pnpm tsx scripts/instantly-webhooks.ts --create --url https://allows-improving-bears-faster.trycloudflare.com/api/webhooks/instantly
+CREATED webhook 01a0d85c-d21a-7f80-88f0-d4393d205987 event_type=all_events status=1 headers=[x-zyndix-webhook-token]
+$ pnpm tsx scripts/instantly-webhooks.ts --test 01a0d85c-…
+TEST 01a0d85c-…: success=true status_code=200 response_time_ms=1219
+webhook_events: test_event processed=true err=none keys=campaign_id,campaign_name,event_type,is_test,lead_email,test_message,timestamp,webhook_id,workspace · exceptions: none
+$ pnpm tsx scripts/instantly-webhooks.ts --delete 01a0d85c-…   → DELETED
+$ pnpm tsx scripts/instantly-webhooks.ts --list                → webhooks: 2 (the legacy Make.com pair only)
+```
+
+Regression:
+```
+$ pnpm test:sending        → tests 68 · pass 68 · fail 0   (51 + signature, sender, sign-off, US timezone cases)
+$ pnpm test:send           → All 67 checks passed.         (64 + signature at step 1 / follow-up / edited-after-approval)
+$ pnpm test:instantly      → 77/77   (71 + 6 webhook contract tests)
+$ pnpm test:apollo         → 6/6     (new)
+$ pnpm test:webhook-rules  → 10/10   (new)
+$ pnpm test:jobs 63/63 · test:scheduler 80/80 · test:source-filters 9/9 · test-state 11/11 · test-validation 16/16 · test-settings 8/8
+$ pnpm tsx scripts/test-draft.ts --limit 1   (1 Anthropic call, 1,562 tokens; Telegram to the operator only)
+PASS: compliance footer appended · body does not sign itself (Session 12)
+PASS: approve → approval_hash binds … · sender fixed at approval with a signature (Session 12)
+36/36 passed
+$ pnpm exec tsc --noEmit → clean · pnpm build → clean (route ƒ /api/webhooks/instantly)
+$ pnpm exec eslint <every new/changed file> → 0 errors (1 pre-existing unused-import warning in verify/core.ts)
+$ pnpm lint → ✖ 21 problems (17 errors, 4 warnings) — unchanged pre-existing backlog
+```
+
+**Status claims, kept separate:**
+- **Tested locally:** the webhook processor (58/58 and 10/10), the signature and sender binding, and the US timezone table.
+- **Verified with provider:** Instantly webhook create/test/delete on Growth, and Apollo Organization Enrichment.
+- **Mocked only:** the block list, campaign pause, `leads/add`, `emails/reply`, and reconcile reads. These reach *verified* in the U6 drill.
+- **Nothing is active in production.**
+
+**Decisions** (all in `06` §5)
+- **US timezone comes from the HQ state.** A split state needs a listed city; nothing is guessed.
+- **The signature is in the approval hash**, so the sender is fixed at approval.
+- **The signature goes right before the footer.** The footer drops "— Amir", and approval refuses a self-signed body.
+- **Only amir@ mailboxes are assigned**, through `send_policy.assignable_senders`.
+- **Webhooks:** static token header, persist first, hash dedupe, `all_events`.
+- **An auto-reply is not a reply.**
+- **A reply freezes all channels before any model call.** The outbox settlement stays with reconcile.
+- **Unsubscribe and bounce are person-level suppression**, with bounce-rate auto-pause. The verify and source stages use the same scope.
+
+**Problems hit**
+- **HQ state was nowhere in the DB.** Four Apollo credits resolved the send candidates. The permanent fix, storing location at sourcing, is backlogged. The operator added the rule that person location wins over HQ.
+- **Signature vs footer conflict.** It was found by the regression (`test-draft` asserted "— Amir"), and it would have double-signed mail and signed ingrida@ mail as Amir. It was resolved by operator decision before any real approval.
+  - The 4 existing drafts carry the old footer and now refuse approval until they are edited or redrafted.
+  - Steffen's approved touch is `stale_approval`, as designed.
+- **Naming collision.** I first named the webhook-config schema `instantlyWebhookSchema`, which was already the payload envelope in `validation/external.ts`. Renamed it to `instantlyWebhookConfigSchema`.
+- **Port 3000 is taken by another local project (`jobpilot`).** It was left alone, and the dev server ran on an auto-assigned port.
+- **The quick tunnel returned an empty 404.** The operator's `~/.cloudflared/config.yml` (a named tunnel from July) was being applied. Fixed by running `cloudflared --config <empty.yml> tunnel --url …`; the operator's config was not modified.
+- **`test-u6-webhooks.ts` cleanup order.** The first run deleted touches before the suppression rows that reference them (FK). The cascade still restored every count; the order was fixed and the re-run is clean.
+- **Legacy Make.com webhooks** (see above) are open and gate the drill.
+- In plan mode, throwaway read-only probe scripts ran from the scratchpad, never inside `scripts/`.
+
+**Open, carried forward**
+- **Operator:**
+  - Check the 2 Make.com webhooks, then delete or confirm them **before the drill**.
+  - Edit or redraft the 4 drafts: remove the "— Amir" line, or redraft to pick up footer v3.
+  - Re-approve Steffen.
+  - Add `INSTANTLY_WEBHOOK_SECRET` to the Vercel env at deploy.
+- **U6 sessions 2–3:**
+  - `lib/reconcile/core.ts`: `stop_processing_stale` → pause, and missed-reply polling via `GET /api/v2/emails` at 20 rpm.
+  - The sourced→sent traversal plus 8 stop-rule siblings.
+  - The Part 2 live drill, with gates:
+    - Make.com hooks resolved;
+    - a fresh tunnel webhook (with approval);
+    - the operator-owned recipient only;
+    - threading headers checked;
+    - the first live `leads:create`, `emails:create` and `campaigns:update`.
+- **Backlog (`09` §5):**
+  - Store person and HQ location at sourcing/verify (person wins).
+  - A per-sender writer persona.
+  - Exclude `/api/webhooks/*` from the proxy.
+
+**Next action**
+- **U6 session 2: `src/lib/reconcile/core.ts`** plus the traversal and stop-rule siblings (`09` §U6 Part 1, remaining bullets). Use plan mode, because it pauses sends.
+  - Build `stop_processing_stale` first: touches sent over 24h ago with zero webhook events → pause the sender (`health paused`) plus its campaign, and raise an exception.
+  - Then missed-reply polling through `listEmails({ emailType: "received" })` into the same `handleReply` path.
+
+---
+
 ### 2026-09-25 — Session 11 — operator items verified; U5 send stage, preflight, guards, sender pinning
 
 **Unit:** U5, send stage, preflight and guards (`09` §U5), on `main`. Also recorded: three operator items done since Session 10.

@@ -87,6 +87,7 @@ export function formatApprovalMessageHtml(
     `<b>SUBJECT:</b> ${subject}`,
     "",
     `<pre>${body}</pre>`,
+    "<i>Sender + signature are fixed when you approve; the APPROVED update shows the final text.</i>",
     "──────────",
   ].join("\n");
 }
@@ -107,6 +108,7 @@ export function formatApprovalMessagePlain(
   return html
     .replace(/<b>(.*?)<\/b>/g, "$1")
     .replace(/<\/?pre>/g, "")
+    .replace(/<\/?i>/g, "")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");

@@ -136,8 +136,9 @@ export const proof_points = {
     "PulseConf conference platform shipped; 50+ automation workflows and an AI support agent built for events operations.",
 } as const;
 
-export const compliance_footer = `— Amir
-Zyndix, MB · Gerosios Vilties g. 6-76, Vilnius, Lithuania
+// Session 12 (DB v3): no "— Amir" sign-off. The send stage puts the sending
+// mailbox's signature right before this footer (sending/approval.ts).
+export const compliance_footer = `Zyndix, MB · Gerosios Vilties g. 6-76, Vilnius, Lithuania
 Not useful? Reply STOP and I won't write again.`;
 
 export const writer_prompt_email = `You are Amir, co-founder of Zyndix — an automation agency that builds the
@@ -193,6 +194,8 @@ STEP VARIANTS
   leaving this here.") + same CTA style as touch 1. Nothing clever.
 
 COMPLIANCE
+- Do NOT sign off and do NOT write your name at the end (no "— Amir", no
+  "Best, Amir"). The system appends the sending mailbox's signature.
 - Do NOT include a physical address or opt-out line in the body. The system
   appends this footer automatically after generation:
   {{compliance_footer}}
@@ -291,6 +294,8 @@ export const send_policy = {
   allow_catch_all: false,
   min_warmup_score: 80,
   duplicate_company_window_days: 30,
+  // Session 12 (DB v2): writer persona is Amir, so only his mailboxes are assigned.
+  assignable_senders: ["amir@zyndixhq.com", "amir@getzyndix.com"],
 } as const;
 
 export const cta_variants = {

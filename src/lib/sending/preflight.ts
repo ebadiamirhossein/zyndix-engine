@@ -1,7 +1,7 @@
 import type { z } from "zod";
 
 import { nextSendWindow, type SendWindow } from "@/lib/scheduler/windows";
-import { approvalHash, buildApprovalSnapshot } from "@/lib/sending/approval";
+import { approvalHash, buildApprovalSnapshot, normalizeSignature } from "@/lib/sending/approval";
 import { checkSenderDomain } from "@/lib/sending/guard";
 import { resolveRecipientTimezone, type ResolvedTimezone } from "@/lib/sending/timezone";
 import type { sendPolicySchema, sendWindowsSchema } from "@/lib/validation/jsonb";
@@ -43,7 +43,14 @@ export type PreflightContext = {
   };
   company: { domain: string | null; timezone: string | null; country: string | null } | null;
   /** The account this dispatch would go out from. */
-  sender: { id: string; identifier: string; health: string | null; instantly_campaign_id: string | null };
+  sender: {
+    id: string;
+    identifier: string;
+    health: string | null;
+    instantly_campaign_id: string | null;
+    /** Plain-text signature (0009). Covered by the approval hash. */
+    signature_text: string | null;
+  };
   /** Instantly accountHealth verdict for the sender, and its warmup score. Null = not read. */
   providerHealth: { verdict: "healthy" | "degraded" | "unhealthy" | "unknown"; warmupScore: number | null } | null;
   suppression: { email: boolean; domain: boolean };
@@ -108,7 +115,9 @@ export function preflight(ctx: PreflightContext): PreflightResult {
   }
 
   // Approval bound to content + recipient.
-  const recomputedHash = approvalHash(buildApprovalSnapshot({ ...ctx.touch, id: ctx.touch.id }, ctx.lead));
+  // The sender and its signature are in the snapshot (Session 12): a touch
+  // approved for another mailbox, or a signature edited since, is stale.
+  const recomputedHash = approvalHash(buildApprovalSnapshot({ ...ctx.touch, id: ctx.touch.id }, ctx.lead, ctx.sender));
   if (ctx.touch.status !== "approved" || !ctx.touch.approval_hash || ctx.touch.approval_hash !== recomputedHash) {
     add("stale_approval", {
       touch_status: ctx.touch.status,
@@ -161,6 +170,7 @@ export function preflight(ctx: PreflightContext): PreflightResult {
   }
   if (step === 1 && !ctx.sender.instantly_campaign_id) reasons.push("no_instantly_campaign");
   if (reasons.length > 0) add("sender_unhealthy", { reasons });
+  if (!normalizeSignature(ctx.sender.signature_text)) add("sender_signature_missing", { sender: ctx.sender.identifier });
 
   if (ctx.companyConflicts > 0) add("duplicate_company_active", { other_leads: ctx.companyConflicts });
 

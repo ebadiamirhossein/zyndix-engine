@@ -17,6 +17,9 @@ import type { DatabaseWithSending } from "../src/types/database-extensions";
 //
 //   pnpm tsx scripts/seed-send-accounts.ts            dry run (reads only)
 //   pnpm tsx scripts/seed-send-accounts.ts --apply    writes — operator approval first
+//   pnpm tsx scripts/seed-send-accounts.ts --signatures [--apply]
+//                                                     plain-text signatures only (0009, Session 12):
+//                                                     prints the exact texts; --apply writes them
 //
 // Idempotent: an existing mailbox row (case-insensitive) or an active
 // send_policy is left alone. ramp_started_on stays null — the first real
@@ -31,12 +34,54 @@ const MAILBOXES = [
 ] as const;
 
 const apply = process.argv.includes("--apply");
+const signaturesOnly = process.argv.includes("--signatures");
+
+// Operator-approved texts (Session 12). Same person, same signature on both
+// domains. Changing one after a touch is approved makes that touch stale.
+const SIGNATURES: Readonly<Record<(typeof MAILBOXES)[number], string>> = {
+  "amir@zyndixhq.com": "Amir Ebadi\nZyndix, Vilnius\nzyndix.com",
+  "amir@getzyndix.com": "Amir Ebadi\nZyndix, Vilnius\nzyndix.com",
+  "ingrida@zyndixhq.com": "Ingrida Silobrit\nZyndix, Vilnius\nzyndix.com",
+  "ingrida@getzyndix.com": "Ingrida Silobrit\nZyndix, Vilnius\nzyndix.com",
+};
+
+async function seedSignatures(db: SupabaseClient<DatabaseWithSending>): Promise<void> {
+  console.log(`=== seed-send-accounts --signatures (${apply ? "APPLY" : "dry run"}) ===`);
+  const plan: Array<{ id: string; identifier: string; text: string }> = [];
+  for (const identifier of MAILBOXES) {
+    const { data, error } = await db
+      .from("send_accounts")
+      .select("id, identifier, signature_text")
+      .ilike("identifier", identifier)
+      .maybeSingle();
+    if (error) throw new Error(`read send_accounts: ${error.message}`);
+    if (!data) throw new Error(`${identifier}: no send_accounts row — nothing written`);
+    const text = SIGNATURES[identifier];
+    console.log(`\n${identifier}  (current: ${data.signature_text === null ? "none" : JSON.stringify(data.signature_text)})`);
+    console.log(text.split("\n").map((line) => `  | ${line}`).join("\n"));
+    if (data.signature_text === text) {
+      console.log("  SKIP (already set)");
+      continue;
+    }
+    plan.push({ id: data.id, identifier, text });
+  }
+  if (!apply) {
+    console.log(`\nDry run: ${plan.length} signature(s) would be written. Re-run with --apply after operator approval.`);
+    return;
+  }
+  for (const row of plan) {
+    const { error } = await db.from("send_accounts").update({ signature_text: row.text }).eq("id", row.id);
+    if (error) throw new Error(`write signature ${row.identifier}: ${error.message}`);
+    console.log(`WROTE  send_accounts.signature_text ${row.identifier}`);
+  }
+}
 
 async function main(): Promise<void> {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY in .env.local");
   const db = createServiceClient(url, key) as unknown as SupabaseClient<DatabaseWithSending>;
+  if (signaturesOnly) return seedSignatures(db);
   const instantly = createInstantlyReadClient();
 
   console.log(`=== seed-send-accounts (${apply ? "APPLY" : "dry run"}) ===`);

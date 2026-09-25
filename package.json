@@ -14,7 +14,10 @@
     "test:scheduler": "tsx scripts/test-u3-scheduler.ts",
     "test:instantly": "tsx --test src/lib/integrations/instantly.test.ts",
     "test:sending": "tsx --test src/lib/sending/sending.test.ts",
-    "test:send": "tsx scripts/test-u5-send.ts"
+    "test:send": "tsx scripts/test-u5-send.ts",
+    "test:apollo": "tsx --test src/lib/integrations/apollo.test.ts",
+    "test:webhooks": "tsx scripts/test-u6-webhooks.ts",
+    "test:webhook-rules": "tsx --test src/lib/webhooks/instantly.test.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

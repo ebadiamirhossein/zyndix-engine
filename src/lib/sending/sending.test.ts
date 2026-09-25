@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { approvalHash, buildApprovalSnapshot, canonicalJson, sendIdempotencyKey } from "./approval";
+import {
+  approvalHash,
+  buildApprovalSnapshot,
+  canonicalJson,
+  composeOutboundBody,
+  findSignOff,
+  normalizeSignature,
+  sendIdempotencyKey,
+} from "./approval";
 import { ALLOWED_SENDER_DOMAINS, checkSenderDomain, normalizeDomain } from "./guard";
 import { preflight, threadedSubject, type PreflightContext } from "./preflight";
+import { isEligibleSender, pickLeastLoaded, type SenderCandidate } from "./sender";
 import { resolveRecipientTimezone, singleTimezoneForCountry } from "./timezone";
+import { normalizeUsState, resolveUsTimezone, SINGLE_ZONE_STATES, SPLIT_STATE_CITIES } from "./us-timezones";
 import { PREFLIGHT_REFUSALS, type PreflightRefusal } from "@/types/enums";
 
 // Pure suite for U5's guard, approval binding, timezone resolution and
@@ -30,7 +40,14 @@ const POLICY = {
   duplicate_company_window_days: 30,
 };
 
-const SENDER = { id: "acct-zyndixhq-amir", identifier: "amir@zyndixhq.com", health: "ok", instantly_campaign_id: "camp-1" };
+const SIGNATURE = "Amir Ebadi\nZyndix, Vilnius\nzyndix.com";
+const SENDER = {
+  id: "acct-zyndixhq-amir",
+  identifier: "amir@zyndixhq.com",
+  health: "ok",
+  instantly_campaign_id: "camp-1",
+  signature_text: SIGNATURE as string | null,
+};
 
 function base(): PreflightContext {
   const touch = {
@@ -54,7 +71,7 @@ function base(): PreflightContext {
     do_not_contact: false,
     send_account_id: null as string | null,
   };
-  touch.approval_hash = approvalHash(buildApprovalSnapshot(touch, lead));
+  touch.approval_hash = approvalHash(buildApprovalSnapshot(touch, lead, SENDER));
   return {
     now: INSIDE,
     touch,
@@ -183,9 +200,16 @@ describe("sender pinning", () => {
     ctx.lead.send_account_id = "acct-zyndixhq-amir";
     ctx.touch.step_no = 2;
     ctx.touch.subject = threadedSubject("Your listing pages");
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead));
+    ctx.sender = {
+      id: "acct-getzyndix-amir",
+      identifier: "amir@getzyndix.com",
+      health: "ok",
+      instantly_campaign_id: "camp-2",
+      signature_text: SIGNATURE,
+    };
+    // Approved for the other mailbox, so only the pinning rule fails.
+    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
     ctx.threadAnchor = { emailId: "email-1", subject: "Your listing pages" };
-    ctx.sender = { id: "acct-getzyndix-amir", identifier: "amir@getzyndix.com", health: "ok", instantly_campaign_id: "camp-2" };
     assert.deepEqual(reasons(ctx), ["sender_mismatch"]);
   });
   test("same bound sender on the follow-up → ok", () => {
@@ -194,7 +218,7 @@ describe("sender pinning", () => {
     ctx.lead.send_account_id = SENDER.id;
     ctx.touch.step_no = 2;
     ctx.touch.subject = threadedSubject("Your listing pages");
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead));
+    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
     ctx.threadAnchor = { emailId: "email-1", subject: "Your listing pages" };
     assert.deepEqual(reasons(ctx), []);
   });
@@ -204,7 +228,7 @@ describe("sender pinning", () => {
     ctx.lead.send_account_id = SENDER.id;
     ctx.touch.step_no = 2;
     ctx.touch.subject = "Re: Your listing pages";
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead));
+    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
     assert.deepEqual(reasons(ctx), ["thread_anchor_missing"]);
   });
   test("follow-up whose subject is not Re: <step-1 subject> → stale_approval", () => {
@@ -213,7 +237,7 @@ describe("sender pinning", () => {
     ctx.lead.send_account_id = SENDER.id;
     ctx.touch.step_no = 2;
     ctx.touch.subject = "A brand new subject";
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead));
+    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
     ctx.threadAnchor = { emailId: "email-1", subject: "Your listing pages" };
     assert.deepEqual(reasons(ctx), ["stale_approval"]);
   });
@@ -301,21 +325,147 @@ describe("09 §U5 DoD — domain guard sub-table", () => {
 describe("approval binding", () => {
   test("hash is stable across key order and changes with any bound field", () => {
     const ctx = base();
-    const snap = buildApprovalSnapshot(ctx.touch, ctx.lead);
+    const snap = buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender);
     const reordered = Object.fromEntries(Object.entries(snap).reverse()) as typeof snap;
     assert.equal(approvalHash(snap), approvalHash(reordered));
-    for (const field of ["recipient", "subject", "body", "channel"] as const) {
+    for (const field of ["recipient", "subject", "body", "channel", "signature", "send_account_id"] as const) {
       assert.notEqual(approvalHash({ ...snap, [field]: `${snap[field]}x` }), approvalHash(snap), field);
     }
     assert.notEqual(approvalHash({ ...snap, step_no: 2 }), approvalHash(snap));
   });
   test("recipient comparison is case-insensitive; canonicalJson sorts keys", () => {
     const ctx = base();
-    const a = buildApprovalSnapshot(ctx.touch, { ...ctx.lead, email: "Test.Lead@Target.example.invalid " });
+    const a = buildApprovalSnapshot(ctx.touch, { ...ctx.lead, email: "Test.Lead@Target.example.invalid " }, ctx.sender);
     assert.equal(approvalHash(a), ctx.touch.approval_hash);
     assert.equal(canonicalJson({ b: 1, a: [2, { d: 1, c: 0 }] }), '{"a":[2,{"c":0,"d":1}],"b":1}');
   });
   test("idempotency key names the touch and the approved version", () => {
     assert.equal(sendIdempotencyKey("t1", "abc"), "send:t1:abc");
+  });
+});
+
+describe("signature bound into the approval (Session 12)", () => {
+  test("the snapshot carries the sender and its signature", () => {
+    const ctx = base();
+    const snap = buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender);
+    assert.equal(snap.send_account_id, SENDER.id);
+    assert.equal(snap.signature, SIGNATURE);
+  });
+  test("signature edited after approval → stale_approval", () => {
+    const ctx = base();
+    ctx.sender.signature_text = "Amir Ebadi\nZyndix\nzyndix.com";
+    assert.deepEqual(reasons(ctx), ["stale_approval"]);
+  });
+  test("approved for one mailbox, dispatched from another (unbound lead) → stale_approval", () => {
+    const ctx = base();
+    ctx.sender = { ...SENDER, id: "acct-getzyndix-amir", identifier: "amir@getzyndix.com" };
+    assert.deepEqual(reasons(ctx), ["stale_approval"]);
+  });
+  test("no signature on the sender → sender_signature_missing (and the pre-signature hash is stale)", () => {
+    const ctx = base();
+    ctx.sender.signature_text = "   ";
+    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
+    assert.deepEqual(reasons(ctx), ["sender_signature_missing"]);
+  });
+  test("a touch approved before signatures existed (U5 snapshot) is stale", () => {
+    const ctx = base();
+    const legacy = { ...buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender) } as Record<string, unknown>;
+    delete legacy.send_account_id;
+    delete legacy.signature;
+    ctx.touch.approval_hash = approvalHash(legacy as unknown as ReturnType<typeof buildApprovalSnapshot>);
+    assert.ok(reasons(ctx).includes("stale_approval"));
+  });
+  test("composeOutboundBody: signature goes right before the compliance footer (operator, Session 12)", () => {
+    const footer = "Zyndix, MB · Gerosios Vilties g. 6-76, Vilnius, Lithuania\nNot useful? Reply STOP and I won't write again.";
+    assert.equal(
+      composeOutboundBody(`Hi Test,\n\nWant me to send them over?\n\n${footer}`, SIGNATURE),
+      `Hi Test,\n\nWant me to send them over?\n\n${SIGNATURE}\n\n${footer}`,
+    );
+  });
+  test("findSignOff: '— Amir' and 'Best,\\nAmir' are sign-offs; bullets and sentences are not", () => {
+    assert.equal(findSignOff("Hi,\n\nText.\n\n— Amir\nZyndix, MB · Vilnius\nNot useful? Reply STOP"), "— Amir");
+    assert.equal(findSignOff("Hi,\n\nText.\n\nBest,\nAmir Ebadi"), "Best,\nAmir Ebadi");
+    assert.equal(findSignOff("Hi,\n- Faster intake\n- Fewer misses\n\n-- \nnot a name"), null);
+    assert.equal(findSignOff("Thanks,\nwould that help"), null);
+    assert.equal(findSignOff("Hi — the team handles it.\n\nZyndix, MB\nNot useful? Reply STOP"), null);
+  });
+  test("composeOutboundBody: body, one blank line, signature; trailing space trimmed", () => {
+    assert.equal(composeOutboundBody("Hi,\n\nThanks.\n\n  ", SIGNATURE), `Hi,\n\nThanks.\n\n${SIGNATURE}`);
+    assert.equal(composeOutboundBody("Hi", null), "Hi");
+    assert.equal(normalizeSignature(" a\r\nb \n"), "a\nb");
+  });
+});
+
+describe("sender assignment at approval (Session 12)", () => {
+  const acct = (id: string, identifier: string, extra: Partial<SenderCandidate> = {}): SenderCandidate => ({
+    id,
+    identifier,
+    kind: "email",
+    health: "ok",
+    instantly_campaign_id: `camp-${id}`,
+    signature_text: SIGNATURE,
+    ...extra,
+  });
+  test("least loaded eligible account wins; ties go to identifier order", () => {
+    const a = acct("a", "amir@zyndixhq.com");
+    const b = acct("b", "amir@getzyndix.com");
+    const c = acct("c", "ingrida@getzyndix.com");
+    assert.equal(pickLeastLoaded([a, b, c], new Map())?.id, "b");
+    assert.equal(pickLeastLoaded([a, b, c], new Map([["b", 2], ["c", 1]]))?.id, "a");
+  });
+  test("send_policy.assignable_senders restricts the pool (amir@ only), case-insensitively", () => {
+    const a = acct("a", "amir@zyndixhq.com");
+    const b = acct("b", "amir@getzyndix.com");
+    const i = acct("i", "ingrida@getzyndix.com");
+    const only = ["AMIR@zyndixhq.com", "amir@getzyndix.com"];
+    assert.equal(pickLeastLoaded([i, a, b], new Map([["a", 3], ["b", 2]]), only)?.id, "b");
+    assert.equal(pickLeastLoaded([i], new Map(), only), null);
+    assert.equal(pickLeastLoaded([i, a], new Map([["a", 5]]))?.id, "i");
+  });
+  test("ineligible: paused, no campaign, no signature, zyndix.com, non-email", () => {
+    assert.equal(isEligibleSender(acct("1", "amir@zyndixhq.com", { health: "paused" })), false);
+    assert.equal(isEligibleSender(acct("2", "amir@zyndixhq.com", { instantly_campaign_id: null })), false);
+    assert.equal(isEligibleSender(acct("3", "amir@zyndixhq.com", { signature_text: " " })), false);
+    assert.equal(isEligibleSender(acct("4", "amir@zyndix.com")), false);
+    assert.equal(isEligibleSender(acct("5", "amir@zyndixhq.com", { kind: "linkedin" })), false);
+    assert.equal(pickLeastLoaded([acct("4", "amir@zyndix.com")], new Map()), null);
+  });
+});
+
+describe("US HQ-state timezone (Session 12)", () => {
+  test("single-zone states by code or name", () => {
+    assert.deepEqual(resolveUsTimezone({ state: "Colorado", city: null }), { ok: true, timeZone: "America/Denver", source: "hq_state", state: "CO" });
+    assert.deepEqual(resolveUsTimezone({ state: "ny", city: "" }), { ok: true, timeZone: "America/New_York", source: "hq_state", state: "NY" });
+    assert.equal(normalizeUsState("District of Columbia"), "DC");
+    assert.equal(normalizeUsState("Washington, D.C."), "DC");
+  });
+  test("Arizona is Phoenix, except Navajo Nation communities", () => {
+    assert.equal((resolveUsTimezone({ state: "AZ", city: "Scottsdale" }) as { timeZone: string }).timeZone, "America/Phoenix");
+    assert.equal((resolveUsTimezone({ state: "AZ", city: "Window Rock" }) as { timeZone: string }).timeZone, "America/Denver");
+  });
+  test("split state resolves only from a listed city, on either side of the line", () => {
+    assert.deepEqual(resolveUsTimezone({ state: "Texas", city: "Austin" }), { ok: true, timeZone: "America/Chicago", source: "hq_state_city", state: "TX" });
+    assert.deepEqual(resolveUsTimezone({ state: "TX", city: "El Paso" }), { ok: true, timeZone: "America/Denver", source: "hq_state_city", state: "TX" });
+    assert.equal((resolveUsTimezone({ state: "Tennessee", city: "Nashville" }) as { timeZone: string }).timeZone, "America/Chicago");
+    assert.equal((resolveUsTimezone({ state: "Tennessee", city: "Knoxville" }) as { timeZone: string }).timeZone, "America/New_York");
+    assert.equal((resolveUsTimezone({ state: "FL", city: "Pensacola" }) as { timeZone: string }).timeZone, "America/Chicago");
+    assert.equal((resolveUsTimezone({ state: "FL", city: "St. Petersburg" }) as { timeZone: string }).timeZone, "America/New_York");
+  });
+  test("split state with no city, or an unlisted city → ambiguous, never the majority zone", () => {
+    assert.deepEqual(resolveUsTimezone({ state: "Texas", city: null }), { ok: false, unresolved: "ambiguous_split_state", state: "TX" });
+    assert.deepEqual(resolveUsTimezone({ state: "FL", city: "Smallville" }), { ok: false, unresolved: "ambiguous_split_state", state: "FL" });
+  });
+  test("missing or unknown state → unresolved", () => {
+    assert.deepEqual(resolveUsTimezone({ state: null, city: "Austin" }), { ok: false, unresolved: "state_missing", state: null });
+    assert.deepEqual(resolveUsTimezone({ state: "Ontario", city: "Toronto" }), { ok: false, unresolved: "state_unknown", state: "Ontario" });
+  });
+  test("every zone in the tables is a valid IANA zone, and no city is listed on both sides", () => {
+    const zones = new Set([...Object.values(SINGLE_ZONE_STATES), ...Object.values(SPLIT_STATE_CITIES).flatMap((z) => Object.keys(z))]);
+    for (const tz of zones) assert.doesNotThrow(() => new Intl.DateTimeFormat("en-US", { timeZone: tz }), tz);
+    for (const [state, sides] of Object.entries(SPLIT_STATE_CITIES)) {
+      const all = Object.values(sides).flat();
+      assert.equal(new Set(all).size, all.length, `${state} lists a city twice`);
+      assert.ok(!(state in SINGLE_ZONE_STATES), `${state} is both single and split`);
+    }
   });
 });

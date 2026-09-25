@@ -285,6 +285,42 @@ export const instantlyWebhookEventTypesSchema = z
   })
   .passthrough();
 
+// ---------------------------------------------------------------------------
+// Webhooks — /api/v2/webhooks (09 §U6). No HMAC signing exists; deliveries are
+// authenticated by a static header we set in `headers`. That header value is a
+// secret, so it is dropped at parse time and never returned to callers.
+// ---------------------------------------------------------------------------
+
+export const instantlyWebhookConfigSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().nullable().optional(),
+    target_hook_url: z.string(),
+    event_type: z.string().nullable().optional(),
+    campaign: z.string().nullable().optional(),
+    status: z.number().nullable().optional(),
+    timestamp_created: z.string().nullable().optional(),
+    timestamp_error: z.string().nullable().optional(),
+    headers: z.record(z.string(), z.string()).nullable().optional(),
+  })
+  .passthrough()
+  .transform(({ headers, ...rest }) => ({ ...rest, header_names: headers ? Object.keys(headers) : [] }));
+
+export const instantlyWebhookPageSchema = pageSchema(instantlyWebhookConfigSchema);
+
+export const instantlyWebhookTestResultSchema = z
+  .object({
+    success: z.boolean(),
+    status_code: z.number().nullable().optional(),
+    response_time_ms: z.number().nullable().optional(),
+    message: z.string().nullable().optional(),
+    error: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export type InstantlyWebhook = z.infer<typeof instantlyWebhookConfigSchema>;
+export type InstantlyWebhookTestResult = z.infer<typeof instantlyWebhookTestResultSchema>;
+
 export type InstantlyWorkspace = z.infer<typeof instantlyWorkspaceSchema>;
 export type InstantlyAccount = z.infer<typeof instantlyAccountSchema>;
 export type InstantlyWarmupAggregate = z.infer<typeof instantlyWarmupAggregateSchema>;

@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { ApolloClient } from "@/lib/integrations/apollo";
 import { isMaskedApolloEmail } from "@/lib/integrations/apollo-types";
+import { checkSuppression } from "@/lib/sending/suppression";
 import { readSourcePage, writeSourcePage } from "@/lib/stages/source/cursor";
 import {
   assessPersonNames,
@@ -10,6 +11,7 @@ import {
 } from "@/lib/stages/source/filters";
 import { segmentsSettingsSchema } from "@/lib/validation/jsonb";
 import type { LeadState } from "@/types/enums";
+import type { Database } from "@/types/database";
 import type { DatabaseWithSourceCursors } from "@/types/database-extensions";
 import type { z } from "zod";
 
@@ -81,36 +83,15 @@ function resolveActiveSegment(segments: SegmentsSettings): {
   return { key, definition };
 }
 
+// Scope from sending/suppression.ts (U6 fold-in): only a row with no email is
+// company-wide, so one invalid address never suppresses a whole company.
 async function isSuppressed(
   db: SupabaseClient<DatabaseWithSourceCursors>,
   email: string | null,
   domain: string | null,
 ): Promise<boolean> {
-  if (email) {
-    const { data } = await db
-      .from("suppression_list")
-      .select("id")
-      .eq("email", email)
-      .limit(1)
-      .maybeSingle();
-    if (data) {
-      return true;
-    }
-  }
-
-  if (domain) {
-    const { data } = await db
-      .from("suppression_list")
-      .select("id")
-      .eq("domain", domain)
-      .limit(1)
-      .maybeSingle();
-    if (data) {
-      return true;
-    }
-  }
-
-  return false;
+  const hit = await checkSuppression(db as unknown as SupabaseClient<Database>, { email, companyDomain: domain });
+  return hit.email || hit.domain;
 }
 
 function isUniqueViolation(error: { code?: string } | null | undefined): boolean {

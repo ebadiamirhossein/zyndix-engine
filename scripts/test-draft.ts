@@ -33,7 +33,7 @@ import { createStateStore } from "../src/lib/state/core";
 import { runDraftStage } from "../src/lib/stages/draft/core";
 import { checkGenericDraft, wordCount } from "../src/lib/stages/draft/guard";
 import { processTelegramUpdate } from "../src/lib/telegram/handler";
-import { approvalHash, buildApprovalSnapshot } from "../src/lib/sending/approval";
+import { approvalHash, buildApprovalSnapshot, findSignOff } from "../src/lib/sending/approval";
 import type { DatabaseWithSending } from "../src/types/database-extensions";
 
 const url = process.env.SUPABASE_URL;
@@ -447,11 +447,14 @@ async function main(): Promise<void> {
           }
         }
 
+        // Session 12: the footer carries address + opt-out only; the mailbox
+        // signature is added at send, so the body must not sign itself.
         assert(
-          `${fixture.leadId} signature block appended`,
-          body.includes("— Amir") && body.includes("Gerosios Vilties"),
+          `${fixture.leadId} compliance footer appended`,
+          body.includes("Gerosios Vilties") && /reply stop/i.test(body),
           body.slice(-160),
         );
+        assert(`${fixture.leadId} body does not sign itself (Session 12)`, findSignOff(body) === null, findSignOff(body) ?? "");
         assert(
           `${fixture.leadId} no fake Dallas placeholder`,
           !body.includes("1234 Example St") && !body.includes("Dallas, TX"),
@@ -522,15 +525,28 @@ async function main(): Promise<void> {
       // U5: the approval is bound to the exact content and recipient.
       const { data: binding } = await (db as unknown as SupabaseClient<DatabaseWithSending>)
         .from("touches")
-        .select("id, step_no, channel, subject, body, prompt_version, approval_hash, approved_by, approved_at")
+        .select("id, step_no, channel, subject, body, prompt_version, approval_hash, approved_by, approved_at, send_account_id")
         .eq("id", firstTouch.id)
         .single();
+      // Session 12: approval fixes the sender, and the hash covers its signature.
+      const { data: boundSender } = binding?.send_account_id
+        ? await (db as unknown as SupabaseClient<DatabaseWithSending>)
+            .from("send_accounts")
+            .select("id, signature_text")
+            .eq("id", binding.send_account_id)
+            .single()
+        : { data: null };
       const expectedHash = binding
-        ? approvalHash(buildApprovalSnapshot(binding, { id: approvedLead.id, email: approvedLead.email }))
+        ? approvalHash(buildApprovalSnapshot(binding, { id: approvedLead.id, email: approvedLead.email }, boundSender))
         : null;
       assert(
         "approve → approval_hash binds subject/body/recipient (U5)",
         Boolean(binding?.approval_hash) && binding?.approval_hash === expectedHash,
+      );
+      assert(
+        "approve → sender fixed at approval with a signature (Session 12)",
+        Boolean(boundSender?.id) && Boolean(boundSender?.signature_text),
+        binding?.send_account_id ?? "no sender",
       );
       assert(
         "approve → approved_by and approved_at recorded (U5)",

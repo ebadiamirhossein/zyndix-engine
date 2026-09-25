@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createApolloClient } from "@/lib/integrations/apollo";
 import type { MillionVerifierClient } from "@/lib/integrations/millionverifier";
+import { checkSuppression } from "@/lib/sending/suppression";
 import { createStateStore } from "@/lib/state/core";
 import { assessPersonNames } from "@/lib/stages/source/filters";
 import type { Database, Json } from "@/types/database";
@@ -48,39 +49,27 @@ function revealCap(): number {
   return Number.isFinite(parsed) ? parsed : 5;
 }
 
+// Person-level vs company-wide scope comes from sending/suppression.ts (U6
+// fold-in): a row with an email suppresses that address only, even though this
+// stage writes the domain beside an invalid address. Lookup errors throw —
+// suppression fails closed.
 async function isSuppressed(
   db: SupabaseClient<Database>,
   email: string | null,
   domain: string | null,
   linkedinUrl: string | null,
 ): Promise<boolean> {
-  if (email) {
-    const { data } = await db
-      .from("suppression_list")
-      .select("id")
-      .eq("email", email)
-      .limit(1)
-      .maybeSingle();
-    if (data) return true;
-  }
-
-  if (domain) {
-    const { data } = await db
-      .from("suppression_list")
-      .select("id")
-      .eq("domain", domain)
-      .limit(1)
-      .maybeSingle();
-    if (data) return true;
-  }
+  const hit = await checkSuppression(db, { email, companyDomain: domain });
+  if (hit.email || hit.domain) return true;
 
   if (linkedinUrl) {
-    const { data } = await db
+    const { data, error } = await db
       .from("suppression_list")
       .select("id")
       .eq("linkedin_url", linkedinUrl)
       .limit(1)
       .maybeSingle();
+    if (error) throw new Error(`suppression lookup (linkedin) failed: ${error.message}`);
     if (data) return true;
   }
 

@@ -15,6 +15,9 @@ import {
   instantlyLeadsAddResponseSchema,
   instantlyWarmupAnalyticsSchema,
   instantlyWebhookEventTypesSchema,
+  instantlyWebhookPageSchema,
+  instantlyWebhookConfigSchema,
+  instantlyWebhookTestResultSchema,
   instantlyWorkspaceSchema,
   type InstantlyAccount,
   type InstantlyBlockListEntry,
@@ -25,6 +28,8 @@ import {
   type InstantlyLeadsAddResponse,
   type InstantlyWarmupAggregate,
   type InstantlyWarmupAnalytics,
+  type InstantlyWebhook,
+  type InstantlyWebhookTestResult,
   type InstantlyWorkspace,
 } from "@/lib/integrations/instantly-types";
 
@@ -643,7 +648,92 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
     );
   }
 
+  function listWebhooks(params: { limit?: number; startingAfter?: string } = {}) {
+    return request(
+      {
+        op: "listWebhooks",
+        method: "GET",
+        path: "/api/v2/webhooks",
+        query: { limit: params.limit ?? PAGE_LIMIT, starting_after: params.startingAfter },
+        mutating: false,
+      },
+      instantlyWebhookPageSchema,
+    );
+  }
+
   // ---- mutations (never retried here) ----------------------------------------
+
+  /**
+   * Subscribe a URL to events. Instantly has no signing secret: deliveries are
+   * authenticated by the static `authHeader` we ask it to send. Its value never
+   * appears in a returned object, a log line or an error message.
+   */
+  async function createWebhook(input: {
+    targetUrl: string;
+    eventType: string;
+    name?: string;
+    campaignId?: string | null;
+    authHeader: { name: string; value: string };
+  }): Promise<InstantlyWebhook> {
+    const secret = input.authHeader.value;
+    const ctx: ErrorContext = { op: "createWebhook", method: "POST", path: "/api/v2/webhooks", status: null };
+    if (!/^https:\/\//.test(input.targetUrl)) {
+      throw new InstantlyPermanentError("Instantly createWebhook: targetUrl must be https", ctx, "validation");
+    }
+    if (!input.authHeader.name.trim() || secret.length < 32) {
+      throw new InstantlyPermanentError("Instantly createWebhook: an auth header of >= 32 chars is required", ctx, "validation");
+    }
+    try {
+      return await request(
+        {
+          op: "createWebhook",
+          method: "POST",
+          path: "/api/v2/webhooks",
+          body: {
+            target_hook_url: input.targetUrl,
+            event_type: input.eventType,
+            name: input.name ?? null,
+            campaign: input.campaignId ?? null,
+            headers: { [input.authHeader.name]: secret },
+          },
+          mutating: true,
+          fingerprint: { targetUrl: input.targetUrl, eventType: input.eventType },
+        },
+        instantlyWebhookConfigSchema,
+      );
+    } catch (error) {
+      if (error instanceof Error) error.message = error.message.split(secret).join("[redacted]");
+      throw error;
+    }
+  }
+
+  function deleteWebhook(id: string): Promise<InstantlyWebhook> {
+    return request(
+      {
+        op: "deleteWebhook",
+        method: "DELETE",
+        path: `/api/v2/webhooks/${encodeURIComponent(id)}`,
+        mutating: true,
+        fingerprint: { id },
+      },
+      instantlyWebhookConfigSchema,
+    );
+  }
+
+  /** Asks Instantly to deliver a test payload to the webhook's URL. */
+  function testWebhook(id: string): Promise<InstantlyWebhookTestResult> {
+    return request(
+      {
+        op: "testWebhook",
+        method: "POST",
+        path: `/api/v2/webhooks/${encodeURIComponent(id)}/test`,
+        body: {},
+        mutating: true,
+        fingerprint: { id },
+      },
+      instantlyWebhookTestResultSchema,
+    );
+  }
 
   async function enrollLead(input: EnrollLeadInput): Promise<EnrollLeadResult> {
     const path = "/api/v2/leads/add";
@@ -817,6 +907,7 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
     findLeadInCampaign,
     listEmails,
     listWebhookEventTypes,
+    listWebhooks,
     enrollLead,
     createCampaign,
     replyToEmail,
@@ -824,6 +915,9 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
     activateCampaign,
     deleteLead,
     addBlockListEntry,
+    createWebhook,
+    deleteWebhook,
+    testWebhook,
   };
 }
 
@@ -841,6 +935,7 @@ export const INSTANTLY_READ_OPERATIONS = [
   "findLeadInCampaign",
   "listEmails",
   "listWebhookEventTypes",
+  "listWebhooks",
 ] as const satisfies readonly (keyof InstantlyClient)[];
 
 export const INSTANTLY_MUTATING_OPERATIONS = [
@@ -851,6 +946,9 @@ export const INSTANTLY_MUTATING_OPERATIONS = [
   "activateCampaign",
   "deleteLead",
   "addBlockListEntry",
+  "createWebhook",
+  "deleteWebhook",
+  "testWebhook",
 ] as const satisfies readonly (keyof InstantlyClient)[];
 
 export type InstantlyReadClient = Pick<InstantlyClient, (typeof INSTANTLY_READ_OPERATIONS)[number]>;
