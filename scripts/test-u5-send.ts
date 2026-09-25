@@ -28,7 +28,12 @@ import {
 } from "../src/lib/stages/send/core";
 import { createStateStore } from "../src/lib/state/core";
 import type { Database } from "../src/types/database";
-import type { DatabaseWithCapacity, DatabaseWithJobs, DatabaseWithSending } from "../src/types/database-extensions";
+import type {
+  DatabaseWithCapacity,
+  DatabaseWithJobs,
+  DatabaseWithSending,
+  DatabaseWithWebhooks,
+} from "../src/types/database-extensions";
 import type { LeadState } from "../src/types/enums";
 
 // U5 DoD against Supabase (09 §U5). Every row it touches is a synthetic
@@ -45,6 +50,7 @@ if (!url || !key) {
 
 const raw = createServiceClient(url, key);
 const db = raw as unknown as SupabaseClient<DatabaseWithSending>;
+const exceptionsDb = raw as unknown as SupabaseClient<DatabaseWithWebhooks>;
 const ledger = createCapacityLedger(raw as unknown as SupabaseClient<DatabaseWithCapacity>);
 const queue = createJobQueue(raw as unknown as SupabaseClient<DatabaseWithJobs>);
 const state = createStateStore(raw as SupabaseClient<Database>);
@@ -103,6 +109,9 @@ type Mock = {
   enrollBehaviour: "created" | "uncertain" | "already";
   anchorEmail: InstantlyEmail | null;
   findLeadResult: boolean;
+  /** What the reply's to_address_email_list carries: the default recipient (our own mailbox) plus
+   *  additional_recipients, or — the Session 14 drill failure — only the default. */
+  replyRecipients: "with_additional" | "sender_only";
   alerts: string[];
 };
 
@@ -115,6 +124,7 @@ const mock: Mock = {
   enrollBehaviour: "created",
   anchorEmail: null,
   findLeadResult: true,
+  replyRecipients: "with_additional",
   alerts: [],
 };
 
@@ -163,7 +173,10 @@ function deps(now: Date, hooks?: SendDeps["hooks"]): SendDeps {
           message_id: `<${randomUUID()}@example.invalid>`,
           subject: input.subject,
           eaccount: input.eaccount,
-          to_address_email_list: "x@example.invalid",
+          to_address_email_list:
+            mock.replyRecipients === "sender_only"
+              ? input.eaccount
+              : [input.eaccount, ...(input.additionalRecipients ?? [])].join(", "),
           thread_id: mock.anchorEmail?.thread_id ?? null,
         } as InstantlyEmail;
       },
@@ -465,6 +478,11 @@ async function happyPathAndPinning(accountA: string, accountB: string): Promise<
     "thread: reply goes from the BOUND mailbox to step 1's email id",
     lastReply?.eaccount === SENDER_A && lastReply.replyToUuid === anchorId && lastReply.subject === "Re: Your listing pages",
   );
+  assert(
+    "thread: the lead is passed as additional_recipients (default recipient is the replied-to sender — Session 14)",
+    JSON.stringify(lastReply?.additionalRecipients) === JSON.stringify([f.email]),
+    JSON.stringify(lastReply?.additionalRecipients),
+  );
   const [stepOneOutbox] = await outboxFor(touch);
   assert(
     "thread: follow-up text ends with the same mailbox's signature (Session 12)",
@@ -474,6 +492,43 @@ async function happyPathAndPinning(accountA: string, accountB: string): Promise<
   assert("thread: anchor persisted on the step-1 outbox row", stepOneOutbox?.provider_email_id === anchorId && stepOneOutbox.provider_thread_id === `${TAG}.thread`);
   assert("thread: lead stays sent", (await leadRow(f.leadId)).state === "sent");
   assert("thread: ledger accepted = 2 on the bound account", (await ledgerDay(accountA))?.accepted === 2);
+
+  console.log("\n--- follow-up accepted but NOT addressed to the lead (Session 14 drill) ---");
+  mock.replyRecipients = "sender_only";
+  const stray = await createApprovedTouch(f, { step: 3, subject: threadedSubject("Your listing pages"), transitionLead: false });
+  const alertsBefore = mock.alerts.length;
+  const strayJob = jobCtx(stray);
+  const strayOutcome = await runSendJob(deps(INSIDE), strayJob);
+  mock.replyRecipients = "with_additional";
+  const strayOutbox = (await outboxFor(stray))[0];
+  const { data: strayTouch } = await db.from("touches").select("status, provider_message_id").eq("id", stray).single();
+  const { data: strayExceptions } = await exceptionsDb
+    .from("exceptions")
+    .select("kind, status, detail")
+    .eq("lead_id", f.leadId)
+    .eq("kind", "reply_misaddressed");
+  assert(
+    "misaddressed: outcome failed with reply_misaddressed",
+    strayOutcome.kind === "failed" && strayOutcome.error.startsWith("reply_misaddressed"),
+    JSON.stringify(strayOutcome),
+  );
+  assert(
+    "misaddressed: outbox settled accepted (mail left — never resent) with the error recorded",
+    strayOutbox?.state === "accepted" && (strayOutbox.last_error ?? "").startsWith("reply_misaddressed"),
+    `${strayOutbox?.state} ${strayOutbox?.last_error}`,
+  );
+  assert("misaddressed: touch failed (did not reach the lead), provider id kept", strayTouch?.status === "failed" && Boolean(strayTouch.provider_message_id));
+  assert(
+    "misaddressed: one escalated reply_misaddressed exception",
+    strayExceptions?.length === 1 && strayExceptions[0]!.status === "escalated",
+    JSON.stringify(strayExceptions),
+  );
+  assert("misaddressed: operator alerted once", mock.alerts.length - alertsBefore === 1, `${mock.alerts.length - alertsBefore}`);
+  assert("misaddressed: lead → manual_hold", (await leadRow(f.leadId)).state === "manual_hold");
+  assert("misaddressed: capacity counted (ledger accepted = 3)", (await ledgerDay(accountA))?.accepted === 3);
+  const replyCalls = mock.reply.length;
+  const strayRerun = await runSendJob(deps(INSIDE), strayJob);
+  assert("misaddressed: re-running the job → already, no second reply call", strayRerun.kind === "already" && mock.reply.length === replyCalls, strayRerun.kind);
 }
 
 async function uncertainOutcomes(accountA: string): Promise<void> {
@@ -771,6 +826,7 @@ async function cleanup(): Promise<void> {
     await del("outbox", () => db.from("outbox").delete().in("lead_id", fixture.leadIds));
     await del("touches", () => db.from("touches").delete().in("lead_id", fixture.leadIds));
     await del("lead_events", () => db.from("lead_events").delete().in("lead_id", fixture.leadIds));
+    await del("exceptions", () => exceptionsDb.from("exceptions").delete().in("lead_id", fixture.leadIds));
     await del("leads", () => db.from("leads").delete().in("id", fixture.leadIds));
   }
   for (const email of fixture.suppressionEmails) {

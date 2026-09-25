@@ -321,6 +321,13 @@ export type ReplyToEmailInput = {
   replyToUuid: string;
   subject: string;
   body: { text?: string; html?: string };
+  /**
+   * Extra recipients (`additional_recipients`). The endpoint's DEFAULT
+   * recipient is "the sender of the email being replied to" (OpenAPI spec) —
+   * for a follow-up to our own step 1 that is our own mailbox, so the send
+   * stage passes the lead here (U6 drill, Session 14). There is no `to` field.
+   */
+  additionalRecipients?: string[];
 };
 
 export type ListEmailsParams = {
@@ -862,7 +869,13 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
         op: "replyToEmail",
         method: "POST",
         path,
-        body: { eaccount, reply_to_uuid: replyTo, subject: input.subject, body: input.body },
+        body: {
+          eaccount,
+          reply_to_uuid: replyTo,
+          subject: input.subject,
+          body: input.body,
+          ...(input.additionalRecipients?.length ? { additional_recipients: input.additionalRecipients } : {}),
+        },
         mutating: true,
         fingerprint: { eaccount, replyToUuid: replyTo },
       },

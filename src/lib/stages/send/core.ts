@@ -23,11 +23,12 @@ import {
   type SendPolicy,
   type SendWindowsConfig,
 } from "@/lib/sending/preflight";
-import { checkSuppression } from "@/lib/sending/suppression";
+import { checkSuppression, normalizeEmail } from "@/lib/sending/suppression";
 import type { createStateStore } from "@/lib/state/core";
+import { raiseException } from "@/lib/webhooks/instantly";
 import type { capacityDefaultsSchema } from "@/lib/validation/jsonb";
 import type { Database, Json } from "@/types/database";
-import type { DatabaseWithSending, OutboxRowShape } from "@/types/database-extensions";
+import type { DatabaseWithSending, DatabaseWithWebhooks, OutboxRowShape } from "@/types/database-extensions";
 import type { LeadState } from "@/types/enums";
 
 // Send stage (09 §U5, brief §10). Runs as the U2 job `send.email`, one touch
@@ -636,22 +637,25 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
       return fail(deps, loaded, outbox, reservationId, `enroll_skipped_${enrolled.reason}`);
     }
 
+    // emails/reply addresses "the sender of the email being replied to" by
+    // default — for our own step 1 that is our own mailbox (U6 drill, Session
+    // 14). The lead goes in additional_recipients; there is no `to` field.
     const sent = await deps.instantly.replyToEmail({
       eaccount: sender.identifier!,
       replyToUuid: built.anchor!.emailId,
       subject: loaded.touch.subject ?? "",
       body: { html: toHtmlBody(outboundText), text: outboundText },
+      additionalRecipients: [loaded.lead.email!],
     });
     await deps.hooks?.afterDispatch?.();
-    return accept(
-      deps,
-      loaded,
-      outbox,
-      reservationId,
-      sender,
-      { provider_email_id: sent.id, provider_thread_id: sent.thread_id ?? null },
-      now,
-    );
+    const provider = { provider_email_id: sent.id, provider_thread_id: sent.thread_id ?? null };
+    // Fail closed: an accepted follow-up that does not list the lead as a
+    // recipient went somewhere else. It is never resent and never counted as
+    // reaching the lead.
+    if (!addressList(sent.to_address_email_list).includes(normalizeEmail(loaded.lead.email))) {
+      return misaddressed(deps, loaded, outbox, reservationId, sender, provider, sent.to_address_email_list, now);
+    }
+    return accept(deps, loaded, outbox, reservationId, sender, provider, now);
   } catch (error) {
     if (error instanceof InstantlyUncertainOutcomeError) {
       await markUncertain(deps, outbox, error.reason, reservationId, error.fingerprint);
@@ -731,6 +735,57 @@ async function accept(
   await markTouchSent(deps, loaded.touch.id, sender.id, provider.provider_email_id ?? null, now);
   await leadSent(deps, loaded, outbox, "send_accepted");
   return { kind: "sent", outboxId: outbox.id, operation: outbox.operation };
+}
+
+/** Normalized addresses from a comma-separated list ("a@x.com, Name <b@y.com>"). */
+export function addressList(value: string | null | undefined): string[] {
+  return (value ?? "").match(/[^\s<>,;"]+@[^\s<>,;"]+/g)?.map((e) => normalizeEmail(e)) ?? [];
+}
+
+/**
+ * The provider accepted a follow-up whose recipients do not include the lead.
+ * Mail left, so the outbox is settled `accepted` (never resent) and capacity
+ * is spent; the touch is `failed` because it did not reach the lead; an
+ * escalated `reply_misaddressed` exception alerts the operator and the lead
+ * goes to manual_hold.
+ */
+async function misaddressed(
+  deps: SendDeps,
+  loaded: Loaded,
+  outbox: OutboxRowShape,
+  reservationId: string,
+  sender: SendAccountRow,
+  provider: Partial<OutboxRowShape>,
+  toAddresses: string | null | undefined,
+  now: Date,
+): Promise<SendOutcome> {
+  const message = `reply_misaddressed: to=${toAddresses ?? "(none)"} expected=${normalizeEmail(loaded.lead.email)}`;
+  await updateOutbox(deps.db, outbox.id, { ...provider, state: "accepted", settled_at: now.toISOString(), last_error: message.slice(0, 2000) });
+  await deps.ledger.accept(reservationId);
+  const { error } = await deps.db
+    .from("touches")
+    .update({
+      status: "failed",
+      sent_at: now.toISOString(),
+      send_account_id: sender.id,
+      ...(provider.provider_email_id ? { provider_message_id: provider.provider_email_id } : {}),
+    })
+    .eq("id", loaded.touch.id);
+  if (error) throw new SendStageError(`touch misaddressed: ${error.message}`);
+  const detail = {
+    touch_id: loaded.touch.id,
+    outbox_id: outbox.id,
+    provider_email_id: provider.provider_email_id ?? null,
+    to_address_email_list: toAddresses ?? null,
+    expected: normalizeEmail(loaded.lead.email),
+    sender: sender.identifier,
+  };
+  await raiseException(
+    { db: deps.db as unknown as SupabaseClient<DatabaseWithWebhooks>, alert: deps.alert, now: deps.now },
+    { kind: "reply_misaddressed", eventId: null, leadId: loaded.lead.id, escalate: true, detail },
+  );
+  await holdLead(deps, loaded.lead.id, "reply_misaddressed", detail);
+  return { kind: "failed", outboxId: outbox.id, error: message };
 }
 
 async function markTouchSent(deps: SendDeps, touchId: string, senderId: string, emailId: string | null, now: Date) {

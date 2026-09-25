@@ -65,7 +65,10 @@ export type ExceptionKind =
   | "unexpected_state"
   // Raised by the reconcile job (src/lib/reconcile/core.ts), not by a delivery.
   | "stop_processing_stale"
-  | "reply_poll_truncated";
+  | "reply_poll_truncated"
+  // Raised by the send stage (src/lib/stages/send/core.ts): an accepted
+  // follow-up whose recipients do not include the lead (Session 14 drill).
+  | "reply_misaddressed";
 
 export class WebhookProcessingError extends Error {
   constructor(message: string) {

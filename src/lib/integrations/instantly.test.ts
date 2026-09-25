@@ -573,6 +573,24 @@ describe("U5 additions: campaigns and threaded replies", () => {
     assert.equal(sent.thread_id, "00000000-0000-4000-8000-0000000t0001");
   });
 
+  test("replyToEmail sends additional_recipients when given (the lead; default recipient is the replied-to sender)", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("email-reply-sent")));
+    await client(impl).replyToEmail({
+      eaccount: "amir@sender.example.invalid",
+      replyToUuid: "00000000-0000-4000-8000-0000000e0001",
+      subject: "Re: Fixture subject",
+      body: { text: "Following up." },
+      additionalRecipients: ["lead@prospect.example.invalid"],
+    });
+    assert.deepEqual(calls[0].body, {
+      eaccount: "amir@sender.example.invalid",
+      reply_to_uuid: "00000000-0000-4000-8000-0000000e0001",
+      subject: "Re: Fixture subject",
+      body: { text: "Following up." },
+      additional_recipients: ["lead@prospect.example.invalid"],
+    });
+  });
+
   test("replyToEmail timeout after dispatch → uncertain, never retried", async () => {
     const { impl, calls } = mockFetch(() => {
       throw new DOMException("The operation was aborted due to timeout", "TimeoutError");

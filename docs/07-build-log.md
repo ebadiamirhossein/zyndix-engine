@@ -58,6 +58,217 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-25 — Session 14 — U6 (3 of 3): live drill; follow-up misaddressed → fix tested locally, re-test Monday
+
+**Unit:** U6 Part 2, the live drill (`09` §U6), on `main`. Plan mode first; operator changes to the plan: `--check` must read the Instantly campaign schedule, `--send` must refuse unless the engine window **and** the campaign schedule are both open with ≥ 20 min, and the drill zone is taken from `--check` output (≥ 60 min or stop).
+**Status at end:** ⛔ **U6 blocked on one finding**, with its fix **tested locally**.
+- The stop path is **verified with provider**: enroll → `email_sent` → reply webhook → freeze without a model call → poll dedupe.
+- Threading headers are **verified**.
+- **But the step-2 follow-up went to our own mailbox, not the lead.** The fix is mocked only. The live re-test is Monday, with a new drill lead. 🚩 not reached.
+- **The only recipient all session was `ebadiamirhoseineng@gmail.com` (operator-owned).** No prospect was read for writing or touched. Every live Instantly write was approved in chat, one by one.
+
+**Did**
+- **`scripts/drill-u6.ts`** (new): a guarded operator script.
+  - Guards: recipient == the drill constant, sender == amir@zyndixhq.com, lead carries the `drill_tag`, all checked before any write.
+  - Subcommands: `--check`, `--fixture`, `--touch 1|2`, `--activate`/`--pause`, `--send`, `--reconcile`, `--status`, `--poll`, `--cancel-jobs`.
+  - `--send` goes through the real queue and worker: `enqueueSend` + `runWorker({types:[send.email], maxJobs:1})`.
+- **Drill sequence (Fri 2026-09-25, UTC):**
+  1. **Pre-checks and fixture.** `--check` → Atlantic/Azores had 87 min, the best zone. Fixture: company `ZX DRILL S14` (`segment=drill`, synthetic domain), lead `7fd018fa` (email_status `valid`, operator-asserted). Walked `sourced → pending_approval` via `lib/state`. Step-1 touch `c6355556` with fixed text, approved with the real binding.
+  2. **Tunnel and webhook.** Dev server plus quick tunnel (empty cloudflared config). Webhook `01a0d8fe` created (token header, all_events), and its `--test` stored and processed. Campaign 5392fcac **activated**.
+  3. **Step 1** (14:37) → accepted. `email_sent` webhook at 14:39:53 filled the anchor.
+  4. **Step 2** (14:49) via `emails/reply` → accepted, threaded. Operator's "Show original": `In-Reply-To`/`References` = step 1's Message-ID, same conversation. **But `To: amir@zyndixhq.com`.** Operator: stop.
+  5. **Read-only diagnosis.** `GET /emails/{id}` on both emails, plus the official OpenAPI spec for `/emails/reply` (below). Logged as ⛔ in `06` §6.
+  6. **Reply step.** The tunnel had dropped (16:03, "control stream encountered a failure"). New tunnel. Webhook deleted and re-created as `01a0d952` (approved), and its test was 200. The operator replied to step 1 from Gmail → frozen. Then `--poll`.
+  7. **Cleanup.** Campaign **paused**. Webhook deleted, `--list` → 0. Tunnel and server stopped. 0 drill jobs queued.
+- **The fix** (operator-approved, mocks only, no live send):
+  - `replyToEmail` gains `additionalRecipients` → `additional_recipients`.
+  - The send stage passes `[lead.email]` on every step ≥ 2.
+  - **Fail-closed post-send check:** if the accepted email's `to_address_email_list` lacks the lead, the result is `reply_misaddressed`:
+    - outbox `accepted` with `last_error` (never resent), and capacity is spent;
+    - touch `failed`;
+    - an escalated exception plus one alert;
+    - lead `manual_hold`.
+  - New exception kind `reply_misaddressed`.
+- **Approved note:** a `drill_step2_misaddressed` lead_event on the drill lead. Touch `0af31817` was left as recorded (`sent`).
+
+**Files touched**
+- `scripts/drill-u6.ts`: new.
+- `src/lib/integrations/instantly.ts`: `ReplyToEmailInput.additionalRecipients`, sent as `additional_recipients`.
+- `src/lib/stages/send/core.ts`: passes `additionalRecipients`, plus `addressList`, `misaddressed()` and the fail-closed check.
+- `src/lib/webhooks/instantly.ts`: `ExceptionKind` gains `reply_misaddressed`.
+- `src/lib/integrations/instantly.test.ts`: +1 contract test.
+- `scripts/test-u5-send.ts`: reply mock echoes the default recipient plus additional recipients; 9 new checks; exceptions cleanup.
+- `docs/06-build-progress.md`, `docs/07-build-log.md`, `docs/09-build-plan-v2.md`.
+
+**Verification**
+
+Pre-check (read-only):
+```
+$ pnpm tsx scripts/drill-u6.ts --check
+=== drill-u6 --check (read-only) · now 2026-09-25T14:32:30.382Z · Vilnius Fri 25 Sept, 17:32 ===
+sender amir@zyndixhq.com id=7f08fd43 health=ok campaign=5392fcac ramp_started_on=null signature=set
+instantly health verdict=healthy warmup_score=100 (min 80)
+campaign 5392fcac status=draft
+  schedule "engine-owned timing" tz=Europe/Helsinki days=[0,1,2,3,4,5,6] 00:00–23:59
+  campaign schedule open now: yes, 387 min left
+instantly workspace leads for recipient: HTTP 200 · 0 match(es)
+engine: suppression rows=0 · leads with recipient email=0
+  Atlantic/Azores      Fri 14:32  engine= 87 min · combined= 87 min
+  Atlantic/Reykjavik   Fri 14:32  engine= 87 min · combined= 87 min
+  Europe/London        Fri 15:32  engine= 27 min · combined= 27 min
+  (16 other zones: 0 min)
+PICK Atlantic/Azores: 87 min left (≥ 60)
+$ … --fixture --tz Atlantic/Azores → FIXTURE company=2f0fd33e lead=7fd018fa tz=Atlantic/Azores state=pending_approval tag=drill:s14
+$ … --touch 1 → TOUCH step=1 id=c6355556-… subject="Zyndix engine drill S14" approved (sender amir@zyndixhq.com)
+```
+
+Webhook and campaign (approved writes):
+```
+$ curl -X POST https://packard-joyce-…trycloudflare.com/api/webhooks/instantly (no token) → 401
+$ pnpm tsx scripts/instantly-webhooks.ts --create --url https://packard-joyce-locations-tomorrow.trycloudflare.com/api/webhooks/instantly
+CREATED webhook 01a0d8fe-3320-7a95-acb5-bd5050fc450e event_type=all_events status=1 headers=[x-zyndix-webhook-token]
+$ … --test 01a0d8fe-… → TEST success=true status_code=200 response_time_ms=1788   (webhook_events test_event processed=true)
+$ pnpm tsx scripts/drill-u6.ts --activate → ACTIVATE campaign 5392fcac → status=active · re-read: status=active
+```
+
+Step 1 (approved send):
+```
+$ pnpm tsx scripts/drill-u6.ts --send c6355556-61b6-4d3c-be8f-bce7b16c827d
+gate: engine window (Atlantic/Azores) 82 min left · campaign schedule 382 min left · campaign status=active
+enqueued job ab35d6ae deduped=false
+worker: claimed=1 completed=1 retried=0 dead=0 stopped=max_jobs
+lead 7fd018fa state=sent sender=7f08fd43
+touch c6355556 step=1 outbound status=sent sent_at=2026-09-25T14:37:27.494Z provider_message_id=null
+outbox 31779fdb enroll state=accepted provider_lead_id=01a0d900-0827-7005-8acb-6adbaae76233 provider_email_id=null
+ledger 2026-09-25 quota=15 used=1 reserved=0 accepted=1 failed=0
+lead_events: … approved → sender_bound → send_queued → send_accepted
+(≈140 s later)
+outbox 31779fdb enroll state=accepted … provider_email_id=01a0d902-2458-737a-b51b-1257f2696fc2
+webhook f33356c1 email_sent processed=true email_id=01a0d902-2458-737a-b51b-1257f2696fc2 step=1 campaign=5392fcac ts=2026-09-25T14:39:53.874Z
+webhook fce48ab9 campaign_completed_for_lead_without_reply processed=true   (recorded only)
+lead_events: … send_accepted → provider_email_sent
+```
+
+Step 2 (approved send):
+```
+$ pnpm tsx scripts/drill-u6.ts --send 0af31817-9d17-4eb4-8bf1-13caeabc14b1
+gate: engine window (Atlantic/Azores) 70 min left · campaign schedule 370 min left · campaign status=active
+worker: claimed=1 completed=1 retried=0 dead=0 stopped=max_jobs
+touch 0af31817 step=2 outbound status=sent provider_message_id=01a0d90b-5c8e-708b-bcad-9be23bbd4890 subject="Re: Zyndix engine drill S14"
+outbox 941fef76 reply state=accepted provider_email_id=01a0d90b-… thread=53-PuSZyRub_guDWuIkoUGvm5o reply_to=01a0d902-2458-737a-b51b-1257f2696fc2
+ledger 2026-09-25 quota=15 used=2 reserved=0 accepted=2 failed=0
+GET /emails sent: id=01a0d902-… ue_type=1 message_id=<01a0d902-2458-737a-b51b-1257f2696fc2@zyndixhq.com>
+                  id=01a0d90b-… ue_type=3 message_id=<01a0d90b-5c8e-708b-bcad-9be302c22257@zyndixhq.com>
+Operator (Gmail "Show original" on step 2): In-Reply-To and References = <01a0d902-2458-737a-b51b-1257f2696fc2@zyndixhq.com>, same conversation — BUT To: amir@zyndixhq.com
+```
+
+Diagnosis (read-only):
+```
+$ GET /api/v2/emails/01a0d902-… → from amir@zyndixhq.com · to_address_email_list "ebadiamirhoseineng@gmail.com" · lead ebadiamirhoseineng@gmail.com
+$ GET /api/v2/emails/01a0d90b-… → from amir@zyndixhq.com · to_address_email_list "amir@zyndixhq.com" · cc "" · bcc "" · lead ebadiamirhoseineng@gmail.com · same thread
+$ curl https://api.instantly.ai/openapi/api_v2.json → POST /api/v2/emails/reply
+required: [reply_to_uuid, eaccount, subject, body] · reply_to_uuid: "The id of the email to reply to"
+additional_recipients: "Optional list of extra recipient email addresses to include in the reply, in addition to the
+  default recipient (the sender of the email being replied to)." · cc_address_email_list · bcc_address_email_list
+(no `to` field) · responses 200/401/402/404/429
+```
+Operator: step 1 reached their personal Gmail **in Spam** (marked "Not spam"). Step 2 did **not** arrive there.
+
+Reply step (after the tunnel re-create, approved):
+```
+$ curl (no token) → tunnel HTTP 000 · local 401 · tunnel.log: "control stream encountered a failure while serving" (16:03Z)
+$ new tunnel https://doom-institution-pins-competent.trycloudflare.com → (no token) 401
+$ instantly-webhooks.ts --delete 01a0d8fe-… → DELETED · --create … → CREATED webhook 01a0d952-4db9-771e-9456-57c241214e64 · --test → success=true status_code=200
+(operator replies to step 1 from Gmail; webhook ≈120 s after the watcher started)
+lead 7fd018fa state=replied
+touch c821f3c2 inbound status=replied replied_at=2026-09-25T16:09:00.713Z provider_message_id=01a0d953-bd66-7fa1-9ab2-06d879d791dd
+webhook f88fe212 reply_received processed=true email_id=01a0d953-bd66-7fa1-9ab2-06d879d791dd campaign=5392fcac
+reply_received detail: {"from":"sent","to":"replied","email_id":"01a0d953-…","cancelled_jobs":0,"killed_touches":0}
+classifier/anthropic lead_events: 0 · queued jobs (all): 0
+grep anthropic in src/lib/{webhooks,reconcile,state,sending,db,settings} + app/api/webhooks/instantly → none
+dev log: only POST /api/webhooks/instantly lines (200s and the probes' 401s)
+```
+
+Poll and dedupe:
+```
+$ pnpm tsx scripts/drill-u6.ts --poll
+1) runReplyPoll → {"requests":0,"truncated":false,"senders_polled":0,"seen":0,"already_seen":0,"outcomes":{}}
+2) GET received id=01a0d953-bd66-7fa1-9ab2-06d879d791dd ue_type=2 thread=53-PuSZyRub_guDWuIkoUGvm5o
+   webhook email_sent email_id=[01a0d902-…] · reply_received email_id=[01a0d953-…]
+   email_sent id ∈ GET sent: true · reply_received id ∈ GET received: true
+3) outcome={"kind":"processed","action":"duplicate_reply","leadId":"7fd018fa-…"}
+   before={"inbound":1,"reply_received_events":1} after={"inbound":1,"reply_received_events":1}
+```
+
+Cleanup (approved):
+```
+$ drill-u6.ts --pause → PAUSE campaign 5392fcac → status=paused · re-read: status=paused
+$ instantly-webhooks.ts --delete 01a0d952-… → DELETED · --list → webhooks: 0
+tunnel stopped · preview server stopped · drill-u6.ts --cancel-jobs → queued drill jobs cancelled: 0
+```
+
+Fix (mocks, synthetic fixtures):
+```
+$ pnpm test:send
+PASS: thread: the lead is passed as additional_recipients (default recipient is the replied-to sender — Session 14)
+PASS: misaddressed: outcome failed with reply_misaddressed
+PASS: misaddressed: outbox settled accepted (mail left — never resent) with the error recorded
+PASS: misaddressed: touch failed (did not reach the lead), provider id kept
+PASS: misaddressed: one escalated reply_misaddressed exception
+PASS: misaddressed: operator alerted once — 1
+PASS: misaddressed: lead → manual_hold
+PASS: misaddressed: capacity counted (ledger accepted = 3)
+PASS: misaddressed: re-running the job → already, no second reply call — already
+AFTER identical to BEFORE (10 tables) · All 78 checks passed.
+$ pnpm test:instantly → # tests 81 # pass 81 # fail 0   (+1: additional_recipients in the body)
+$ pnpm test:traversal → All 62 checks passed (exceptions=0 after) · test:webhooks 58/58 · test:webhook-rules 10/10 · test:sending 68/68
+$ pnpm exec tsc --noEmit → clean · eslint (all changed files) → clean · pnpm build → clean
+```
+Result: stop path **pass (live)**, threading **pass (live)**, follow-up recipient **fail (live)** → fix pass (mocked).
+
+**Status claims, kept separate:**
+- **Verified with provider:**
+  - `leads:create`, `campaigns:update`, `emails:create`, `GET /emails/{id}` on Growth;
+  - the `email_sent` and `reply_received` webhooks, end to end;
+  - the reply freeze with no model call, and poll dedupe with id equality;
+  - threading headers.
+- **Tested locally:** the recipient fix and the `reply_misaddressed` fail-closed path.
+- **Not verified:**
+  - whether `additional_recipients` delivers to the lead, and whether our own mailbox stays in To;
+  - a real auto-reply payload;
+  - `block_list_entries:create`, `leads:delete`.
+- **Nothing is active in production.**
+
+**Decisions** (in `06` §5)
+- **Follow-ups name the lead in `additional_recipients`.** A reply that is not addressed to the lead fails closed.
+- **No prospect send until warmup completes and an inbox-placement test passes.** This comes on top of U6b.
+- **Drill leads are real rows, tagged and never deleted.** U7 and other listings must exclude `segment='drill'`.
+- **Step 5 is proven by a direct processor replay.** `runReplyPoll` skips leads already `replied` by design (operator choice).
+
+**Problems hit**
+- **The follow-up was misaddressed** (above). The engine recorded the touch as `sent` and the ledger as accepted 2 for a message the lead never got. The new check exists to make this impossible to miss.
+- **Step 1 landed in Spam** on warmup day 2. The reason was not captured.
+- **Step 2's raw email had a `text/html` part.**
+  - The cause is ours: the send stage passes `body: {html, text}`.
+  - So this does not show whether `emails/reply` ignores `text_only`, which is a campaign flag the endpoint doesn't have.
+  - Compare the raw emails in the re-test.
+- **The quick tunnel dropped** before the reply step. It was caught by a probe and re-created with approval, and nothing was lost.
+- **`runReplyPoll` made 0 requests** because the lead was already `replied`. This was expected and discussed in plan mode (backlog).
+- **The step-1 touch `provider_message_id` stays null** (backlog).
+
+**Next action**
+- **Monday, in an open window** (run `drill-u6.ts --check` first):
+  - The live re-test with a **new drill lead tagged `drill:s14b`**. The script's fixture constants (domain, tag) need the `s14b` values first.
+  - Approvals, in order: webhook create, campaign activate, step 1, then the follow-up.
+  - Check in the operator's personal Gmail: To/Cc, `In-Reply-To`/`References`, same conversation. Check `GET /emails/{id}` `to_address_email_list`. Compare text/html parts between step 1 and the follow-up.
+  - **If amir@zyndixhq.com stays visible in To next to the lead → stop** and bring options. The fallback preference is Instantly-owned sequence steps, with all texts approved up front.
+  - Then: operator reply → freeze, cleanup (pause, delete the webhook).
+- **Open, operator:**
+  - Inbox-placement test after warmup.
+  - `INSTANTLY_WEBHOOK_SECRET` in the Vercel env at deploy.
+  - The U6b claim guard.
+
+
 ### 2026-09-25 — Session 13 — U6 (2 of 3): reconcile, traversal + 8 stop rules, redraft, legacy webhooks; claim audit → drafts killed, U6b added
 
 **Unit:** U6, Instantly webhooks, reply freeze, suppression and reconciliation (`09` §U6), session 2 of 3, on `main`. The operator added two items: redraft the 4 drafts under v8, and delete the 2 legacy Make.com webhooks.
