@@ -492,6 +492,134 @@ describe("behaviour", () => {
   });
 });
 
+describe("U5 additions: campaigns and threaded replies", () => {
+  test("createCampaign posts the payload and parses the detail shape", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("campaign-created")));
+    const created = await client(impl).createCampaign({
+      name: "zx-sender-amir@sender.example.invalid",
+      campaign_schedule: {
+        schedules: [
+          {
+            name: "engine-owned",
+            timing: { from: "00:00", to: "23:59" },
+            days: { "0": true, "1": true, "2": true, "3": true, "4": true, "5": true, "6": true },
+            timezone: "Europe/Helsinki",
+          },
+        ],
+      },
+      sequences: [{ steps: [{ type: "email", delay: 0, variants: [{ subject: "{{zx_subject}}", body: "{{zx_body}}" }] }] }],
+      email_list: ["amir@sender.example.invalid"],
+      open_tracking: false,
+      link_tracking: false,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "POST");
+    assert.ok(calls[0].url.endsWith("/api/v2/campaigns"));
+    assert.deepEqual((calls[0].body as { email_list: string[] }).email_list, ["amir@sender.example.invalid"]);
+    assert.deepEqual(created.email_list, ["amir@sender.example.invalid"]);
+    assert.equal(created.open_tracking, false);
+    assert.equal(created.first_email_text_only, true);
+  });
+
+  test("createCampaign with an empty email_list → permanent validation, no network", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, {}));
+    const error = await capture(() =>
+      client(impl).createCampaign({
+        name: "x",
+        campaign_schedule: { schedules: [] },
+        sequences: [],
+        email_list: [],
+        open_tracking: false,
+      }),
+    );
+    assert.ok(error instanceof InstantlyPermanentError);
+    assert.equal(calls.length, 0);
+  });
+
+  test("createCampaign 500 → uncertain (a campaign may exist), fetch called once", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(500, fixture("error-500")));
+    const error = await capture(() =>
+      client(impl).createCampaign({
+        name: "x",
+        campaign_schedule: { schedules: [] },
+        sequences: [],
+        email_list: ["a@b.example.invalid"],
+        open_tracking: false,
+      }),
+    );
+    assert.ok(error instanceof InstantlyUncertainOutcomeError);
+    assert.equal(calls.length, 1);
+  });
+
+  test("replyToEmail posts eaccount + reply_to_uuid and parses the thread id", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("email-reply-sent")));
+    const sent = await client(impl).replyToEmail({
+      eaccount: "amir@sender.example.invalid",
+      replyToUuid: "00000000-0000-4000-8000-0000000e0001",
+      subject: "Re: Fixture subject",
+      body: { html: "Following up." },
+    });
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.endsWith("/api/v2/emails/reply"));
+    assert.deepEqual(calls[0].body, {
+      eaccount: "amir@sender.example.invalid",
+      reply_to_uuid: "00000000-0000-4000-8000-0000000e0001",
+      subject: "Re: Fixture subject",
+      body: { html: "Following up." },
+    });
+    assert.equal(sent.thread_id, "00000000-0000-4000-8000-0000000t0001");
+  });
+
+  test("replyToEmail timeout after dispatch → uncertain, never retried", async () => {
+    const { impl, calls } = mockFetch(() => {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    });
+    const error = await capture(() =>
+      client(impl).replyToEmail({
+        eaccount: "amir@sender.example.invalid",
+        replyToUuid: "00000000-0000-4000-8000-0000000e0001",
+        subject: "Re: x",
+        body: { text: "y" },
+      }),
+    );
+    assert.ok(error instanceof InstantlyUncertainOutcomeError);
+    assert.equal(calls.length, 1);
+  });
+
+  test("replyToEmail without a reply target → permanent validation, no network", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, {}));
+    const error = await capture(() =>
+      client(impl).replyToEmail({ eaccount: "a@b.example.invalid", replyToUuid: " ", subject: "s", body: { text: "b" } }),
+    );
+    assert.ok(error instanceof InstantlyPermanentError);
+    assert.equal(calls.length, 0);
+  });
+
+  test("listEmails sends the filters as query params and parses items", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("emails-list")));
+    const page = await client(impl).listEmails({
+      lead: EMAIL,
+      campaignId: CAMPAIGN,
+      emailType: "sent",
+      minTimestampCreated: "2026-09-24T00:00:00.000Z",
+    });
+    const url = new URL(calls[0].url);
+    assert.equal(url.pathname, "/api/v2/emails");
+    assert.equal(url.searchParams.get("lead"), EMAIL);
+    assert.equal(url.searchParams.get("campaign_id"), CAMPAIGN);
+    assert.equal(url.searchParams.get("email_type"), "sent");
+    assert.equal(page.items[0].ue_type, 1);
+    assert.equal(page.items[0].thread_id, "00000000-0000-4000-8000-0000000t0001");
+  });
+
+  test("getCampaign still parses a campaign without the detail fields", async () => {
+    const { impl } = mockFetch(() => jsonResponse(200, fixture("campaign")));
+    const campaign = await client(impl).getCampaign(CAMPAIGN);
+    assert.equal(campaign.email_list, undefined);
+    assert.equal(campaign.open_tracking, true);
+  });
+});
+
 describe("read-only client", () => {
   test("exposes every read operation and no mutating operation", () => {
     const read = createInstantlyReadClient({ apiKey: SENTINEL_KEY }) as Record<string, unknown>;

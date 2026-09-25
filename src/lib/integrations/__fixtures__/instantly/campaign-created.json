@@ -1,0 +1,29 @@
+{
+  "id": "00000000-0000-4000-8000-00000000c002",
+  "name": "zx-sender-amir@sender.example.invalid",
+  "status": 0,
+  "campaign_schedule": {
+    "schedules": [
+      {
+        "name": "engine-owned",
+        "timing": { "from": "00:00", "to": "23:59" },
+        "days": { "0": true, "1": true, "2": true, "3": true, "4": true, "5": true, "6": true },
+        "timezone": "Europe/Helsinki"
+      }
+    ]
+  },
+  "sequences": [
+    { "steps": [{ "type": "email", "delay": 0, "variants": [{ "subject": "{{zx_subject}}", "body": "{{zx_body}}" }] }] }
+  ],
+  "email_list": ["amir@sender.example.invalid"],
+  "daily_limit": 15,
+  "open_tracking": false,
+  "link_tracking": false,
+  "text_only": true,
+  "first_email_text_only": true,
+  "stop_on_reply": true,
+  "stop_for_company": true,
+  "insert_unsubscribe_header": true,
+  "timestamp_created": "2026-09-25T10:00:00.000Z",
+  "timestamp_updated": "2026-09-25T10:00:00.000Z"
+}

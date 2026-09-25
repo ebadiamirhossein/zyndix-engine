@@ -4,8 +4,11 @@ import {
   instantlyAccountPageSchema,
   instantlyAccountSchema,
   instantlyBlockListEntrySchema,
+  instantlyCampaignDetailSchema,
   instantlyCampaignPageSchema,
   instantlyCampaignSchema,
+  instantlyEmailPageSchema,
+  instantlyEmailSchema,
   instantlyErrorBodySchema,
   instantlyLeadPageSchema,
   instantlyLeadSchema,
@@ -16,6 +19,8 @@ import {
   type InstantlyAccount,
   type InstantlyBlockListEntry,
   type InstantlyCampaign,
+  type InstantlyCampaignDetail,
+  type InstantlyEmail,
   type InstantlyLead,
   type InstantlyLeadsAddResponse,
   type InstantlyWarmupAggregate,
@@ -265,6 +270,63 @@ export type EnrollLeadResult =
   | { outcome: "skipped"; reason: EnrollSkipReason; raw: InstantlyLeadsAddResponse };
 
 export type PagedResult<T> = { items: T[]; truncated: boolean };
+
+/**
+ * POST /api/v2/campaigns body (spec). Only the fields U5's sender-pinned
+ * campaigns set are typed; the script builds the full payload.
+ */
+export type CreateCampaignInput = {
+  name: string;
+  campaign_schedule: {
+    schedules: Array<{
+      name: string;
+      timing: { from: string; to: string };
+      days: Partial<Record<"0" | "1" | "2" | "3" | "4" | "5" | "6", boolean>>;
+      timezone: string;
+    }>;
+    start_date?: string | null;
+    end_date?: string | null;
+  };
+  sequences: Array<{
+    steps: Array<{ type: "email"; delay: number; variants: Array<{ subject: string; body: string }> }>;
+  }>;
+  email_list: string[];
+  daily_limit?: number | null;
+  daily_max_leads?: number | null;
+  email_gap?: number | null;
+  random_wait_max?: number | null;
+  open_tracking: boolean;
+  link_tracking?: boolean | null;
+  text_only?: boolean | null;
+  first_email_text_only?: boolean | null;
+  stop_on_reply?: boolean | null;
+  stop_on_auto_reply?: boolean | null;
+  stop_for_company?: boolean | null;
+  insert_unsubscribe_header?: boolean | null;
+};
+
+/** POST /api/v2/emails/reply — a follow-up sent into the original's thread. */
+export type ReplyToEmailInput = {
+  /** The connected sending account; U5 passes the lead's bound send_account. */
+  eaccount: string;
+  /** Instantly id of the email being replied to (step 1's sent email). */
+  replyToUuid: string;
+  subject: string;
+  body: { text?: string; html?: string };
+};
+
+export type ListEmailsParams = {
+  limit?: number;
+  startingAfter?: string;
+  /** A lead email address, or "thread:<thread_id>". */
+  search?: string;
+  lead?: string;
+  campaignId?: string;
+  eaccount?: string;
+  emailType?: "received" | "sent" | "manual";
+  minTimestampCreated?: string;
+  sortOrder?: "asc" | "desc";
+};
 
 export type AccountHealthVerdict = "healthy" | "degraded" | "unhealthy" | "unknown";
 
@@ -522,10 +584,10 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
     return collectPages((startingAfter) => listCampaigns({ startingAfter }), params.maxPages ?? DEFAULT_MAX_PAGES);
   }
 
-  function getCampaign(id: string): Promise<InstantlyCampaign> {
+  function getCampaign(id: string): Promise<InstantlyCampaignDetail> {
     return request(
       { op: "getCampaign", method: "GET", path: `/api/v2/campaigns/${encodeURIComponent(id)}`, mutating: false },
-      instantlyCampaignSchema,
+      instantlyCampaignDetailSchema,
     );
   }
 
@@ -548,6 +610,29 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
           (lead.email ?? "").trim().toLowerCase() === wanted &&
           (lead.campaign === undefined || lead.campaign === null || lead.campaign === campaignId),
       ) ?? null
+    );
+  }
+
+  function listEmails(params: ListEmailsParams = {}) {
+    return request(
+      {
+        op: "listEmails",
+        method: "GET",
+        path: "/api/v2/emails",
+        query: {
+          limit: params.limit ?? PAGE_LIMIT,
+          starting_after: params.startingAfter,
+          search: params.search,
+          lead: params.lead,
+          campaign_id: params.campaignId,
+          eaccount: params.eaccount,
+          email_type: params.emailType,
+          min_timestamp_created: params.minTimestampCreated,
+          sort_order: params.sortOrder,
+        },
+        mutating: false,
+      },
+      instantlyEmailPageSchema,
     );
   }
 
@@ -638,6 +723,58 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
     );
   }
 
+  /** Creates a campaign. Instantly creates it as a draft; nothing sends until activated. */
+  function createCampaign(input: CreateCampaignInput): Promise<InstantlyCampaignDetail> {
+    const path = "/api/v2/campaigns";
+    if (!input.name?.trim() || input.email_list.length === 0) {
+      throw new InstantlyPermanentError(
+        "Instantly createCampaign: name and a non-empty email_list are required",
+        { op: "createCampaign", method: "POST", path, status: null },
+        "validation",
+      );
+    }
+    return request(
+      {
+        op: "createCampaign",
+        method: "POST",
+        path,
+        body: input,
+        mutating: true,
+        fingerprint: { name: input.name },
+      },
+      instantlyCampaignDetailSchema,
+    );
+  }
+
+  /**
+   * Sends a follow-up as a reply to an existing email, so it lands in the same
+   * thread (U5). This SENDS mail — it is the engine-owned step >= 2.
+   */
+  function replyToEmail(input: ReplyToEmailInput): Promise<InstantlyEmail> {
+    const path = "/api/v2/emails/reply";
+    const ctx: ErrorContext = { op: "replyToEmail", method: "POST", path, status: null };
+    const eaccount = input.eaccount?.trim();
+    const replyTo = input.replyToUuid?.trim();
+    if (!eaccount || !replyTo || !input.subject?.trim() || (!input.body.text && !input.body.html)) {
+      throw new InstantlyPermanentError(
+        "Instantly replyToEmail: eaccount, replyToUuid, subject and a body are required",
+        ctx,
+        "validation",
+      );
+    }
+    return request(
+      {
+        op: "replyToEmail",
+        method: "POST",
+        path,
+        body: { eaccount, reply_to_uuid: replyTo, subject: input.subject, body: input.body },
+        mutating: true,
+        fingerprint: { eaccount, replyToUuid: replyTo },
+      },
+      instantlyEmailSchema,
+    );
+  }
+
   /** Per-lead stop: Instantly has no per-lead pause, so a lead is removed. */
   function deleteLead(leadId: string): Promise<InstantlyLead> {
     return request(
@@ -678,8 +815,11 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
     listAllCampaigns,
     getCampaign,
     findLeadInCampaign,
+    listEmails,
     listWebhookEventTypes,
     enrollLead,
+    createCampaign,
+    replyToEmail,
     pauseCampaign,
     activateCampaign,
     deleteLead,
@@ -699,11 +839,14 @@ export const INSTANTLY_READ_OPERATIONS = [
   "listAllCampaigns",
   "getCampaign",
   "findLeadInCampaign",
+  "listEmails",
   "listWebhookEventTypes",
 ] as const satisfies readonly (keyof InstantlyClient)[];
 
 export const INSTANTLY_MUTATING_OPERATIONS = [
   "enrollLead",
+  "createCampaign",
+  "replyToEmail",
   "pauseCampaign",
   "activateCampaign",
   "deleteLead",

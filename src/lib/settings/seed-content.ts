@@ -281,6 +281,18 @@ export const send_windows = {
   jitter_minutes: 17,
 } as const;
 
+/**
+ * send_policy v1 (09 §U5, Session 11). Conservative on purpose: catch-all
+ * (which MillionVerifier's mapping also uses for "unknown") is NOT sent to
+ * until the operator writes v2 allowing it — bounce > 3% burns an inbox.
+ */
+export const send_policy = {
+  verification_max_age_days: 90,
+  allow_catch_all: false,
+  min_warmup_score: 80,
+  duplicate_company_window_days: 30,
+} as const;
+
 export const cta_variants = {
   variants: [
     {
@@ -311,4 +323,5 @@ export const SEED_SETTINGS: Record<string, unknown> = {
   compliance_footer,
   capacity_defaults,
   send_windows,
+  send_policy,
 };

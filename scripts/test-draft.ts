@@ -23,6 +23,8 @@ import { resolve } from "node:path";
 
 config({ path: resolve(process.cwd(), ".env.local") });
 
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import { createServiceClient } from "../src/lib/db/service-client";
 import { createAnthropicClient } from "../src/lib/integrations/anthropic";
 import { createTelegramClient } from "../src/lib/integrations/telegram";
@@ -31,6 +33,8 @@ import { createStateStore } from "../src/lib/state/core";
 import { runDraftStage } from "../src/lib/stages/draft/core";
 import { checkGenericDraft, wordCount } from "../src/lib/stages/draft/guard";
 import { processTelegramUpdate } from "../src/lib/telegram/handler";
+import { approvalHash, buildApprovalSnapshot } from "../src/lib/sending/approval";
+import type { DatabaseWithSending } from "../src/types/database-extensions";
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -513,6 +517,25 @@ async function main(): Promise<void> {
         "approve → lead state approved",
         approvedLead.state === "approved",
         approvedLead.state,
+      );
+
+      // U5: the approval is bound to the exact content and recipient.
+      const { data: binding } = await (db as unknown as SupabaseClient<DatabaseWithSending>)
+        .from("touches")
+        .select("id, step_no, channel, subject, body, prompt_version, approval_hash, approved_by, approved_at")
+        .eq("id", firstTouch.id)
+        .single();
+      const expectedHash = binding
+        ? approvalHash(buildApprovalSnapshot(binding, { id: approvedLead.id, email: approvedLead.email }))
+        : null;
+      assert(
+        "approve → approval_hash binds subject/body/recipient (U5)",
+        Boolean(binding?.approval_hash) && binding?.approval_hash === expectedHash,
+      );
+      assert(
+        "approve → approved_by and approved_at recorded (U5)",
+        binding?.approved_by === `telegram:${approverId}` && Boolean(binding?.approved_at),
+        binding?.approved_by ?? "missing",
       );
     } else {
       console.log("SKIP: no fixture touch or no numeric allowed user id.");

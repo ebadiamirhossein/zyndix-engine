@@ -1,5 +1,5 @@
 import type { Database, Json } from "@/types/database";
-import type { AppRole, CapacityReservationState, JobState } from "@/types/enums";
+import type { AppRole, CapacityReservationState, JobState, OutboxOperation, OutboxState } from "@/types/enums";
 
 /** Table added in 0004_source_cursors.sql — merge into database.ts after gen:types. */
 export type DatabaseWithSourceCursors = Database & {
@@ -166,6 +166,81 @@ export type DatabaseWithCapacity = Omit<DatabaseWithJobs, "public"> & {
       settle_capacity: {
         Args: { p_reservation_id: string; p_outcome: string };
         Returns: Json;
+      };
+    };
+  };
+};
+
+type CapTables = DatabaseWithCapacity["public"]["Tables"];
+type Touches = CapTables["touches"];
+type Leads = CapTables["leads"];
+type SendAccountsCap = CapTables["send_accounts"];
+
+type TouchApprovalColumns = {
+  approval_hash: string | null;
+  approval_snapshot: Json | null;
+  approved_at: string | null;
+  approved_by: string | null;
+  idempotency_key: string | null;
+};
+
+export type OutboxRowShape = {
+  id: string;
+  touch_id: string;
+  lead_id: string;
+  send_account_id: string;
+  channel: string;
+  operation: OutboxOperation;
+  idempotency_key: string;
+  approval_hash: string;
+  reservation_id: string | null;
+  state: OutboxState;
+  provider_campaign_id: string | null;
+  provider_lead_id: string | null;
+  provider_email_id: string | null;
+  provider_thread_id: string | null;
+  reply_to_email_id: string | null;
+  uncertain_reason: string | null;
+  fingerprint: Json | null;
+  last_error: string | null;
+  dispatch_count: number;
+  dispatched_at: string | null;
+  settled_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+/**
+ * Columns and table added in 0008_touch_approval_binding.sql and
+ * 0008b_outbox.sql (09 §U5) — merge into database.ts after gen:types.
+ */
+export type DatabaseWithSending = Omit<DatabaseWithCapacity, "public"> & {
+  public: Omit<DatabaseWithCapacity["public"], "Tables"> & {
+    Tables: Omit<CapTables, "touches" | "leads" | "send_accounts"> & {
+      touches: {
+        Row: Touches["Row"] & TouchApprovalColumns;
+        Insert: Touches["Insert"] & Partial<TouchApprovalColumns>;
+        Update: Touches["Update"] & Partial<TouchApprovalColumns>;
+        Relationships: Touches["Relationships"];
+      };
+      leads: {
+        Row: Leads["Row"] & { send_account_id: string | null };
+        Insert: Leads["Insert"] & { send_account_id?: string | null };
+        Update: Leads["Update"] & { send_account_id?: string | null };
+        Relationships: Leads["Relationships"];
+      };
+      send_accounts: {
+        Row: SendAccountsCap["Row"] & { instantly_campaign_id: string | null };
+        Insert: SendAccountsCap["Insert"] & { instantly_campaign_id?: string | null };
+        Update: SendAccountsCap["Update"] & { instantly_campaign_id?: string | null };
+        Relationships: SendAccountsCap["Relationships"];
+      };
+      outbox: {
+        Row: OutboxRowShape;
+        Insert: Partial<OutboxRowShape> &
+          Pick<OutboxRowShape, "touch_id" | "lead_id" | "send_account_id" | "operation" | "idempotency_key" | "approval_hash">;
+        Update: Partial<OutboxRowShape>;
+        Relationships: [];
       };
     };
   };

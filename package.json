@@ -12,7 +12,9 @@
     "test:jobs": "tsx scripts/test-u2-jobs.ts",
     "test:source-filters": "tsx --test src/lib/stages/source/filters.test.ts",
     "test:scheduler": "tsx scripts/test-u3-scheduler.ts",
-    "test:instantly": "tsx --test src/lib/integrations/instantly.test.ts"
+    "test:instantly": "tsx --test src/lib/integrations/instantly.test.ts",
+    "test:sending": "tsx --test src/lib/sending/sending.test.ts",
+    "test:send": "tsx scripts/test-u5-send.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

@@ -1,0 +1,41 @@
+import { z } from "zod";
+
+import { defineJob, type RegisteredJob } from "@/lib/jobs/registry";
+
+import {
+  RECONCILE_JOB_TYPE,
+  runReconcileJob,
+  runSendJob,
+  SEND_JOB_TYPE,
+  type SendDeps,
+} from "./core";
+
+// Job definitions for the send stage (U2 registry). Pure: deps are injected,
+// so scripts and tests register the same definitions against mocks.
+
+export const sendJobPayloadSchema = z.object({ touch_id: z.string().uuid() }).strict();
+export const reconcileJobPayloadSchema = z.object({ outbox_id: z.string().uuid() }).strict();
+
+/** One provider call per run: well inside the default lease sizing. */
+const SEND_TIMEOUT_MS = 45_000;
+
+export function sendJobDefinitions(deps: SendDeps): RegisteredJob[] {
+  return [
+    defineJob({
+      type: SEND_JOB_TYPE,
+      payloadSchema: sendJobPayloadSchema,
+      timeoutMs: SEND_TIMEOUT_MS,
+      handler: async (job) => {
+        await runSendJob(deps, job);
+      },
+    }),
+    defineJob({
+      type: RECONCILE_JOB_TYPE,
+      payloadSchema: reconcileJobPayloadSchema,
+      timeoutMs: SEND_TIMEOUT_MS,
+      handler: async (job) => {
+        await runReconcileJob(deps, job);
+      },
+    }),
+  ];
+}

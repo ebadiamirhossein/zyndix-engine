@@ -152,6 +152,72 @@ export const instantlyCampaignSchema = z
 
 export const instantlyCampaignPageSchema = pageSchema(instantlyCampaignSchema);
 
+/**
+ * The configuration fields the sender-pinning check reads back (U5). Every one
+ * is optional so a campaign listing still parses; when present it must have
+ * the spec's type. Returned by GET /api/v2/campaigns/{id} and POST /api/v2/campaigns.
+ */
+export const instantlyCampaignDetailSchema = instantlyCampaignSchema
+  .extend({
+    email_list: z.array(z.string()).optional(),
+    daily_limit: z.number().nullable().optional(),
+    open_tracking: z.boolean().nullable().optional(),
+    link_tracking: z.boolean().nullable().optional(),
+    text_only: z.boolean().nullable().optional(),
+    first_email_text_only: z.boolean().nullable().optional(),
+    stop_on_reply: z.boolean().nullable().optional(),
+    stop_for_company: z.boolean().nullable().optional(),
+    insert_unsubscribe_header: z.boolean().nullable().optional(),
+    sequences: z
+      .array(
+        z
+          .object({
+            steps: z.array(
+              z
+                .object({
+                  type: z.string(),
+                  delay: z.number(),
+                  variants: z.array(z.object({ subject: z.string(), body: z.string() }).passthrough()),
+                })
+                .passthrough(),
+            ),
+          })
+          .passthrough(),
+      )
+      .optional(),
+  })
+  .passthrough();
+
+// ---------------------------------------------------------------------------
+// Emails — GET /api/v2/emails, POST /api/v2/emails/reply (U5 threaded
+// follow-ups). A reply shares the original's thread_id.
+// ---------------------------------------------------------------------------
+
+export const EMAIL_UE_TYPE_LABELS: Record<number, string> = {
+  1: "sent_from_campaign",
+  2: "received",
+  3: "sent",
+  4: "scheduled",
+};
+
+export const instantlyEmailSchema = z
+  .object({
+    id: z.string().min(1),
+    timestamp_created: z.string(),
+    message_id: z.string(),
+    subject: z.string(),
+    eaccount: z.string(),
+    to_address_email_list: z.string(),
+    thread_id: z.string().nullable().optional(),
+    lead: z.string().nullable().optional(),
+    campaign_id: z.string().nullable().optional(),
+    ue_type: z.number().nullable().optional(),
+    step: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export const instantlyEmailPageSchema = pageSchema(instantlyEmailSchema);
+
 // ---------------------------------------------------------------------------
 // Leads — POST /api/v2/leads/list, DELETE /api/v2/leads/{id}
 // ---------------------------------------------------------------------------
@@ -224,6 +290,8 @@ export type InstantlyAccount = z.infer<typeof instantlyAccountSchema>;
 export type InstantlyWarmupAggregate = z.infer<typeof instantlyWarmupAggregateSchema>;
 export type InstantlyWarmupAnalytics = z.infer<typeof instantlyWarmupAnalyticsSchema>;
 export type InstantlyCampaign = z.infer<typeof instantlyCampaignSchema>;
+export type InstantlyCampaignDetail = z.infer<typeof instantlyCampaignDetailSchema>;
+export type InstantlyEmail = z.infer<typeof instantlyEmailSchema>;
 export type InstantlyLead = z.infer<typeof instantlyLeadSchema>;
 export type InstantlyLeadsAddResponse = z.infer<typeof instantlyLeadsAddResponseSchema>;
 export type InstantlyBlockListEntry = z.infer<typeof instantlyBlockListEntrySchema>;

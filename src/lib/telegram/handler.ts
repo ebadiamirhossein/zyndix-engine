@@ -2,8 +2,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { TelegramClient } from "@/lib/integrations/telegram";
 import { parseAllowedUserIds } from "@/lib/integrations/telegram";
+import { approvalHash, buildApprovalSnapshot } from "@/lib/sending/approval";
 import { createStateStore } from "@/lib/state/core";
 import type { Database, Json } from "@/types/database";
+import type { DatabaseWithSending } from "@/types/database-extensions";
 
 export type TelegramHandlerDeps = {
   db: SupabaseClient<Database>;
@@ -212,9 +214,50 @@ async function resolvePendingEdit(
     .eq("id", eventId);
 }
 
+/**
+ * Approves a pending touch AND binds the approval to its exact content and
+ * recipient (09 §U5): approval_hash / approval_snapshot / approved_at /
+ * approved_by. Fenced on status = pending_approval, so a stale or repeated
+ * button press changes nothing. Returns false when nothing was approved.
+ */
+async function bindApproval(
+  db: SupabaseClient<Database>,
+  touchId: string,
+  leadId: string,
+  body: string,
+  approvedBy: number,
+): Promise<boolean> {
+  const sendDb = db as unknown as SupabaseClient<DatabaseWithSending>;
+  const { data: touch } = await sendDb
+    .from("touches")
+    .select("id, step_no, channel, subject, prompt_version")
+    .eq("id", touchId)
+    .maybeSingle();
+  const { data: lead } = await sendDb.from("leads").select("id, email").eq("id", leadId).maybeSingle();
+  if (!touch || !lead) return false;
+
+  const snapshot = buildApprovalSnapshot({ ...touch, body }, lead);
+  const { data, error } = await sendDb
+    .from("touches")
+    .update({
+      body,
+      status: "approved",
+      approval_hash: approvalHash(snapshot),
+      approval_snapshot: snapshot as unknown as Json,
+      approved_at: new Date().toISOString(),
+      approved_by: `telegram:${approvedBy}`,
+    })
+    .eq("id", touchId)
+    .eq("status", "pending_approval")
+    .select("id");
+  if (error) throw new Error(`approve touch ${touchId}: ${error.message}`);
+  return (data ?? []).length === 1;
+}
+
 async function handleApprove(
   deps: TelegramHandlerDeps,
   touchId: string,
+  userId: number,
   chatId: number,
   messageId: number,
   originalText?: string,
@@ -234,10 +277,10 @@ async function handleApprove(
     return;
   }
 
-  await deps.db
-    .from("touches")
-    .update({ body: touch.draft_body, status: "approved" })
-    .eq("id", touchId);
+  if (!(await bindApproval(deps.db, touchId, touch.lead_id, touch.draft_body, userId))) {
+    await deps.telegram.sendMessage(chatId, `Touch is ${touch.status ?? "unknown"}, not pending_approval — nothing approved.`);
+    return;
+  }
 
   await deps.transition(touch.lead_id, "pending_approval", "approved", "approved", {
     touch_id: touchId,
@@ -314,10 +357,10 @@ async function handleEditedBody(
     return;
   }
 
-  await deps.db
-    .from("touches")
-    .update({ body: newBody.trim(), status: "approved" })
-    .eq("id", pending.touchId);
+  if (!(await bindApproval(deps.db, pending.touchId, pending.leadId, newBody.trim(), userId))) {
+    await deps.telegram.sendMessage(chatId, `Touch is ${touch.status ?? "unknown"}, not pending_approval — edit not applied.`);
+    return;
+  }
 
   await deps.transition(pending.leadId, "pending_approval", "approved", "edited", {
     touch_id: pending.touchId,
@@ -563,7 +606,7 @@ async function handleCallback(
 
   switch (action) {
     case "approve":
-      await handleApprove(deps, touchId, chatId, messageId, originalText);
+      await handleApprove(deps, touchId, userId, chatId, messageId, originalText);
       await deps.telegram.answerCallback(callback.id, "Approved");
       break;
     case "edit":

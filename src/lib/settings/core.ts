@@ -10,6 +10,7 @@ import {
   proofPointsSchema,
   complianceFooterSchema,
   segmentsSettingsSchema,
+  sendPolicySchema,
   sendWindowsSchema,
 } from "@/lib/validation/jsonb";
 import type { Database, Json } from "@/types/database";
@@ -28,6 +29,7 @@ export const SETTING_KEYS = [
   "compliance_footer",
   "capacity_defaults",
   "send_windows",
+  "send_policy",
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -70,6 +72,8 @@ function schemaForKey(key: string): z.ZodType {
       return capacityDefaultsSchema;
     case "send_windows":
       return sendWindowsSchema;
+    case "send_policy":
+      return sendPolicySchema;
     case "apify_actor_templates":
       return apifyActorTemplatesSchema;
     default:

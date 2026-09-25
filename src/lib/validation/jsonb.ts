@@ -193,6 +193,24 @@ export const sendWindowsSchema = z
   })
   .strict();
 
+/**
+ * send_policy (09 §U5): the thresholds preflight judges against. A versioned
+ * settings record, not code, so tightening or loosening one is a new version
+ * with a change note. A missing key holds every send (never defaulted).
+ */
+export const sendPolicySchema = z
+  .object({
+    /** A verification older than this is `email_unverified` (re-verify first). */
+    verification_max_age_days: z.number().int().positive(),
+    /** Whether MillionVerifier catch_all (which also covers "unknown") may be sent to. */
+    allow_catch_all: z.boolean(),
+    /** Instantly warmup health score below this is `sender_unhealthy`. */
+    min_warmup_score: z.number().min(0).max(100),
+    /** Another lead at the same company in active outreach within this window is `duplicate_company_active`. */
+    duplicate_company_window_days: z.number().int().positive(),
+  })
+  .strict();
+
 /** Union of known settings jsonb shapes; plain text prompts are stored as strings. */
 export const settingsValueSchema = z.union([
   z.string(),
@@ -203,6 +221,7 @@ export const settingsValueSchema = z.union([
   complianceFooterSchema,
   capacityDefaultsSchema,
   sendWindowsSchema,
+  sendPolicySchema,
 ]);
 
 // ---------------------------------------------------------------------------

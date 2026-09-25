@@ -32,6 +32,8 @@ Registrar: Namecheap (already in use).
 > **Do not use `zyndix.com` or any subdomain for cold send.** This is a hard rule in `CLAUDE.md`.
 >
 > ⚠️ **Correction to the previous version of this file**, which said the rule was "already enforced by a code guard in `stages/send.ts`". **It is not. There is no `stages/send.ts`.** The normalized guard, its explicit allowed-sender list and its no-override rule all arrive at **U5**, and U5's DoD is what verifies them — including rejecting `zyndix.com`, `mail.zyndix.com`, `ZYNDIX.COM`, a trailing-dot form, a deep subdomain and a whitespace-padded form. Until U5 ships, the rule is enforced by you, not by code.
+>
+> ✅ **Shipped 2026-09-25 (U5, Session 11):** `src/lib/sending/guard.ts` blocks `zyndix.com` and every subdomain (normalized, no override). The allow-list is a code constant: `zyndixhq.com`, `getzyndix.com`. Preflight refuses with `blocked_sender_domain` / `sender_not_allowed`. `pnpm test:sending` covers the whole sub-table.
 
 Criteria used: `.com` only, pronounceable, obviously related to Zyndix but not identical, no hyphens, no numbers.
 
@@ -69,10 +71,15 @@ One piece of free margin if you want it: **MX, SPF and DMARC do not need Workspa
 > | MX | `1 smtp.google.com.` | `0 getzyndix-com.mail.protection.outlook.com.` |
 > | SPF | `v=spf1 include:_spf.google.com ~all` | `v=spf1 include:spf.protection.outlook.com -all` |
 > | DKIM | `google._domainkey` TXT published | `selector1._domainkey` → `selector1-getzyndix-com._domainkey.zyndix.q-v1.dkim.mail.microsoft.` and `selector2` likewise — **both resolve** to `v=DKIM1` keys |
-> | DMARC | `v=DMARC1; p=none; rua=mailto:dmarc@zyndix.com; pct=100; adkim=r; aspf=r` | **missing — `_dmarc.getzyndix.com` is NXDOMAIN** |
-> | `track` CNAME | not set | not set |
+> | DMARC | `v=DMARC1; p=none; rua=mailto:dmarc@zyndix.com; pct=100; adkim=r; aspf=r` | ✅ added via dmarcly (Session 11): `v=DMARC1; p=none; rua=mailto:…@ag.dmarcly.com; ruf=mailto:…@fo.dmarcly.com; sp=none;` — **exactly one** `_dmarc` TXT on 1.1.1.1, 8.8.8.8 and both authoritative NS |
+> | `track` CNAME | not set — not needed (§B.4) | not set — not needed (§B.4) |
 >
-> **Open for `getzyndix.com`:** publish the same DMARC TXT as `zyndixhq.com` (below), then re-run mail-tester on both getzyndix mailboxes. The Google records below apply to `zyndixhq.com` only; the M365 equivalents are shown in the table.
+> **Still open for `getzyndix.com`:** re-run mail-tester on both getzyndix mailboxes now that DMARC exists. The Google records below apply to `zyndixhq.com` only; the M365 equivalents are shown in the table.
+>
+> Verify the DMARC record count (there must be exactly one):
+> ```bash
+> dig +short TXT _dmarc.getzyndix.com @dns1.registrar-servers.com | grep -c DMARC1   # expect 1
+> ```
 
 Do this **first on purchase day**, as soon as the Workspace mailboxes exist. Everything else here can wait; the DKIM clock cannot.
 
@@ -150,6 +157,8 @@ Pay-as-you-go, ~$37 for a starter block. No subscription. The key is already in 
 
 ### B.4 Custom tracking domain
 
+> **Decision 2026-09-25 (Session 11): NOT NEEDED — no custom tracking domain.** Opens are not used as a signal (brief §8), so there is nothing to track. Instantly workspace settings: **"Disable Open Tracking" ON**, **"Always send first email as text-only" ON**, link tracking off. Each sender campaign (`scripts/instantly-sender-campaigns.ts`) also sets `open_tracking:false`, `link_tracking:false`, `text_only:true` and `first_email_text_only:true`, and `--verify` reads them back. The instructions below are kept for the record only; **do not add the CNAME**. `06` §5.
+
 Instantly → Settings → Custom Tracking Domain. Take the CNAME target it shows and add, on both domains:
 ```
 Type: CNAME   Host: track   Value: <value shown in Instantly>
@@ -168,7 +177,11 @@ Send one email from each of the four mailboxes to the address at **mail-tester.c
 
 ### B.6 Turn on warmup, then leave it alone
 
-> **As built:** all four mailboxes connected to Instantly; warmup started **2026-09-24** (19:31–20:52 UTC per Instantly's `timestamp_warmup_start`), no campaigns. Live check 2026-09-25: all four warmup active, health score 100. Each account currently shows `daily_limit=30` in Instantly — confirm that is intended; nothing can send while there are no campaigns.
+> **As built:** all four mailboxes connected to Instantly; warmup started **2026-09-24** (19:31–20:52 UTC per Instantly's `timestamp_warmup_start`). Live check 2026-09-25: all four warmup active, health score 100.
+>
+> **Daily limit (Session 11).** The operator set the daily campaign limit to **1** on all four as a safety net until the first send. The API reads **`daily_limit=4`** on all four. Check it in the UI, then re-read with `pnpm tsx scripts/live-instantly.ts --accounts`. `enable_slow_ramp` is on for the zyndixhq accounts and off for the getzyndix ones.
+>
+> **Sender campaigns (Session 11).** There is one **draft** campaign per mailbox (`zx-sender-<mailbox>`), with no leads and never activated. They exist so each lead stays pinned to one sender. U6 activates only the one used in the live drill.
 
 | Setting | Value |
 |---|---|
@@ -218,14 +231,16 @@ U6's DoD requires the live drill to send to an **operator-owned mailbox, never a
 
 **Clock B — bought 2026-09-24**
 - [x] `zyndixhq.com`: MX, SPF, DKIM, DMARC verified by `dig` (2026-09-25) — §B.0
-- [ ] `getzyndix.com`: MX, SPF, DKIM resolve by `dig` — **DMARC missing (NXDOMAIN)** — §B.0
+- [x] `getzyndix.com`: MX, SPF, DKIM, DMARC resolve by `dig` — DMARC added via dmarcly, exactly one record (Session 11) — §B.0
 - [x] Instantly active — **Growth**, not Hypergrowth (§B.1)
 - [x] Four mailboxes live (`amir@`, `ingrida@` on each domain) — photos and signatures **not recorded**
 - [x] MillionVerifier credits: 495 free, enough for testing — top up before volume
-- [ ] Tracking CNAME live on both domains; link tracking OFF, open tracking ON — no `track` CNAME on either yet
+- [x] ~~Tracking CNAME live on both domains~~ — **not needed** (decision 2026-09-25): open tracking OFF, link tracking OFF, first email text-only — §B.4
 - [x] All four mailboxes score ≥9/10 on mail-tester — **9.6/10 each** (operator-reported)
-- [ ] `getzyndix.com` mailboxes re-tested as **authenticated** on mail-tester (first test: "You're not fully authenticated"; DKIM had just been enabled; DMARC absent)
-- [x] Warmup running (started 2026-09-24) — daily send limit: accounts show `daily_limit=30`, operator to confirm
+- [ ] `getzyndix.com` mailboxes re-tested as **authenticated** on mail-tester (first test: "You're not fully authenticated"; DKIM had just been enabled; DMARC absent then, present since Session 11)
+- [x] Warmup running (started 2026-09-24)
+- [ ] Instantly account daily limit matches the intended 1 — **API reads 4** (Session 11), operator to check
+- [x] One draft sender campaign per mailbox, `--verify` passing (Session 11)
 - [ ] Day-28 re-test passed
 
 **Parallel**

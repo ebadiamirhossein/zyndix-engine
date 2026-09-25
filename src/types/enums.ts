@@ -48,6 +48,7 @@ export const TOUCH_STATUSES = [
   "opened",
   "replied",
   "failed",
+  "uncertain",
 ] as const;
 
 export type TouchStatus = (typeof TOUCH_STATUSES)[number];
@@ -257,3 +258,51 @@ export const CAPACITY_OUTCOMES = [
 
 export type CapacityOutcome = (typeof CAPACITY_OUTCOMES)[number];
 export const capacityOutcomeSchema = z.enum(CAPACITY_OUTCOMES);
+
+// ---------------------------------------------------------------------------
+// Send outbox (09 §U5; check constraint in 0008b_outbox.sql)
+// ---------------------------------------------------------------------------
+
+export const OUTBOX_STATES = [
+  "dispatching",
+  "accepted",
+  "retry_wait",
+  "uncertain",
+  "failed",
+  "reconciled_sent",
+  "reconciled_not_sent",
+] as const;
+
+export type OutboxState = (typeof OUTBOX_STATES)[number];
+export const outboxStateSchema = z.enum(OUTBOX_STATES);
+
+export const OUTBOX_OPERATIONS = ["enroll", "reply"] as const;
+export type OutboxOperation = (typeof OUTBOX_OPERATIONS)[number];
+
+/**
+ * Preflight refusal reasons (09 §U5). The first fourteen are the DoD table;
+ * the rest are stated extras. Order here is the order preflight reports them.
+ */
+export const PREFLIGHT_REFUSALS = [
+  "blocked_sender_domain",
+  "sender_not_allowed",
+  "sender_mismatch",
+  "lead_state_invalid",
+  "channel_unsupported",
+  "stale_approval",
+  "suppressed_email",
+  "suppressed_domain",
+  "reply_freeze",
+  "booking_hold",
+  "manual_hold",
+  "email_invalid",
+  "email_unverified",
+  "sender_unhealthy",
+  "duplicate_company_active",
+  "thread_anchor_missing",
+  "timezone_unknown",
+  "outside_window",
+  "quota_exhausted",
+] as const;
+
+export type PreflightRefusal = (typeof PREFLIGHT_REFUSALS)[number];

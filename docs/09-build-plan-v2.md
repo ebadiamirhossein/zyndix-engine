@@ -217,6 +217,16 @@ Minimal single-campaign configuration — no campaigns table until U14.
 
 **Effort.** 3 sessions. **Depends on.** U3, U4.
 
+**As built (2026-09-25, Session 11)** — `tested locally`; the provider writes are mocked. Evidence is in `07` Session 11.
+- **Timing and threading (operator decision).** The engine owns timing. Step 1 is `leads/add` into the bound mailbox's **single-step** campaign (`zx-sender-<mailbox>`, subject/body passed as the lead variables `{{zx_subject}}`/`{{zx_body}}`), enrolled only inside the recipient's window. Steps ≥ 2 are `POST /api/v2/emails/reply` with `eaccount` = the bound mailbox and `reply_to_uuid` = step 1's Instantly email id, so they thread as `Re: <subject>`.
+- **Preflight** returns the ordered verdict list: the 14 DoD reasons plus stated extras `sender_not_allowed`, `lead_state_invalid`, `channel_unsupported`, `thread_anchor_missing` and `timezone_unknown`. It runs twice, before the reservation and again on a fresh load after it.
+- **Timezone.** `timezone_unknown` is a **hold**, never a deferral: event, released capacity, no re-enqueue, operator alert. The country fallback applies only to single-zone countries (IANA `zone.tab`).
+- **Other changes to the planned touches.**
+  - The reconcile job lives in `stages/send/core.ts`, beside the helpers it shares, not in a separate `reconcile.ts`. `stages/send/jobs.ts` holds the job definitions; `stages/send.ts` holds the server-only wiring.
+  - New settings key `send_policy` v1.
+  - New scripts `seed-send-accounts.ts` and `instantly-sender-campaigns.ts`. Both are dry-run by default; `--apply` was run with operator approval.
+- **Not wired to cron.** U9 does that. Nothing enqueues `send.email` today; `enqueueSend()` is the entry point.
+
 ---
 
 #### U6 — Instantly webhooks, reply freeze, suppression, reconciliation  🚩 **FIRST SEND READY**
@@ -243,7 +253,7 @@ Unmatched contacts and failed stops go to an exception queue with escalation. A 
 - Touches marked `sent` 25 hours ago with zero webhook events in that window → reconcile raises `stop_processing_stale` and pauses the campaign; the next orchestrate run makes **zero** provider calls for it.
 - One synthetic lead traverses `sourced → … → sent` with a mock adapter, and eight sibling cases prove each stop rule blocks it.
 
-*Part 2 — live drill:* a campaign whose single recipient is an **operator-owned mailbox, never a prospect**. Observe in order: a real Instantly provider message id on the touch, `touches.status='sent'`, `capacity_ledger.accepted=1`, `leads.state='sent'`. Then reply from that mailbox and observe the lead freeze **before** any classifier runs.
+*Part 2 — live drill:* a campaign whose single recipient is an **operator-owned mailbox, never a prospect**. **Threading gate (Session 11):** the drill also sends a step-2 follow-up via `emails/reply`. It then inspects the raw headers in the operator mailbox for `In-Reply-To`/`References` pointing at step 1, and checks that the Growth plan allows the endpoint (no 402) and that the key has `emails:create`. If any of these fails, **stop before any prospect send**; the operator chooses between threading and engine-owned steps. Activate only the one sender campaign the drill uses. The drill is also the first live `leads:create`. Observe in order: a real Instantly provider message id on the touch, `touches.status='sent'`, `capacity_ledger.accepted=1`, `leads.state='sent'`. Then reply from that mailbox and observe the lead freeze **before** any classifier runs.
 
 Only after Part 2 may `06-build-progress.md` say **verified with provider**.
 
@@ -667,6 +677,8 @@ Carried from `05-build-plan.md` §4, still valid:
 - Re-test the crawler against `fantasticfrank.co`: `playwright:adaptive` (templates v3) is a mitigation that has never been verified.
 - `test-draft.ts` edit (✏️) and kill (❌) paths — each needs its own fixture, since an approved lead cannot transition to `parked`.
 - **`pnpm lint` has failed on `main` since before U1** — 17 `no-explicit-any` errors across `scripts/compare-prompt-versions.ts`, `rerun-qualifier-one.ts` and `test-qualify.ts`, plus 4 unused-var warnings in `src/lib`. `build` and `tsc --noEmit` are clean. One focused session, not a unit.
+- **Verify stage suppression scope** (`stages/verify/core.ts` `isSuppressed`): any `domain` match counts as suppressed, including the domain written beside a person-level invalid email. Align it with U5's person-level versus company-wide rule (`sending/suppression.ts`). Natural home: U6, which owns suppression.
+- **Recipient timezone for US leads**: all current leads are US with null timezones, so each would be held `timezone_unknown`. Populate `leads.timezone` from Apollo location data (U15).
 - **`0002_transition_lead.sql` is `security definer` with no `set search_path`** — Supabase's linter calls this `function_search_path_mutable`. Fixing it means a new migration that replaces the function; it does not belong inside a feature unit.
 
 ---

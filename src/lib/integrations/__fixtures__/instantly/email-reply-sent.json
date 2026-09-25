@@ -1,0 +1,16 @@
+{
+  "id": "00000000-0000-4000-8000-0000000e0002",
+  "timestamp_created": "2026-09-29T08:40:00.000Z",
+  "timestamp_email": "2026-09-29T08:40:00.000Z",
+  "message_id": "<reply-0002@sender.example.invalid>",
+  "subject": "Re: Fixture subject",
+  "from_address_email": "amir@sender.example.invalid",
+  "to_address_email_list": "prospect@target.example.invalid",
+  "body": { "text": "Following up.", "html": "Following up." },
+  "organization_id": "00000000-0000-4000-8000-00000000a001",
+  "eaccount": "amir@sender.example.invalid",
+  "thread_id": "00000000-0000-4000-8000-0000000t0001",
+  "lead": "prospect@target.example.invalid",
+  "campaign_id": null,
+  "ue_type": 3
+}
