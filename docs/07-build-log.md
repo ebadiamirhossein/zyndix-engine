@@ -58,6 +58,155 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-25 — Session 18 — U6c S18 live spike: Instantly-owned follow-ups go to the lead only, thread, are text-only, and stop on DELETE
+
+**Step:** U6c, the S18 live spike (`09` §U6c "S18"), on `main`. Plan mode first. Operator decisions in plan mode: the delete is **pre-approved once and fires automatically** on step 2; the webhook sink is a **script-local listener**.
+
+**Status at end:** ✅ **spike passed; every verdict holds.**
+- The provider mechanics are **verified with provider**.
+- The script is **tested locally**.
+- U6c engine code: **not started** (S19–S21). The ⛔ row in `06` §6 stays open until S22. 🚩 not reached.
+
+**Safety and spend:**
+- The only recipient all session was `ebadiamirhoseineng+s17@gmail.com`, an operator-owned Gmail alias.
+- No prospect was read or touched. No engine stage ran, no DB write, no Anthropic call.
+- Every Instantly write was approved in chat: create, webhook create + test, enroll, activate, the pre-approved delete, and the webhook delete.
+- 2 emails were sent in total.
+
+**Did**
+- **`scripts/spike-u6c.ts` (new).**
+  - Hard guards:
+    - recipient is the alias;
+    - `--sender` ∈ {amir@zyndixhq.com, amir@getzyndix.com} and passes `checkSenderDomain`;
+    - the campaign is resolved by name `zx-drill-s17-<local>-<domain>`: exactly one, with `email_list` = [sender];
+    - the raw helper allows only `POST /api/v2/campaigns`, and every other write goes through the adapter.
+  - Subcommands: `--check`, `--create`, `--verify`, `--webhook-create`, `--listen`, `--enroll`, `--activate`, `--pause`, `--lead-status`, `--emails`, `--watch --until-step N [--then-delete]`, `--delete-lead`, `--status`.
+- **Live spike.** All times are UTC.
+
+| Step | Time | Result |
+|---|---|---|
+| 1. `--check` | 19:28 | Recommended getzyndix (0 sent; zyndixhq had 2 against a limit of 1). The operator set getzyndix's daily limit to 3 |
+| 2. `--create` | 19:31:36 | 200 → campaign `d598def3` (draft); empty subject **accepted** |
+| 3. Listener + quick tunnel | 19:32 | Empty cloudflared config; probes 401 locally and via the tunnel |
+| 4. Webhook `01a0da0f` | 19:34:33 | Scoped to `d598def3`; test 200 at 19:34:41 |
+| 5. Enroll | 19:35:53 | Lead `01a0da11`, Active |
+| 6. Activate | 19:36:45 | Started the step-2 delete watcher and the step-1 watcher in parallel |
+| 7. Step 1 | 19:39:22 | Webhook `step=1` at 19:39:25 |
+| 8. Step 2 | 19:54:23 | Webhook `step=2` at 19:54:27; DELETE at 19:54:39.7, confirmed at 19:54:40.5 |
+| 9. Step-3 watch | to 20:30:21 | Timed out: no step 3. `campaign_completed` at 20:09:38 |
+| 10. Cleanup | 20:33 | Webhook deleted; campaign left `completed` (operator); tunnel and listener stopped |
+
+**Files touched**
+- `scripts/spike-u6c.ts`: new.
+- `docs/06-build-progress.md`:
+  - the U6c row;
+  - §5: +4 rows;
+  - §6: the "unproven provider mechanics" row → resolved; +2 open rows (step 2 quotes step 1; which `delay` sets the gap).
+- `docs/09-build-plan-v2.md`: §U6c "S18 as built" (results, S19 inputs, deviations) and the §6 summary row.
+- `docs/07-build-log.md`: this entry.
+
+**Verification**
+```
+$ pnpm exec tsc --noEmit ; pnpm exec eslint scripts/spike-u6c.ts
+(no output — clean)
+
+$ tsx scripts/spike-u6c.ts --create --sender ingrida@zyndixhq.com
+spike-u6c FAILED: GUARD: --sender must be one of amir@zyndixhq.com, amir@getzyndix.com — nothing written
+$ tsx scripts/spike-u6c.ts --delete-lead --sender amir@zyndixhq.com
+spike-u6c FAILED: GUARD: expected exactly 1 campaign named zx-drill-s17-amir-zyndixhq, found 0 — nothing written
+$ tsx scripts/spike-u6c.ts --webhook-create --sender amir@zyndixhq.com --url https://evil.example.com/hook
+spike-u6c FAILED: GUARD: --url must be https://<quick-tunnel>.trycloudflare.com/hook — nothing written
+listener self-test: no token → 401 · bad token → 401 · token → 200, 1 line appended
+
+$ tsx scripts/spike-u6c.ts --check                                   (19:28:44Z)
+amir@zyndixhq.com   instantly health=healthy warmup_score=100 · sent_today=2 · daily_limit=1 → set ≥ 5
+amir@getzyndix.com  instantly health=healthy warmup_score=100 · sent_today=0 · daily_limit=1 → set ≥ 3
+workspace leads for ebadiamirhoseineng+s17@gmail.com: 0 · webhooks: 0 · drill campaigns: none
+RECOMMEND: amir@getzyndix.com
+
+$ tsx scripts/spike-u6c.ts --create --sender amir@getzyndix.com
+  POST /api/v2/campaigns (empty follow-up subject) → HTTP 200
+  empty follow-up subject ACCEPTED by the API
+  CREATED d598def3-b1bc-4b4b-8ce5-7ad4360d3727 status=draft
+  email_list=["amir@getzyndix.com"] daily_limit=3 daily_max_leads=1 email_gap=10 random_wait_max=5
+  text_only=true first_email_text_only=true open_tracking=false link_tracking=not echoed stop_on_reply=true stop_for_company=true insert_unsubscribe_header=true
+  sequences (as stored): 3 steps, each {"delay":5,"delay_unit":"minutes","pre_delay_unit":"days"}; subjects "Zyndix spike S17", "", ""
+
+local POST /hook (no token) → 401 · tunnel https://mac-biography-pay-microphone.trycloudflare.com/hook (no token) → 401
+CREATED webhook 01a0da0f-f21c-759f-a148-386d6adbdb0e event_type=all_events campaign=d598def3 headers=[x-zyndix-webhook-token]
+TEST 01a0da0f…: success=true status_code=200 · listener: 200 event_type=test_event campaign=d598def3
+ENROLL ebadiamirhoseineng+s17@gmail.com → campaign d598def3: created lead=01a0da11-2d15-77f2-b5cb-97d397bebf14 · status=1(Active)
+ACTIVATE d598def3 → status=active (19:36:45Z)
+
+listener 19:39:25Z 200 event_type=email_sent step=1 variant=1 email_id=01a0da14-5b27-7796-bbd1-e1a8920037ba email_account=amir@getzyndix.com
+listener 19:54:27Z 200 event_type=email_sent step=2 variant=1 email_id=01a0da22-196c-7ed8-abe3-09cfe1712957
+STEP 2 SEEN at 19:54:38.737Z (api sent count=1, webhook steps=[1,2])
+DELETE /api/v2/leads/01a0da11-2d15-77f2-b5cb-97d397bebf14 · 19:54:39.707Z → accepted 19:54:40.089Z
+  confirm: GET /leads/01a0da11… → HTTP 404 · leads/list → 0 · 19:54:40.494Z → DELETE CONFIRMED
+
+$ tsx scripts/spike-u6c.ts --emails --sender amir@getzyndix.com       (20:30:32Z)
+  id=01a0da14… step=0_0_0 ue_type=1 ts=19:39:22Z from=amir@getzyndix.com
+  to="ebadiamirhoseineng+s17@gmail.com" cc="" bcc="" thread_id=d5-mTV4qq4MPIidE__4bxPxQTi
+  message_id=<01a0da14-5b27-7796-bbd1-e1a8920037ba@getzyndix.com> subject="Zyndix spike S17" body: html=123 chars (has tags), text=none
+  verdict: To==[alias] only: PASS · Cc/Bcc empty: PASS · own address: none (PASS) · same thread: PASS
+  id=01a0da22… step=0_1_0 ue_type=1 ts=19:54:23Z from=amir@getzyndix.com
+  to="ebadiamirhoseineng+s17@gmail.com" cc="" bcc="" thread_id=d5-mTV4qq4MPIidE__4bxPxQTi
+  message_id=<01a0da22-196c-7ed8-abe3-09cfe1712957@getzyndix.com> subject="Re: Zyndix spike S17" body: html=143 chars (has tags), text=none
+  verdict: To==[alias] only: PASS · Cc/Bcc empty: PASS · own address: none (PASS) · same thread: PASS
+GET /emails?search=<alias> (all campaigns) → 2 emails
+
+$ tsx scripts/spike-u6c.ts --watch --until-step 3 --timeout-min 35
+TIMEOUT: step 3 not seen after 35 min (api sent count=2, webhook steps=[1,2]) · 20:30:21.835Z
+listener 20:09:39Z 200 event_type=campaign_completed campaign=d598def3
+--status: campaign d598def3 status=completed · leads/list 0
+
+Operator, Gmail "Show original":
+ step 1: To = ebadiamirhoseineng+s17@gmail.com only · Content-Type text/plain; charset=utf-8 · SPF/DKIM/DMARC pass · Inbox
+ step 2: To = alias only, no Cc · Subject "Re: Zyndix spike S17" · In-Reply-To = References = <01a0da14-5b27-7796-bbd1-e1a8920037ba@getzyndix.com>
+         · Content-Type text/plain; charset=utf-8 · SPF/DKIM/DMARC pass · Inbox · same conversation as step 1
+         · a quoted copy of step 1 ("On Fri ... wrote: > ...") is appended under step 2
+ no step 3 in Gmail after 20:30Z
+
+$ instantly-webhooks.ts --delete 01a0da0f… → DELETED · --list → webhooks: 0
+```
+Result: **pass**. Every S18 verdict (`09` §U6c) holds:
+
+| # | Verdict | Result |
+|---|---|---|
+| 1 | Empty subject accepted | pass |
+| 2 | Step 2 To = alias only | pass |
+| 3 | Same `thread_id` | pass |
+| 4 | Gmail raw: threading headers, text/plain only | pass |
+| 5 | DELETE → 404 | pass |
+| 6 | No step 3 | pass |
+| 7 | Emails readable after the delete | pass |
+
+Webhook `step=2` also passed.
+
+**Decisions** (full rows in `06` §5)
+- **The spike ran on amir@getzyndix.com.** Reason: most daily room (0 sent vs 2 on zyndixhq). Campaign name `zx-drill-s17-amir-getzyndix`.
+- **The delete was pre-approved once and fired automatically on step 2.** Reason: step 3 followed within minutes, less than a chat round-trip.
+- **Script-local webhook listener.** Reason: the alias has no engine lead, so the engine receiver would have raised `unmatched_recipient` rows.
+- **Campaign `d598def3` left `completed`, not paused.** Reason: it was inert; S22 uses its own campaign.
+
+**Problems hit**
+- None blocking.
+- The first filtered `GET /emails` after step 1 returned 0; the same query 20 s later returned it. This is listing lag, and the watchers read the webhook log too.
+- **Findings recorded for S19** (`06` §6, `09` §U6c):
+  - step 2 quotes step 1, so the approval must bind the rendered follow-up;
+  - the API `step` is 0-indexed (`0_1_0`), while the webhook `step` is 1-indexed;
+  - the API stores the body as HTML although the mail is text/plain;
+  - the follow-up subject renders as `Re: <step 1 subject>`;
+  - which step's `delay` sets the gap is still unproven (15 min observed = 5 + `email_gap` 10). S22 uses distinct per-step delays to settle it.
+- **Pending (operator):** set amir@getzyndix.com's Instantly daily limit back to 1.
+
+**Next action**
+- **S19 — U6c build, part 1** (`09` §U6c).
+- Before code, decide how the quoted step 1 in follow-ups is shown on the approval card and bound in the snapshot (`06` §6).
+- Then: migration `0009d`, the adapter's `updateCampaign`/`getLead`/`getEmail`, and the writer's `{steps:[…]}` output. All with mocks; no live writes.
+
+---
+
 ### 2026-09-25 — Session 17 — U6c planned: follow-ups become Instantly-owned sequence steps (docs only)
 
 **Step:** U6c, planning session (`09` §U6c), on `main`. Plan mode.

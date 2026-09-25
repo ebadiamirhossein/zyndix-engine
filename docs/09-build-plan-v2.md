@@ -503,6 +503,39 @@ All existing guard, draft and approval tests stay green. A live `test-draft --li
 - Cleanup: pause, delete the webhook, keep the campaign (paused) for S22. The operator sets `daily_limit` back to 1.
 - **Any failed verdict → stop and bring options before S19.**
 
+**S18 as built (Session 18, 2026-09-25) — ✅ all verdicts passed.** Evidence in `07` Session 18.
+- **Script:** `scripts/spike-u6c.ts`, **tested locally** (tsc, lint, guard dry runs, listener 401/200 self-test). No engine code, no DB writes, no Anthropic.
+- **Live run, verified with provider.** Sender `amir@getzyndix.com`, campaign `d598def3` `zx-drill-s17-amir-getzyndix`, lead `01a0da11`, alias `ebadiamirhoseineng+s17@gmail.com` only.
+  1. Empty follow-up `subject` accepted (HTTP 200, stored `""`, sent as "Re: Zyndix spike S17").
+  2. Step 2 To = the alias only, Cc/Bcc empty, no own address (API and Gmail raw agree).
+  3. Same `thread_id` `d5-mTV4qq4MPIidE__4bxPxQTi`; `In-Reply-To`/`References` = step 1's Message-ID; one Gmail conversation.
+  4. `text/plain; charset=utf-8` only, steps 1 and 2; SPF/DKIM/DMARC pass; Inbox.
+  5. Webhook `email_sent` carries `step` 1 and 2 (1-indexed), `variant` 1, `email_id` = the `GET /emails` id.
+  6. `DELETE` 13 s after the step-2 webhook → `GET /leads/{id}` 404, `leads/list` 0.
+  7. No step 3 by 20:30Z (API, webhook, Gmail). The campaign sent `campaign_completed` at 20:09:38Z, about when step 3 was due, and reads `completed`.
+  8. Steps 1 and 2 stay readable in `GET /emails` after the delete.
+- **Findings that S19 must absorb:**
+  - **Step 2 quotes step 1** ("On … wrote: > …"). The approval must show and bind the rendered follow-up, not only the step text (`06` §6).
+  - `GET /emails` `step` is `"<seq>_<step>_<variant>"`, 0-indexed (`0_1_0` = step 2); the webhook `step` is 1-indexed. The engine maps webhook `step` N → touch N and never parses the API format.
+  - The API stores the body as HTML (`<br>`) although the sent mail is text/plain. The stored body is not evidence of the MIME type.
+  - Follow-up subject: Instantly renders `Re: <step 1 subject>`. The approval snapshot binds that rendered form.
+  - Which step's `delay` sets the gap is still unproven (all three were 5 min; the observed 15 min = 5 + `email_gap` 10 fits both readings). S19 builds to the spec reading; S22 uses distinct per-step delays to settle it (`06` §6).
+  - `pre_delay_unit: "days"` is echoed on every step; the spec says it is ignored outside subsequences.
+  - `GET /emails` listing lags about 20 s behind the webhook. Watchers read both.
+  - A campaign with no remaining leads auto-completes.
+- **Deviations from the plan text above** (operator, Session 18):
+  - The sender was `amir@getzyndix.com` (most daily room), so the campaign is `zx-drill-s17-amir-getzyndix`.
+  - Enroll came before activate.
+  - An empty-subject 400 would have retried once with the step-1 subject, instead of stopping. It was not needed.
+  - Step 1 also had `delay: 5` minutes, so no step had a 0 delay under either reading.
+  - The webhook went to a script-local listener, not the engine receiver.
+  - The delete was pre-approved once and fired automatically on step 2.
+  - Campaign `d598def3` was left `completed`, not paused. S22 uses its own drill campaign.
+- **Cleanup:**
+  - webhook `01a0da0f` deleted (0 webhooks);
+  - tunnel and listener stopped;
+  - the operator sets `amir@getzyndix.com`'s Instantly daily limit back to 1.
+
 **Tests / DoD** (mocked Instantly and writer, synthetic fixtures, exact reasons):
 
 | # | Case | Expected |
@@ -1061,7 +1094,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U4 | Instantly adapter | 4 | 2 | Instantly | partial | U2 |
 | U5 | Send stage, preflight, guards | 4 | 3 | Instantly | yes | U3, U4 |
 | **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 4 (re-test done Session 16 → STOP; 🚩 moves to U6c) | Instantly | yes | U2, U5 |
-| **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; **S18 live spike next** | 4 | 1 plan + 5 (S18 spike · S19–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven by the S18 spike) | U6, U6b |
+| **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; **S18 spike passed (Session 18); S19 next** | 4 | 1 plan + 5 (S18 spike ✅ · S19–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven live by the S18 spike) | U6, U6b |
 | **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends — ✅ tested locally (Session 15) | 4 | 1 | Anthropic | yes | U6 |
 | U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
 | **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |
