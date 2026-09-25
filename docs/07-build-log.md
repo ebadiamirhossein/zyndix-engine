@@ -58,72 +58,191 @@ Result: pass / fail
 
 ## Sessions
 
-### 2026-09-25 — Session 16 (part 1 of 2) — U6 re-test prep: drill:s14b alias + read-only checks
+### 2026-09-25 — Session 16 — U6 live re-test: the follow-up still names our mailbox → STOP; follow-ups move to U6c
 
-**Step:** U6, live re-test of the follow-up recipient fix (`09` §U6), on `main`. Plan mode first. Operator changes to the plan:
+**Step:** U6, session 4 of 4: the live re-test of the follow-up recipient fix (`09` §U6), on `main`. Plan mode first. Operator changes to the plan:
 - `--check` also reads the sender's Instantly `daily_limit` vs sent today;
 - reuse the existing `launch.json` entry;
-- prep now, live drill Monday in the same session ("go live").
+- the budget gate applies to step 1 only.
 
-**Status at end:** 🟨 **in progress** — prep **tested locally**. **No live writes:** no Instantly write, no Supabase write outside the synthetic test fixtures, no send. No Anthropic calls.
+Part 1 (prep) was committed first as `b614d82`. The operator then raised the sender's Instantly daily campaign limit from 1 to 2 **for this drill only** and said "go live" the same evening.
+
+**Status at end:** ⛔ **blocked, by design decision.**
+- **What worked, verified with provider:** step 1, `email_sent`, and threading.
+- **What failed:** the follow-up recipient (live).
+- **Decision:** follow-ups move to Instantly-owned sequence steps (**U6c, next**). 🚩 not reached.
+
+**Safety and spend:**
+- The only recipient all session was `ebadiamirhoseineng+s14b@gmail.com`, an operator-owned Gmail alias.
+- No prospect was read for writing or touched. No Anthropic calls.
+- Every Instantly write was approved in chat, one by one: webhook create/test, activate, step 1, step 2, and the cleanup.
 
 **Did**
-- `scripts/drill-u6.ts`, new constants:
-  - recipient `ebadiamirhoseineng+s14b@gmail.com` (Gmail alias, same inbox);
-  - domain `drill-s14b.zyndix-drill.invalid`, tag `drill:s14b`, company `ZX DRILL S14B`;
-  - subject `Zyndix engine drill S14b`; texts say "Session 16 / S14b"; `approved_by` `operator:drill-s14b`.
-  - The old address is only in a read-only `PREVIOUS_DRILL_RECIPIENT`. Lead `7fd018fa` is never written. All guards are kept.
-- `--check` additions, all read-only:
-  - the sender budget: `accounts/analytics/daily` `sent` vs the account's `daily_limit`, next to the engine `capacity_ledger`;
-  - the previous address's Instantly lead (`status`, `status_summary.domain_complete`, `company_domain`);
-  - gmail.com domain suppression.
-- New read-only subcommands:
-  - `--verify-hash <touchId>`: stored vs recomputed approval hash, using the same touch fields as `send/core.ts`, `claim_ledger` included;
-  - `--lead-status`: `GET /leads/{id}` for the enroll; Completed/Skipped before any step ran → stop;
-  - `--emails`: `GET /emails/{id}` for each drill email, from/to/cc/bcc/thread/message id/ue_type, and a verdict line (lead in To · amir@zyndixhq.com in To/Cc).
-- `--status` also lists webhooks for the previous address since the new fixture, to show attribution.
-- `--send` now runs the budget check. It **gates step 1 only**. For step ≥ 2 it prints the numbers and does not stop (decision below).
-- A read-only helper refuses any POST except `leads/list`.
+- **`scripts/drill-u6.ts`, part 1 (prep):**
+  - New constants: recipient = the alias, domain `drill-s14b.zyndix-drill.invalid`, tag `drill:s14b`, company `ZX DRILL S14B`, subject `Zyndix engine drill S14b`, `approved_by` `operator:drill-s14b`.
+  - The old address is only in a read-only `PREVIOUS_DRILL_RECIPIENT`. Lead `7fd018fa` was never written.
+  - `--check` gained:
+    - the sender budget (`accounts/analytics/daily` `sent` vs the account `daily_limit`, with the engine ledger alongside);
+    - the previous address's Instantly lead;
+    - gmail.com domain suppression.
+  - New read-only subcommands: `--verify-hash`, `--lead-status`, `--emails`.
+  - `--status` lists webhooks for the old address since the new fixture, to show attribution.
+  - A read-only helper refuses any POST except `leads/list`.
+  - `--send` gates the budget for step 1 only. For step ≥ 2 it prints the numbers and does not stop. The reason is in a code comment.
+- **Live drill** (Fri 2026-09-25, UTC):
+  1. `--check` → budget ok (sent 1 of limit 2). Chicago and Denver had 0 min because their engine windows were closed, so the rule picked America/New_York (90 min).
+  2. Fixture: lead `387b413d`. Touch 1 `1e9ce9e9`, `--verify-hash` → match.
+  3. Dev server via `launch.json` `dev` (autoPort → 57661). Quick tunnel with an empty cloudflared config. Probes: local 401, tunnel 401.
+  4. Webhook `01a0d9d6` created, test 200, `test_event` processed.
+  5. Campaign activated.
+  6. Step 1 (18:34). `--lead-status` showed **Active**, not blocked by `stop_for_company`. `email_sent` arrived at 18:38:16 and filled the anchor.
+  7. Touch 2 `0b5b2539`, `--verify-hash` → match. Step 2 (18:39) via `emails/reply` with `additional_recipients`. The engine recorded `sent`.
+  8. `--emails`: step 2 To = **our mailbox + the lead**. The operator's Gmail check confirmed it. **STOP.**
+  9. The reply step was skipped (operator: the freeze was already verified live in Session 14).
+  10. Cleanup.
+- **No code change after the result.** No fallback was built (operator rule).
 
 **Files touched**
-- `scripts/drill-u6.ts`: constants, read-only checks, 3 new subcommands, the budget gate.
-- `docs/06-build-progress.md`: two new §6 rows (quota sync; follow-ups not capped by `daily_limit`).
+- `scripts/drill-u6.ts`: part 1 (committed in `b614d82`).
+- `docs/06-build-progress.md`:
+  - the U6 row, and a new U6c row;
+  - §5: 2 decisions;
+  - §6: the ⛔ row updated (still open), plus 4 open rows (2 from part 1, 2 from the live result).
+- `docs/09-build-plan-v2.md`: §U6 as-built session 4, U6c next, the effort table, and the drill-exclusion note.
 - `docs/07-build-log.md`: this entry.
 
 **Verification**
+
+Prep (part 1):
 ```
 $ pnpm test:send → All 78 checks passed.   $ pnpm test:instantly → # pass 81 # fail 0   $ pnpm test:sending → # pass 69 # fail 0
 $ pnpm exec tsc --noEmit → clean            $ pnpm exec eslint scripts/drill-u6.ts → clean
-$ pnpm tsx scripts/drill-u6.ts --check      (read-only, 2026-09-25T17:55Z)
-campaign 5392fcac status=paused
+$ pnpm tsx scripts/drill-u6.ts --check      (17:55Z, before the operator raised the limit)
 sender budget 2026-09-25 (UTC date queried): instantly sent_today=1 · daily_limit=1 · analytics HTTP 200
   engine capacity_ledger 2026-09-25: quota=15 used=2 reserved=0 accepted=2
-  BUDGET STOP (step 1): sender at daily limit (1 >= 1) — no write
+  BUDGET STOP: sender at daily limit (1 >= 1) — no write
+```
+
+Pre-check and fixture (after the operator set `daily_limit` 2):
+```
+$ pnpm tsx scripts/drill-u6.ts --check      (18:29Z)
+campaign 5392fcac status=paused · campaign schedule open now: yes, 150 min left
+sender budget 2026-09-25 (UTC date queried): instantly sent_today=1 · daily_limit=2 · analytics HTTP 200
+  engine capacity_ledger 2026-09-25: quota=15 used=2 reserved=0 accepted=2
+  budget ok: 1 left today
 instantly workspace leads for recipient ebadiamirhoseineng+s14b@gmail.com: HTTP 200 · 0 match(es)
 instantly leads for the previous drill address (read-only): HTTP 200 · 1 match(es)
-  01a0d900 campaign=5392fcac status=3(Completed) domain_complete=— company_domain=ebadiamirhoseineng@gmail.com lastStep=…@2026-09-25T14:39:53.271Z
+  01a0d900 campaign=5392fcac status=3(Completed) domain_complete=— company_domain=ebadiamirhoseineng@gmail.com lastStep=amir@zyndixhq.com@2026-09-25T14:39:53.271Z
 engine: gmail.com domain suppression rows=0 · suppression rows=0 · leads with recipient email=0
-PICK America/New_York: 124 min left (≥ 60) — but budget STOP
+  America/New_York     Fri 14:29  engine= 90 min · combined= 90 min
+  America/Halifax      Fri 15:29  engine= 30 min · combined= 30 min
+PICK America/New_York: 90 min left (≥ 60)
+$ … --fixture --tz America/New_York → FIXTURE company=ddc37359 lead=387b413d tz=America/New_York state=pending_approval tag=drill:s14b
+$ … --touch 1 → TOUCH step=1 id=1e9ce9e9-ccc9-4057-ac89-89be3c0e76f2 subject="Zyndix engine drill S14b" approved (sender amir@zyndixhq.com)
+$ … --verify-hash 1e9ce9e9-… → claim_ledger=null · stored b7e24f3a…84ee · recomputed b7e24f3a…84ee · match=true
 ```
-Result: prep pass. The live drill is not run yet.
 
-**Decisions**
-- **The approval hash still binds after U6b.** A drill touch has no ledger, so both the `--touch` snapshot and the preflight recompute carry `claim_ledger: null`. `test:send`, whose touches have no ledger, stays 78/78. `--verify-hash` shows it live on Monday.
-- **Instantly `daily_limit` stays 1. The budget gate applies to step 1 (the campaign enroll) only.** Reason: in Session 14 step 2 went out via `emails/reply` after 1/1 was used, Instantly accepted it (`GET /emails` shows it), and analytics still reports `sent=1` for that day. The same reason is in a code comment in `senderBudget`.
-- **The reply comes From the alias.** Before the reply step, the operator sets up Gmail "Send mail as" for the alias. With the base address as From, Instantly and `matchLead` could attach the reply to the old lead `7fd018fa`.
-- **`stop_for_company`:** the docs don't say whether a reply at gmail.com completes later gmail.com leads. Instantly stores the old lead's `company_domain` as the full address, and `domain_complete` is unset, which points to per-address treatment for free mail. That is not proof, so `--lead-status` runs right after the Monday enroll.
+Tunnel, webhook, campaign (approved writes):
+```
+local POST /api/webhooks/instantly (no token) → 401 · tunnel https://gym-economies-def-marine.trycloudflare.com (no token) → 401
+$ pnpm tsx scripts/instantly-webhooks.ts --create --url https://gym-economies-def-marine.trycloudflare.com/api/webhooks/instantly
+CREATED webhook 01a0d9d6-77b2-7a54-bc78-53c5499d88b3 event_type=all_events status=1 headers=[x-zyndix-webhook-token]
+$ … --test 01a0d9d6-… → TEST success=true status_code=200 response_time_ms=1179   (webhook_events 9f1a557f test_event processed=true)
+$ pnpm tsx scripts/drill-u6.ts --activate → ACTIVATE campaign 5392fcac → status=active · re-read: status=active
+```
+
+Step 1 (approved send):
+```
+$ pnpm tsx scripts/drill-u6.ts --send 1e9ce9e9-ccc9-4057-ac89-89be3c0e76f2
+gate: engine window (America/New_York) 85 min left · campaign schedule 145 min left · campaign status=active
+sender budget 2026-09-25 (UTC date queried): instantly sent_today=1 · daily_limit=2 · budget ok: 1 left today
+enqueued job 6af634b7 deduped=false
+worker: claimed=1 completed=1 retried=0 dead=0 stopped=max_jobs
+lead 387b413d state=sent · touch 1e9ce9e9 step=1 status=sent sent_at=2026-09-25T18:34:05.237Z
+outbox f8804b58 enroll state=accepted provider_lead_id=01a0d9d8-a8e7-7275-b4eb-468e3a093893 provider_email_id=null
+ledger 2026-09-25 quota=15 used=3 reserved=0 accepted=3 failed=0
+$ … --lead-status → 01a0d9d8 campaign=5392fcac status=1(Active) domain_complete=— company_domain=ebadiamirhoseineng+s14b@gmail.com lastStep=none · ok: active, no step run yet
+(tunnel probe 401, then ≈ 4 min)
+outbox f8804b58 enroll state=accepted … provider_email_id=01a0d9dc-676b-7944-90b4-44840aa58bc7
+webhook f356e665 email_sent processed=true lead_email=ebadiamirhoseineng+s14b@gmail.com email_id=01a0d9dc-… step=1 ts=2026-09-25T18:38:16.911Z
+webhook 9a62998f campaign_completed_for_lead_without_reply processed=true lead_email=ebadiamirhoseineng+s14b@gmail.com step=1
+webhooks for the previous drill address since this fixture: 0
+```
+
+Step 2 (approved send):
+```
+$ … --touch 2 → TOUCH step=2 id=0b5b2539-84ec-4b9e-a4b7-2998f7b1430c subject="Re: Zyndix engine drill S14b" approved
+$ … --verify-hash 0b5b2539-… → claim_ledger=null · stored 5f801f2f…27c6 · recomputed 5f801f2f…27c6 · match=true
+$ pnpm tsx scripts/drill-u6.ts --send 0b5b2539-84ec-4b9e-a4b7-2998f7b1430c
+gate: engine window (America/New_York) 80 min left · campaign schedule 140 min left · campaign status=active
+sender budget 2026-09-25 (UTC date queried): instantly sent_today=2 · daily_limit=2
+  not gated: a step >= 2 goes out via emails/reply, which daily_limit does not cap (Session 16 decision)
+worker: claimed=1 completed=1 retried=0 dead=0 stopped=max_jobs
+touch 0b5b2539 step=2 outbound status=sent sent_at=2026-09-25T18:39:58.933Z provider_message_id=01a0d9de-1199-7177-8f6b-8f309a1ed537
+outbox b7340a81 reply state=accepted provider_email_id=01a0d9de-… thread=53-Q0Ei8ykDh96JFtFoilZEhYx reply_to=01a0d9dc-676b-7944-90b4-44840aa58bc7 err=—
+ledger 2026-09-25 quota=15 used=4 reserved=0 accepted=4 failed=0
+$ pnpm tsx scripts/drill-u6.ts --emails
+enroll · GET /api/v2/emails/01a0d9dc-676b-7944-90b4-44840aa58bc7 → HTTP 200
+  from=amir@zyndixhq.com eaccount=amir@zyndixhq.com lead=ebadiamirhoseineng+s14b@gmail.com
+  to="ebadiamirhoseineng+s14b@gmail.com" cc="" bcc=""
+  thread_id=53-Q0Ei8ykDh96JFtFoilZEhYx message_id=<01a0d9dc-676b-7944-90b4-44840aa58bc7@zyndixhq.com> ue_type=1 step=0_0_0
+  verdict: lead in To: y · amir@zyndixhq.com in To/Cc: n · in Bcc: n
+reply · GET /api/v2/emails/01a0d9de-1199-7177-8f6b-8f309a1ed537 → HTTP 200
+  from=amir@zyndixhq.com eaccount=amir@zyndixhq.com lead=ebadiamirhoseineng+s14b@gmail.com
+  to="amir@zyndixhq.com,ebadiamirhoseineng+s14b@gmail.com" cc="" bcc=""
+  thread_id=53-Q0Ei8ykDh96JFtFoilZEhYx message_id=<01a0d9de-1199-7177-8f6b-8f3170a2aa13@zyndixhq.com> ue_type=3
+  verdict: lead in To: y · amir@zyndixhq.com in To/Cc: y · in Bcc: n
+```
+Operator, Gmail check: the follow-up arrived in the **Inbox** (not Spam), in the same conversation as step 1. "Show original":
+- `To: amir@zyndixhq.com, ebadiamirhoseineng+s14b@gmail.com`, no Cc;
+- `In-Reply-To` and `References` = `<01a0d9dc-676b-7944-90b4-44840aa58bc7@zyndixhq.com>`;
+- `multipart/alternative` (text/plain + text/html);
+- SPF/DKIM/DMARC pass.
+
+Cleanup (approved):
+```
+$ drill-u6.ts --pause → PAUSE campaign 5392fcac → status=paused · re-read: status=paused
+$ instantly-webhooks.ts --delete 01a0d9d6-… → DELETED · --list → webhooks: 0
+tunnel stopped · preview server stopped · drill-u6.ts --cancel-jobs → queued drill jobs cancelled: 0
+```
+Result: step 1 and threading **pass (live)**. The follow-up recipient **fails (live)**: our mailbox is in To next to the lead. **STOP.**
+
+**Status claims, kept separate:**
+- **Verified with provider:**
+  - step 1 enroll → `email_sent` (again);
+  - `emails/reply` + `additional_recipients` is accepted and delivers to the lead in step 1's thread;
+  - **`additional_recipients` does not remove the default recipient**;
+  - `accounts/analytics/daily` + account `daily_limit` read;
+  - `GET /leads/{id}`: a free-mail lead's `company_domain` is its full address.
+- **Tested locally:** the part-1 script checks, and the regressions above.
+- **Not verified:** the reply freeze for this lead (skipped by the operator; verified in Session 14); a text-only `emails/reply`.
+- **Nothing is active in production.**
+
+**Decisions** (full rows in `06` §5)
+- **Follow-ups move to Instantly-owned sequence steps (U6c), with every text approved up front.** `emails/reply` is kept only for answering a RECEIVED email (U7). Reason: the spec has no `to` field, and `additional_recipients` adds to the default recipient (the replied-to sender, i.e. our own mailbox for our own step 1). Cc/bcc cannot remove that recipient.
+- **The post-send check will fail closed when any of our own mailboxes is in To/Cc** (built in U6c). Reason: this session's misaddressed follow-up was recorded as `sent`.
+- The options written up: (1) Instantly-owned steps: **chosen**; (2) cc/bcc on `emails/reply`: cannot remove our mailbox; (3) `emails/reply` for received emails only: kept for U7; (4) a tighter post-send check: kept as a guard, not a fix.
+- **The budget gate covers step 1 only.** In Session 14, step 2 via `emails/reply` was accepted after 1/1 was used, and analytics counted 1. Today step 2 went out at `sent_today=2`, `daily_limit=2`.
+- **The ⛔ row in `06` §6 stays open until U6c passes a live drill. 🚩 not reached.**
+- The reply comes From the alias (Gmail "Send mail as"). This was moot this session because the reply step was skipped.
 
 **Problems hit**
-- The sender is at its Instantly daily limit today (1/1), so no drill today. This was planned anyway.
-- The engine quota (15) and Instantly's `daily_limit` (1) are not synced. `emails/reply` follow-ups are not capped by `daily_limit`. Both are logged in `06` §6, open.
-- **Gap noted, not fixed:** the engine's `reply_misaddressed` check only fails if the lead is **missing** from To. If Instantly puts our mailbox in To next to the lead, the engine records `sent`. The PASS/STOP verdict therefore comes from `--emails` plus Gmail "Show original".
+- **The follow-up was addressed to our mailbox and the lead** (above). The engine recorded touch `0b5b2539` `sent` and ledger accepted 4. The row is left as recorded, and no lead_event annotation was written.
+- **Open (`06` §6):**
+  - engine quota 15 vs Instantly `daily_limit`, not synced;
+  - `emails/reply` is not capped by `daily_limit`;
+  - the post-send check gap;
+  - step 2 raw is `multipart/alternative`. That is ours, because we pass html+text, so text-only is still unproven.
+- A `zsh` separator (`======`) broke one compound command, so `--emails` was re-run on its own. Nothing was lost.
+- **The operator must set amir@zyndixhq.com's Instantly daily limit back to 1** (it was raised to 2 for this drill only).
 
 **Next action**
-- Monday, operator says "go live":
-  1. `--check` (budget ok, ≥ 60 combined min);
-  2. `--fixture --tz <zone>`, `--touch 1`, `--verify-hash`;
-  3. dev server (`launch.json` `dev`, autoPort) and a quick tunnel, then a probe;
-  4. then, each approved one by one: webhook create/test → activate → step 1 → `--lead-status` → `email_sent` → `--touch 2` → step 2 → `--emails` → Gmail check.
+- **U6c: Instantly-owned follow-up steps.** Plan mode first:
+  - read the official docs for campaign sequences and per-lead variables;
+  - design how the approved step texts are bound to the approval hash and passed at enroll;
+  - tighten the post-send check;
+  - define the DoD and a live drill with a new alias.
+- Nothing from U6c was built this session.
 
 ---
 

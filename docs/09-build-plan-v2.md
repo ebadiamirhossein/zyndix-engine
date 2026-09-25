@@ -315,6 +315,15 @@ Only after Part 2 may `06-build-progress.md` say **verified with provider**.
 - **Also found:** step 1 landed in Gmail Spam on warmup day 2 → **no prospect send until warmup completes and an inbox-placement test passes** (operator). A quick tunnel dropped mid-drill (re-created with approval).
 - **🚩 not reached.** Remaining: a **live re-test on Monday** in an open window with a NEW drill lead (`drill:s14b`): send step 1 and a follow-up, check To/Cc/threading in the operator's personal Gmail and `GET /emails` `to_address_email_list`. If our own mailbox stays visible in To next to the lead → **stop and bring options** (fallback preference: Instantly-owned sequence steps, all texts approved up front). A 4th U6 session (+1).
 
+**As built, session 4 of 4 (2026-09-25, Session 16)** — live re-test of the follow-up recipient fix; **STOP**. Evidence in `07` Session 16.
+- **Tooling.** `drill-u6.ts` moved to a Gmail +alias (`ebadiamirhoseineng+s14b@gmail.com`, tag `drill:s14b`, lead `387b413d`); the old drill lead is read-only. New read-only checks: the sender's Instantly `daily_limit` vs sent today (gates step 1 only — `emails/reply` is not capped by it, operator decision), `--verify-hash` (the approval hash still binds after U6b: `match=true` for both touches), `--lead-status` (`stop_for_company` did not block the alias: Instantly stores a free-mail lead's `company_domain` as the full address), `--emails` (the To/Cc verdict).
+- **Verified with provider** (again): step 1 enroll → `email_sent` webhook (anchor filled ≈ 4 min later); `emails/reply` with `additional_recipients` accepted and threaded (`In-Reply-To`/`References` = step 1's Message-ID, one Gmail conversation, Inbox).
+- ⛔ **Result: the follow-up still names our own mailbox.** `to_address_email_list` = `amir@zyndixhq.com,ebadiamirhoseineng+s14b@gmail.com`, and the Gmail raw To matches. `additional_recipients` adds to the default recipient; it does not replace it. The engine recorded the touch `sent` because its check only looks for the lead.
+- **Decision (operator, `06` §5):** follow-ups move to **Instantly-owned sequence steps**, every text approved up front. `emails/reply` stays only for answering a RECEIVED email (U7). The post-send check will fail closed when any of our own mailboxes is in To/Cc. The reply step was skipped (the freeze was already verified live in Session 14).
+- **Session 4 done. 🚩 not reached.** The `06` §6 ⛔ row stays open until U6c passes a live drill.
+
+**Next: U6c — Instantly-owned follow-up steps.** Step ≥ 2 goes out as an Instantly campaign sequence step instead of `emails/reply`; all step texts approved up front and bound to the approval; the post-send check tightened (own mailboxes in To/Cc → fail closed). Scope, DoD and effort to be planned in its own session (plan mode). 🚩 moves to the end of U6c.
+
 ---
 
 #### U6b — Claim guard (interim slice)  ⛔ **gates the first prospect send**
@@ -854,7 +863,7 @@ Carried from `05-build-plan.md` §4, still valid:
 - **`0002_transition_lead.sql` is `security definer` with no `set search_path`** — Supabase's linter calls this `function_search_path_mutable`. Fixing it means a new migration that replaces the function; it does not belong inside a feature unit.
 - **Reply poll skips leads already `replied`** (Session 14): `pollWindow` covers `queued/sent/no_reply/sequence_done` only, and a finished lead with a recorded inbound touch is counted `already_seen` before the processor. A *second* reply from an already-replied lead is therefore only caught by the webhook. Decide whether U7 needs the poll to cover recently replied leads.
 - **Step-1 touch `provider_message_id` stays null** (Session 14): the enroll returns a lead id and the `email_sent` webhook writes the email id to `outbox.provider_email_id` only. Copy it onto the touch in `handleSent` when the dashboards (U10) need it.
-- **Exclude drill leads everywhere** (Session 14): `segment='drill'` companies (lead `7fd018fa`, `drill:s14`; Monday's `drill:s14b`) must be excluded from U7 classification, digests, Attio sync and any lead listing.
+- **Exclude drill leads everywhere** (Session 14): `segment='drill'` companies (lead `7fd018fa`, `drill:s14`; lead `387b413d`, `drill:s14b`, Session 16) must be excluded from U7 classification, digests, Attio sync and any lead listing.
 - **Preflight does not re-run the claim guard** (Session 15): the approval hash binds the ledger, and the guard ran at approval time. If evidence ages past `evidence_policy` between approval and send, the send still goes. Decide at U9 whether preflight should re-check freshness.
 - **Claim guard interim gaps** (Session 15): token-based, not semantic; lowercase place names; number words below three; three contradiction attributes only (`06` §6). Closed by U15/U17.
 - **Durable webhook endpoint** (Session 14): quick tunnels drop; the next live drill should probe the tunnel before each provider event, and U9's deploy URL replaces them.
@@ -870,7 +879,8 @@ Carried from `05-build-plan.md` §4, still valid:
 | U3 | Scheduler: ledger + send windows | 4 | 2 | — | yes | U1, U2 |
 | U4 | Instantly adapter | 4 | 2 | Instantly | partial | U2 |
 | U5 | Send stage, preflight, guards | 4 | 3 | Instantly | yes | U3, U4 |
-| **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 3 (+1 live re-test, Session 14) | Instantly | yes | U2, U5 |
+| **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 4 (re-test done Session 16 → STOP; 🚩 moves to U6c) | Instantly | yes | U2, U5 |
+| **U6c** | **Instantly-owned follow-up steps** 🚩 — next (Session 16 decision) | 4 | to plan | Instantly | yes | U6 |
 | **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends — ✅ tested locally (Session 15) | 4 | 1 | Anthropic | yes | U6 |
 | U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
 | **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |
