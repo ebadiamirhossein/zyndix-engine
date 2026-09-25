@@ -9,6 +9,11 @@ import { createHash } from "node:crypto";
 // signature, because the signature is part of what the recipient reads. The
 // sender is fixed at approval (touches.send_account_id), and the body that
 // leaves is exactly composeOutboundBody(body, signature).
+//
+// Session 15 (09 §U6b): the snapshot also covers the claim ledger the claim
+// guard accepted at approval (touches.claim_ledger), so the hash binds what
+// was claimed, not only what was written. Null for a touch written outside
+// the draft stage (drill scripts), which Telegram approval refuses.
 
 export type ApprovalSnapshot = {
   touch_id: string;
@@ -21,6 +26,7 @@ export type ApprovalSnapshot = {
   prompt_version: number | null;
   send_account_id: string | null;
   signature: string | null;
+  claim_ledger: unknown[] | null;
 };
 
 export function buildApprovalSnapshot(
@@ -31,6 +37,7 @@ export function buildApprovalSnapshot(
     subject: string | null;
     body: string | null;
     prompt_version: number | null;
+    claim_ledger?: unknown;
   },
   lead: { id: string; email: string | null },
   sender: { id: string; signature_text: string | null } | null,
@@ -46,6 +53,7 @@ export function buildApprovalSnapshot(
     prompt_version: touch.prompt_version ?? null,
     send_account_id: sender?.id ?? null,
     signature: normalizeSignature(sender?.signature_text),
+    claim_ledger: Array.isArray(touch.claim_ledger) ? touch.claim_ledger : null,
   };
 }
 

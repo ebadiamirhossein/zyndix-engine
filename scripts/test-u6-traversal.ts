@@ -227,13 +227,19 @@ const draftAnthropic = {
     mock.draftCalls += 1;
     const name = params.user.match(/"name":\s*"(Traversal Roofing [^"]+)"/)?.[1] ?? "your company";
     return completion(
+      // Claim-compliant under writer v9 (09 §U6b): no timing, no asset claim,
+      // the approved offer line verbatim, every sentence claimed against E1.
       JSON.stringify({
-        subject: "Evening quote requests",
+        subject: "Quote requests",
         body:
-          `Hi Tess,\n\nOn the ${name} WordPress contact page, quote requests are answered the next business day. ` +
-          `A homeowner who asks in the evening often books whoever replies first.\n\n` +
-          `We build small tools that confirm the request right away and route it to the right person.\n\n` +
-          `Worth a short call to see if that fits?`,
+          `Hi Tess,\n\nOn the ${name} contact page, quote requests are answered the next business day. ` +
+          `A homeowner who asks for a quote often books whoever replies first.\n\n` +
+          `Happy to write up what I'd change, if that's useful.`,
+        claims: [
+          { span: `On the ${name} contact page, quote requests are answered the next business day`, kind: "prospect_fact", evidence_ids: ["E1"] },
+          { span: "A homeowner who asks for a quote often books whoever replies first", kind: "inference", evidence_ids: ["E1"] },
+          { span: "Happy to write up what I'd change, if that's useful.", kind: "offer", evidence_ids: [] },
+        ],
       }),
     );
   },
@@ -299,7 +305,7 @@ function syntheticEmail(fields: Partial<InstantlyEmail> & { id: string; eaccount
   return {
     timestamp_created: new Date().toISOString(),
     message_id: `<${fields.id}@target.example.invalid>`,
-    subject: "Re: Evening quote requests",
+    subject: "Re: Quote requests",
     to_address_email_list: fields.eaccount,
     ue_type: 2,
     ...fields,
@@ -779,7 +785,7 @@ async function insertSentTouch(leadId: string, accountId: string, hoursAgo: numb
       channel: "email",
       direction: "outbound",
       status: "sent",
-      subject: "Evening quote requests",
+      subject: "Quote requests",
       body: "Hi Tess,\n\nA specific observation.",
       send_account_id: accountId,
       sent_at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString(),
@@ -859,7 +865,7 @@ async function pollCases(): Promise<void> {
     email_account: p.identifier,
     lead_email: l2.email,
     email_id: `${TAG}.e2`,
-    reply_subject: "Re: Evening quote requests",
+    reply_subject: "Re: Quote requests",
     reply_text: "Not now, thanks.",
   });
   assert("poll setup: lead 2 replied via webhook", r2.status === 200 && (await leadRow(l2.leadId)).state === "replied");
@@ -871,7 +877,7 @@ async function pollCases(): Promise<void> {
   mock.inbox.set(p.identifier, [
     syntheticEmail({ id: `${TAG}.e1`, eaccount: p.identifier, lead: l1.email, campaign_id: p.campaign, body: { text: "Yes, tell me more." }, is_auto_reply: 0, timestamp_email: new Date().toISOString() }),
     syntheticEmail({ id: `${TAG}.e2`, eaccount: p.identifier, lead: l2.email, campaign_id: p.campaign, body: { text: "Not now, thanks." }, is_auto_reply: 0 }),
-    syntheticEmail({ id: `${TAG}.e3`, eaccount: p.identifier, lead: l3.email, campaign_id: p.campaign, subject: "Automatic reply: Evening quote requests", body: { text: "Out of office until October 12." }, is_auto_reply: 1, timestamp_email: "2026-09-24T10:00:00.000Z" }),
+    syntheticEmail({ id: `${TAG}.e3`, eaccount: p.identifier, lead: l3.email, campaign_id: p.campaign, subject: "Automatic reply: Quote requests", body: { text: "Out of office until October 12." }, is_auto_reply: 1, timestamp_email: "2026-09-24T10:00:00.000Z" }),
     syntheticEmail({ id: `${TAG}.e4`, eaccount: p.identifier, lead: "someone@legacy-campaign.example.invalid", body: { text: "hello" } }),
   ]);
 
@@ -904,7 +910,7 @@ async function pollCases(): Promise<void> {
     email_account: p.identifier,
     lead_email: l1.email,
     email_id: `${TAG}.e1`,
-    reply_subject: "Re: Evening quote requests",
+    reply_subject: "Re: Quote requests",
     reply_text: "Yes, tell me more.",
   });
   const events1After = (await db.from("lead_events").select("id").eq("lead_id", l1.leadId)).data?.length ?? 0;

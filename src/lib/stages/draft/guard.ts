@@ -129,7 +129,7 @@ export function extractNumeralsFromText(text: string): string[] {
   return [...found];
 }
 
-function numberAllowedInSources(num: string, sourceTexts: string[]): boolean {
+export function numberAllowedInSources(num: string, sourceTexts: string[]): boolean {
   const normalized = normalizeNumeral(num);
   const allowed = new Set<string>();
   for (const text of sourceTexts) {

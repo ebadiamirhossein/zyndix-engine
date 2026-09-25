@@ -5,8 +5,11 @@ import { parseAllowedUserIds } from "@/lib/integrations/telegram";
 import { escapeTelegramHtml } from "@/lib/integrations/telegram-format";
 import { approvalHash, buildApprovalSnapshot, composeOutboundBody, findSignOff } from "@/lib/sending/approval";
 import { chooseSenderForApproval } from "@/lib/sending/sender";
+import { claimsStillPresent, formatViolations } from "@/lib/stages/draft/claims";
+import { loadClaimContext, runClaimCheck } from "@/lib/stages/draft/claims-context";
 import { createStateStore } from "@/lib/state/core";
 import { sendPolicySchema } from "@/lib/validation/jsonb";
+import { claimLedgerSchema } from "@/lib/validation/llm";
 import type { Database, Json } from "@/types/database";
 import type { DatabaseWithSending } from "@/types/database-extensions";
 
@@ -223,6 +226,11 @@ async function resolvePendingEdit(
  * send_account_id / approval_hash / approval_snapshot / approved_at /
  * approved_by. Fenced on status = pending_approval, so a stale or repeated
  * button press changes nothing.
+ *
+ * Session 15 (09 §U6b): the claim guard re-runs on the exact subject and body
+ * being approved, operator edits included. For an edit, claims whose span is
+ * no longer in the text are dropped; anything the edit added is uncovered and
+ * refused. The accepted ledger is written to the touch and into the snapshot.
  */
 type BindResult =
   | { ok: true; sender: { identifier: string; signature: string | null }; outbound: string }
@@ -246,7 +254,7 @@ async function bindApproval(
   const sendDb = db as unknown as SupabaseClient<DatabaseWithSending>;
   const { data: touch } = await sendDb
     .from("touches")
-    .select("id, step_no, channel, subject, prompt_version, status")
+    .select("id, step_no, channel, subject, prompt_version, status, claim_ledger")
     .eq("id", touchId)
     .maybeSingle();
   const { data: lead } = await sendDb.from("leads").select("id, email, send_account_id").eq("id", leadId).maybeSingle();
@@ -260,6 +268,30 @@ async function bindApproval(
     };
   }
 
+  const ledger = claimLedgerSchema.safeParse(touch.claim_ledger);
+  if (touch.claim_ledger === null || touch.claim_ledger === undefined || !ledger.success) {
+    return {
+      ok: false,
+      message: "Not approved: this draft has no valid claim ledger (written before the claim guard). Kill it and redraft.",
+    };
+  }
+  const subject = touch.subject ?? "";
+  const claims = claimsStillPresent(ledger.data, subject, body);
+  let claimContext;
+  try {
+    claimContext = await loadClaimContext(db, getSetting, leadId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, message: `Not approved: the claim guard could not load its evidence (${message}).` };
+  }
+  const claimCheck = runClaimCheck(claimContext, { subject, body, claims });
+  if (!claimCheck.ok) {
+    return {
+      ok: false,
+      message: ["Not approved — the claim guard refused this text:", ...formatViolations(claimCheck.violations).map((line) => `• ${line}`)].join("\n"),
+    };
+  }
+
   const policy = sendPolicySchema.parse((await getSetting("send_policy")).value);
   const choice = await chooseSenderForApproval(sendDb, {
     leadSendAccountId: lead.send_account_id,
@@ -270,11 +302,12 @@ async function bindApproval(
     return { ok: false, message: `Not approved: ${SENDER_REFUSAL[choice.reason] ?? choice.reason}.` };
   }
 
-  const snapshot = buildApprovalSnapshot({ ...touch, body }, lead, choice.sender);
+  const snapshot = buildApprovalSnapshot({ ...touch, body, claim_ledger: claims }, lead, choice.sender);
   const { data, error } = await sendDb
     .from("touches")
     .update({
       body,
+      claim_ledger: claims as unknown as Json,
       status: "approved",
       send_account_id: choice.sender.id,
       approval_hash: approvalHash(snapshot),

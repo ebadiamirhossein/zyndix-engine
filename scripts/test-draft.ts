@@ -17,6 +17,11 @@
  * Cost: one Anthropic writer call per fixture (~$0.005, two if the generic
  * guard forces a retry) and two Telegram messages per fixture to the
  * operator's own chat ids. No prospect is contacted; no email is sent.
+ *
+ * Session 15 (09 §U6b): the fixture carries fresh enrichment rows (site text,
+ * tech scan) so the claim guard can judge it, the stage is scoped to the
+ * fixture lead ids, and the run prints the writer's claim ledger and the
+ * guard's verdict. A claim-guard hold is reported, not hidden.
  */
 import { config } from "dotenv";
 import { resolve } from "node:path";
@@ -31,6 +36,9 @@ import { createTelegramClient } from "../src/lib/integrations/telegram";
 import { createSettingsStore } from "../src/lib/settings/core";
 import { createStateStore } from "../src/lib/state/core";
 import { runDraftStage } from "../src/lib/stages/draft/core";
+import { formatViolations } from "../src/lib/stages/draft/claims";
+import { loadClaimContext, runClaimCheck } from "../src/lib/stages/draft/claims-context";
+import { claimLedgerSchema } from "../src/lib/validation/llm";
 import { checkGenericDraft, wordCount } from "../src/lib/stages/draft/guard";
 import { processTelegramUpdate } from "../src/lib/telegram/handler";
 import { approvalHash, buildApprovalSnapshot, findSignOff } from "../src/lib/sending/approval";
@@ -206,21 +214,18 @@ async function seedFixture(index: number): Promise<Fixture> {
     fit_score: 72,
     segment: "us-realestate",
     problem_hypothesis:
-      `${companyName} routes every website enquiry into a shared inbox and ` +
-      "answers it by hand, so evening and weekend leads wait until the next " +
-      "working morning before anyone replies.",
+      `${companyName} routes every website enquiry into a shared team inbox and ` +
+      "answers it by hand, so a buyer's question waits until someone checks that inbox.",
     evidence: [
       {
         observation:
-          "The contact page posts a shared team address rather than a routed form, and the footer lists office hours only.",
-        source: `https://${domain}/contact`,
-        confidence: "medium",
+          "The contact page posts a shared team address (team@ inbox) rather than a routed form.",
+        source: "website",
       },
       {
         observation:
           "Follow Up Boss is embedded on the listings pages, but no scheduling or auto-response widget is present on any page crawled.",
-        source: `https://${domain}/listings`,
-        confidence: "high",
+        source: "website",
       },
     ],
     triggers: ["hiring a transaction coordinator"],
@@ -233,6 +238,32 @@ async function seedFixture(index: number): Promise<Fixture> {
 
   if (qualError) {
     throw new Error(`fixture qualification insert failed: ${qualError.message}`);
+  }
+
+  // Fresh enrichment rows: the claim guard reads the fetch date, the raw page
+  // text (source-page check) and the tech scan (contradictions).
+  const fetchedAt = new Date().toISOString();
+  const { error: enrichError } = await db.from("enrichment_payloads").insert([
+    {
+      company_id: company.id,
+      lead_id: lead.id,
+      source: "apify_site",
+      fetched_at: fetchedAt,
+      payload: [
+        { url: `https://${domain}/contact`, text: `${companyName}\nContact our team: team@${domain}\nCall the office.` },
+        { url: `https://${domain}/listings`, text: "Listings powered by Follow Up Boss. Browse homes for sale." },
+      ],
+    },
+    {
+      company_id: company.id,
+      lead_id: lead.id,
+      source: "apify_tech",
+      fetched_at: fetchedAt,
+      payload: { url: `https://${domain}`, signals: { hasChatWidget: false, hasMarketingAutomation: false } },
+    },
+  ]);
+  if (enrichError) {
+    throw new Error(`fixture enrichment insert failed: ${enrichError.message}`);
   }
 
   // Every hop through lib/state.ts — never a direct leads.state write.
@@ -324,7 +355,7 @@ async function main(): Promise<void> {
         getActiveSetting: settings.getActiveSetting,
         transition: state.transition,
       },
-      { limit },
+      { limit, leadIds: fixtures.map((f) => f.leadId) },
     );
 
     console.log("\n--- Draft stage summary ---");
@@ -343,9 +374,9 @@ async function main(): Promise<void> {
       .select("id, first_name, last_name, state")
       .in("id", fixtureLeadIds);
 
-    const { data: touches } = await db
+    const { data: touches } = await (db as unknown as SupabaseClient<DatabaseWithSending>)
       .from("touches")
-      .select("id, lead_id, status, subject, draft_body, body, prompt_version")
+      .select("id, lead_id, status, subject, draft_body, body, prompt_version, claim_ledger")
       .in("lead_id", fixtureLeadIds)
       .order("created_at", { ascending: false });
 
@@ -363,6 +394,13 @@ async function main(): Promise<void> {
 
       if (!touch) {
         console.log(`\n[${fixture.companyName}] lead=${fixture.leadId} — NO TOUCH`);
+        const { data: hold } = await db
+          .from("lead_events")
+          .select("detail")
+          .eq("lead_id", fixture.leadId)
+          .eq("event", "claim_guard_hold")
+          .maybeSingle();
+        if (hold) console.log(`CLAIM GUARD HOLD:\n${JSON.stringify(hold.detail, null, 2)}`);
         assert(`${fixture.leadId} touch exists`, false, `state=${lead?.state}`);
         continue;
       }
@@ -377,6 +415,23 @@ async function main(): Promise<void> {
       console.log(`SUBJECT: ${touch.subject ?? ""}`);
       console.log(`BODY — model (${wc} words):\n${modelBody}`);
       console.log(`FULL (${wordCount(body)} words total with signature)`);
+
+      // U6b: the ledger the writer returned, and the guard re-run on it.
+      const ledger = claimLedgerSchema.safeParse(touch.claim_ledger);
+      console.log(`CLAIMS (${ledger.success ? ledger.data.length : "invalid"}):`);
+      for (const claim of ledger.success ? ledger.data : []) {
+        console.log(`  [${claim.kind}] "${claim.span}" ← ${claim.evidence_ids.join(",") || "—"}`);
+      }
+      assert(`${fixture.leadId} claim ledger stored`, ledger.success && ledger.data.length > 0);
+      if (ledger.success) {
+        const ctx = await loadClaimContext(db, settings.getActiveSetting, fixture.leadId);
+        const verdict = runClaimCheck(ctx, { subject: touch.subject ?? "", body, claims: ledger.data });
+        assert(
+          `${fixture.leadId} claim guard re-check passes`,
+          verdict.ok,
+          verdict.ok ? "" : formatViolations(verdict.violations).join(" | "),
+        );
+      }
 
       assert(`${fixture.leadId} → pending_approval`, lead?.state === "pending_approval", lead?.state);
       assert(`${fixture.leadId} touch exists`, true);
@@ -525,7 +580,7 @@ async function main(): Promise<void> {
       // U5: the approval is bound to the exact content and recipient.
       const { data: binding } = await (db as unknown as SupabaseClient<DatabaseWithSending>)
         .from("touches")
-        .select("id, step_no, channel, subject, body, prompt_version, approval_hash, approved_by, approved_at, send_account_id")
+        .select("id, step_no, channel, subject, body, prompt_version, approval_hash, approved_by, approved_at, send_account_id, claim_ledger")
         .eq("id", firstTouch.id)
         .single();
       // Session 12: approval fixes the sender, and the hash covers its signature.
@@ -547,6 +602,10 @@ async function main(): Promise<void> {
         "approve → sender fixed at approval with a signature (Session 12)",
         Boolean(boundSender?.id) && Boolean(boundSender?.signature_text),
         binding?.send_account_id ?? "no sender",
+      );
+      assert(
+        "approve → approval snapshot binds the claim ledger (U6b)",
+        Array.isArray(binding?.claim_ledger) && (binding?.claim_ledger as unknown[]).length > 0,
       );
       assert(
         "approve → approved_by and approved_at recorded (U5)",

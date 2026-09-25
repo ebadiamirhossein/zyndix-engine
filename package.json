@@ -18,7 +18,9 @@
     "test:apollo": "tsx --test src/lib/integrations/apollo.test.ts",
     "test:webhooks": "tsx scripts/test-u6-webhooks.ts",
     "test:webhook-rules": "tsx --test src/lib/webhooks/instantly.test.ts",
-    "test:traversal": "tsx scripts/test-u6-traversal.ts"
+    "test:traversal": "tsx scripts/test-u6-traversal.ts",
+    "test:claims": "tsx --test src/lib/stages/draft/claims.test.ts",
+    "test:claim-guard": "tsx scripts/test-u6b-claims.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

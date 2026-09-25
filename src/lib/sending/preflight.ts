@@ -29,6 +29,8 @@ export type PreflightContext = {
     body: string | null;
     prompt_version: number | null;
     approval_hash: string | null;
+    /** 0009c (09 §U6b): in the approval snapshot, so a changed ledger is stale. */
+    claim_ledger?: unknown;
   };
   lead: {
     id: string;

@@ -22,6 +22,24 @@ export const RECOMMENDED_ANGLES = [
   "custom-tool",
 ] as const;
 
+/**
+ * Evidence text that describes a failed or missing fetch. Absence of data is
+ * not evidence of absence: the qualifier may not emit such an item, and the
+ * claim guard refuses a draft that cites one (`failed_crawl_evidence`).
+ */
+export const FAILED_FETCH_PATTERNS = [
+  "unavailable",
+  "failed to fetch",
+  "fetch failed",
+  "failed fetch",
+  "we failed to fetch",
+] as const;
+
+export function describesFailedFetch(text: string): boolean {
+  const lower = text.toLowerCase();
+  return FAILED_FETCH_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
 export const qualifierOutputSchema = z
   .object({
     fit_score: z.number().int().min(0).max(100),
@@ -43,14 +61,7 @@ export const qualifierOutputSchema = z
   .strict()
   .superRefine((data, ctx) => {
     for (const [idx, item] of data.evidence.entries()) {
-      const obs = item.observation.toLowerCase();
-      if (
-        obs.includes("unavailable") ||
-        obs.includes("failed to fetch") ||
-        obs.includes("fetch failed") ||
-        obs.includes("failed fetch") ||
-        obs.includes("we failed to fetch")
-      ) {
+      if (describesFailedFetch(item.observation)) {
         ctx.addIssue({
           code: "custom",
           message:
@@ -87,10 +98,36 @@ function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
+// Claim ledger (09 §U6b). Each claim quotes its exact span from the subject or
+// body; evidence ids E1…En index the lead's qualification.evidence (interim,
+// until U15's typed evidence ids). The guard never trusts the kind tag.
+export const CLAIM_KINDS = ["prospect_fact", "inference", "offer", "question"] as const;
+
+export const claimSchema = z
+  .object({
+    span: z.string().min(1),
+    kind: z.enum(CLAIM_KINDS),
+    evidence_ids: z.array(z.string().regex(/^E\d+$/, "evidence ids look like E1, E2, …")),
+  })
+  .strict()
+  .superRefine((claim, ctx) => {
+    if ((claim.kind === "prospect_fact" || claim.kind === "inference") && claim.evidence_ids.length === 0) {
+      ctx.addIssue({ code: "custom", message: `a ${claim.kind} claim must cite at least one evidence id`, path: ["evidence_ids"] });
+    }
+    if (claim.kind === "offer" && claim.evidence_ids.length > 0) {
+      ctx.addIssue({ code: "custom", message: "an offer claim cites no evidence", path: ["evidence_ids"] });
+    }
+  });
+
+export type Claim = z.infer<typeof claimSchema>;
+
+export const claimLedgerSchema = z.array(claimSchema);
+
 export const writerOutputSchema = z
   .object({
     subject: z.string().min(1),
     body: z.string().min(1),
+    claims: z.array(claimSchema).min(1),
   })
   .strict()
   .superRefine((data, ctx) => {

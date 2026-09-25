@@ -333,6 +333,19 @@ describe("approval binding", () => {
     }
     assert.notEqual(approvalHash({ ...snap, step_no: 2 }), approvalHash(snap));
   });
+  test("the claim ledger is bound: a changed or dropped ledger is stale_approval (09 §U6b)", () => {
+    const ctx = base();
+    const ledger = [{ span: "A specific observation", kind: "prospect_fact", evidence_ids: ["E1"] }];
+    ctx.touch.claim_ledger = ledger;
+    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
+    assert.deepEqual(reasons(ctx), []);
+    const snap = buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender);
+    assert.deepEqual(snap.claim_ledger, ledger);
+    ctx.touch.claim_ledger = [{ ...ledger[0], evidence_ids: ["E2"] }];
+    assert.deepEqual(reasons(ctx), ["stale_approval"]);
+    ctx.touch.claim_ledger = null;
+    assert.deepEqual(reasons(ctx), ["stale_approval"]);
+  });
   test("recipient comparison is case-insensitive; canonicalJson sorts keys", () => {
     const ctx = base();
     const a = buildApprovalSnapshot(ctx.touch, { ...ctx.lead, email: "Test.Lead@Target.example.invalid " }, ctx.sender);

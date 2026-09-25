@@ -298,6 +298,15 @@ export const send_policy = {
   assignable_senders: ["amir@zyndixhq.com", "amir@getzyndix.com"],
 } as const;
 
+/**
+ * evidence_policy v1 (09 §U6b, Session 15): cited evidence older than this
+ * refuses a draft (`stale_evidence`). Interim age = the lead's latest
+ * non-error enrichment_payloads.fetched_at.
+ */
+export const evidence_policy = {
+  max_age_days: 30,
+} as const;
+
 export const cta_variants = {
   variants: [
     {
@@ -329,4 +338,5 @@ export const SEED_SETTINGS: Record<string, unknown> = {
   capacity_defaults,
   send_windows,
   send_policy,
+  evidence_policy,
 };

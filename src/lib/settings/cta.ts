@@ -14,6 +14,15 @@ export function getActiveCtaText(ctaVariants: CtaVariants): string {
   return active[0]!.text;
 }
 
+/**
+ * The active variant's approved offer lines (09 §U6b). Empty when the variant
+ * has none, in which case the claim guard refuses every offer claim.
+ */
+export function getApprovedOfferLines(ctaVariants: CtaVariants): string[] {
+  const active = ctaVariants.variants.find((variant) => variant.active);
+  return active?.approved_lines ?? [];
+}
+
 export function interpolateWriterPrompt(
   promptTemplate: string,
   ctaText: string,

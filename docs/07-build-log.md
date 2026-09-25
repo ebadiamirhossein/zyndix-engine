@@ -58,6 +58,176 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-25 — Session 15 — U6b: claim guard (interim slice) — tested locally; 7 operator roadmap decisions recorded
+
+**Unit:** U6b (`09` §U6b), on `main`. Plan mode first. Operator changes to the plan:
+- the approved offer allowlist is exactly one line;
+- `prospect_fact` claims must also appear on the raw crawled page, with the Steffen case as a test.
+
+**Status at end:** ✅ **DoD passed — tested locally.** The v9 writer's claim ledger is **verified with provider**: one live Anthropic call on a synthetic fixture, which is not a send.
+- **No sends. No prospect read for writing or touched.**
+- Anthropic spend: one writer call, about $0.01. The exact figure was trimmed from the captured output and not re-measured, to avoid a second call.
+- Prospect sends stay blocked. What remains: the U6 re-test, warmup plus an inbox-placement test, fresh evidence, and **UR** (new, below).
+
+**Did**
+- **Migration `0009c_claim_ledger.sql`** (additive: `touches.claim_ledger jsonb`). The operator applied it in the SQL editor. The column's type was added to `database-extensions.ts`.
+- **Writer schema** (`validation/llm.ts`):
+  - output is `{subject, body, claims[]}`; each claim is `{span, kind: prospect_fact|inference|offer|question, evidence_ids: E\d+}`;
+  - `prospect_fact` and `inference` need ≥ 1 id; `offer` cites none;
+  - the failed-fetch phrase list moved into a shared `FAILED_FETCH_PATTERNS` / `describesFailedFetch`. The qualifier's behaviour is unchanged.
+- **Checker** `stages/draft/claims.ts` (pure, deterministic). Named reasons:
+  - `span_not_in_body`, `unknown_evidence_id`, `uncovered_fact`, `unsupported_prospect_fact` (including "not in source page");
+  - `invented_timing`, `unbacked_asset_claim`, `unapproved_offer`, `stale_evidence`;
+  - `contradicted_evidence` (a chat / booking / contact-form detector), `failed_crawl_evidence`, `no_cited_evidence`.
+  - Fact tokens are numerals and money, number words from three up, proper nouns (with a sentence-initial heuristic), tools, and timing tokens. The kind tags are never trusted.
+- **Loader** `stages/draft/claims-context.ts`. One loader serves the draft stage and approval. It reads:
+  - qualification evidence as E1…En;
+  - the newest non-error `apify_site` text and `apify_tech` signals;
+  - the latest non-error `fetched_at`;
+  - `evidence_policy`, `cta_variants.approved_lines`, `proof_points` and `compliance_footer`.
+- **Draft stage** (`draft/core.ts`):
+  - the evidence ids go to the writer;
+  - the guard runs after the generic guard, on the text before the footer;
+  - one revision retry, then `drafting → manual_hold`, event `claim_guard_hold` (the violations plus the refused draft), one `sendAlert`, and no touch;
+  - the touch stores `claim_ledger`.
+- **Approval** (`telegram/handler.ts` `bindApproval`):
+  - re-runs the guard on the exact subject and body;
+  - for an edit, keeps only the claims whose span survives;
+  - refuses with one line per violation, and refuses a touch that has no ledger;
+  - writes the accepted ledger to the touch and to `approval_snapshot` (`sending/approval.ts`).
+  - **Found and fixed while wiring it:** the send stage builds the preflight touch field by field, so `claim_ledger` would have been dropped and every guarded approval would have read as `stale_approval`. `send/core.ts` and `preflight.ts` now carry it.
+- **Telegram card** (`telegram-approval.ts`): a CLAIMS block. Each claim shows its evidence id, the fetch date and an excerpt (capped at 140 characters, 8 claims), plus "claim guard: pass · evidence_policy vN".
+- **Settings** (`scripts/update-writer-prompt-v9-claims.ts`; dry run shown, then `--apply` after the operator's go):
+  - `writer_prompt_email` v9;
+  - `cta_variants` v3 (`approved_lines`);
+  - the new key `evidence_policy` v1 `{max_age_days: 30}` (added to `SETTING_KEYS` with its schema and seed).
+- **Bug found by the DB test:** the number pattern swallowed a trailing comma ("since 2004,"), so the token ran past its claim span. Comma groups must now be real thousands separators. Two unit regressions were added.
+- **Tests:**
+  - new `claims.test.ts` (45) and `scripts/test-u6b-claims.ts` (87);
+  - `sending.test.ts` +1 (a changed or dropped ledger → `stale_approval`);
+  - the traversal mock writer is now claim-compliant (its subject "Evening quote requests" was itself an invented timing);
+  - `test-draft.ts`: fresh enrichment rows, website-sourced evidence without timing bait, a lead-scoped run, and it prints the ledger and the guard verdict.
+- **Docs only, no code:** the operator's 7 roadmap decisions went into `09` (§1 build order; new §UR; §U13, §U14, §U16, §U18) and `06` §5.
+
+**Files touched**
+- `supabase/migrations/0009c_claim_ledger.sql`: new.
+- `src/lib/stages/draft/claims.ts`, `claims-context.ts`, `claims.test.ts`: new.
+- `src/lib/stages/draft/core.ts`: guard wiring, hold path, ledger on the touch, card context.
+- `src/lib/stages/draft/guard.ts`: exports `numberAllowedInSources`.
+- `src/lib/validation/llm.ts`, `src/lib/validation/jsonb.ts`: the claim schema, `evidencePolicySchema`, `approved_lines`.
+- `src/lib/settings/{core,cta,seed-content}.ts`: the `evidence_policy` key, `getApprovedOfferLines`, the seed.
+- `src/lib/sending/{approval,preflight}.ts`, `src/lib/stages/send/core.ts`: the ledger in the snapshot and preflight.
+- `src/lib/telegram/handler.ts`, `src/lib/integrations/telegram-approval.ts`.
+- `src/types/database-extensions.ts`, `package.json` (`test:claims`, `test:claim-guard`).
+- `scripts/test-u6b-claims.ts`, `scripts/update-writer-prompt-v9-claims.ts`: new. `scripts/test-draft.ts`, `scripts/test-u6-traversal.ts`, `src/lib/sending/sending.test.ts`: updated.
+- `docs/06-build-progress.md`, `docs/07-build-log.md`, `docs/09-build-plan-v2.md`.
+
+**Verification**
+
+Migration and settings:
+```
+$ (probe) touches.claim_ledger → NOT APPLIED: column touches.claim_ledger does not exist      (before the operator ran 0009c)
+$ (probe) → claim_ledger column present                                                       (after)
+$ pnpm tsx scripts/update-writer-prompt-v9-claims.ts --apply
+WROTE evidence_policy v1 · cta_variants v3 · writer_prompt_email v9
+$ (read) active: evidence_policy v1 · cta_variants v3 · writer_prompt_email v9
+```
+
+Pure checker:
+```
+$ pnpm test:claims
+# pass 45
+# fail 0
+```
+
+DB-backed DoD (mocked writer + Telegram, synthetic fixtures). The first run failed 12 checks: the "2004," comma bug, plus the DoD 7 fixture below. Second run:
+```
+$ pnpm test:claim-guard
+--- DoD 1: invented timing ---              PASS ×5 (0 touches · manual_hold · invented_timing · 2 writer calls · 1 alert)
+--- DoD 2: unbacked asset ---               PASS ×5 (unbacked_asset_claim)
+--- DoD 3: unapproved offer ---             PASS ×5 (unapproved_offer)
+--- DoD 4: 31 days → hold / 29 days → pending ---  PASS ×8 (stale_evidence; 29d: pending_approval, 1 call)
+--- DoD 5: REBG contradiction ---           PASS ×5 (contradicted_evidence)
+--- DoD 6: invented place ---               PASS ×5 (uncovered_fact "Beaumont")
+--- DoD 7: $1.2M in the paraphrase, not on the page ---  PASS ×6 (unsupported_prospect_fact, not in source page: "$1.2M")
+--- DoD 8: failed-crawl evidence cited ---  PASS ×5 (failed_crawl_evidence)
+--- Steffen quoted / unquoted ---           PASS ×12 (not in source page: "contact us to schedule a preview")
+--- Steffen control (page has it) ---       PASS ×3 (pending_approval, 1 call)
+--- Malformed claims twice → hold ---       PASS
+--- Retry that fixes the draft ---          PASS ×3 (pending_approval, 2 calls)
+--- DoD 9: clean → card lists claims + E-ids + fetch date; approve → snapshot carries the ledger; hash recomputes equal; a different ledger changes it ---  PASS
+--- DoD 10: edit adding "Beaumont" → "the claim guard refused … Edit not applied"; touch stays pending; a clean edit (sentence deleted) is approved and bound ---  PASS
+--- Evidence aged past 30 days after drafting → approval refused (stale_evidence) ---  PASS
+--- Ledger-less touch → approval refused ---  PASS
+PASS: no network calls outside Supabase
+BEFORE {"companies":35,"leads":35,"touches":11,"lead_events":250,"qualification":17,"enrichment_payloads":106}
+AFTER  {"companies":35,"leads":35,"touches":11,"lead_events":250,"qualification":17,"enrichment_payloads":106}
+PASS: row counts unchanged (scoped cleanup)
+87/87 passed
+```
+
+Regressions:
+```
+$ pnpm test:sending → # pass 69 # fail 0          $ pnpm test:instantly → # pass 81 # fail 0
+$ pnpm test:webhook-rules → # pass 10              $ pnpm test:apollo → # pass 6     $ pnpm test:source-filters → # pass 9
+$ pnpm test:traversal → All 62 checks passed.      $ pnpm test:send → All 78 checks passed.
+$ pnpm test:webhooks → All 58 checks passed.       $ pnpm test:jobs → All 63 checks passed.
+$ pnpm test:scheduler → All 80 checks passed.
+$ npx tsc --noEmit → (clean)                       $ pnpm build → ok
+$ pnpm lint → ✖ 21 problems (17 errors, 4 warnings)   — identical on a stash of this session's changes: all in old
+  scripts (compare-prompt-versions, rerun-qualifier-one, test-qualify, draft-target-leads) + 3 old warnings
+```
+
+Live writer (one Anthropic call, synthetic fixture, card to the operator's Telegram only):
+```
+$ pnpm tsx scripts/test-draft.ts --limit 1
+SUBJECT: your team@ inbox and buyer leads
+BODY — model (77 words):
+Every enquiry on your contact page lands in a shared team inbox with no routing and no auto-response — so a buyer's
+question sits there until someone manually checks it.
+You already have Follow Up Boss embedded on your listings pages, which means the infrastructure is mostly there. The
+gap is between the form submission and the first human action — and that's where intent goes cold.
+Happy to write up what I'd change, if that's useful.
+CLAIMS (6):
+  [prospect_fact] "your team@ inbox and buyer leads" ← E1
+  [prospect_fact] "Every enquiry on your contact page lands in a shared team inbox with no routing and no auto-response" ← E1,E2
+  [inference] "a buyer's question sits there until someone manually checks it" ← E1,E2
+  [prospect_fact] "You already have Follow Up Boss embedded on your listings pages" ← E2
+  [inference] "The gap is between the form submission and the first human action — and that's where intent goes cold" ← E1,E2
+  [offer] "Happy to write up what I'd change, if that's useful." ← —
+PASS: claim ledger stored · PASS: claim guard re-check passes · PASS: → pending_approval · prompt_version 9
+PASS: approve → approval snapshot binds the claim ledger (U6b)
+BEFORE leads=35 touches=11 lead_events=250 · AFTER leads=35 touches=11 lead_events=250
+39/39 passed
+```
+Result: **pass**.
+
+**Decisions** (full rows in `06` §5)
+- The only approved offer line is "Happy to write up what I'd change, if that's useful." — the v2 CTA examples implied an asset that does not exist.
+- A `prospect_fact` citing a website item must also appear on the raw page. Apollo-only claims skip that check.
+- The kind tags are never trusted: fact tokens in any non-offer claim need cited support.
+- `no_cited_evidence` is a refusal: no evidence means no outreach.
+- Edits: claims whose span is gone are dropped; anything new must be covered. A ledger-less touch cannot be approved in Telegram.
+- Failure: one retry, then `manual_hold` with no touch. Generic-guard failures still park.
+- **DoD 7 deviation:** a figure in no evidence at all is parked by the generic number guard before the claim guard sees it. The DoD case therefore runs as the audit's Gottesman pattern (in the paraphrase, not on the page). The wrong-citation variant is unit-tested.
+- **Operator roadmap decisions** (docs only):
+  1. UR, research sources via Apify only, before the first prospect send;
+  2. LinkedIn via HeyReach, bought when U18 starts: actions, cross-channel stop, senders per campaign, about 15–20 connection requests per day per account;
+  3. a services catalog;
+  4. a service matcher on the card;
+  5. offers with rules;
+  6. single-service or general campaigns;
+  7. build order: email first-send path → UR → LinkedIn.
+
+**Observed, not fixed** (`06` §6): the guard is token-based. The live draft's "no routing and no auto-response" passed on citation alone. It was supported by this fixture, but the guard does not read meaning. Lowercase place names and number words below three are not tokens. U15/U17 close these gaps.
+
+**Next action**
+- **Monday: the U6 live re-test**, following Session 14's plan (new drill lead `drill:s14b`; check To/Cc and threading).
+- **Next planning session:** place U7, UD, U8 and U9 relative to UR (the operator set email first-send path → UR → LinkedIn), and estimate UR.
+- **Before any prospect draft:** a costed decision on re-crawling or re-qualifying the stale leads. Every existing lead's evidence is from 2026-07-13, so the guard will refuse them as `stale_evidence`.
+
+---
+
 ### 2026-09-25 — Session 14 — U6 (3 of 3): live drill; follow-up misaddressed → fix tested locally, re-test Monday
 
 **Unit:** U6 Part 2, the live drill (`09` §U6), on `main`. Plan mode first; operator changes to the plan: `--check` must read the Instantly campaign schedule, `--send` must refuse unless the engine window **and** the campaign schedule are both open with ≥ 20 min, and the drill zone is taken from `--check` output (≥ 60 min or stop).

@@ -128,6 +128,12 @@ export const ctaVariantSchema = z
     id: z.enum(["link", "reply"]),
     active: z.boolean(),
     text: z.string().min(1),
+    /**
+     * v3 (09 §U6b, Session 15): the only offer sentences an outbound draft may
+     * contain, verbatim. Until the knowledge library (U13) this is the whole
+     * approved offer text; the claim guard refuses any other offer.
+     */
+    approved_lines: z.array(z.string().min(1)).optional(),
   })
   .strict();
 
@@ -190,6 +196,16 @@ export const sendWindowsSchema = z
      * 2026-09-24). Optional so v1 still parses; the scheduler defaults it to 48.
      */
     priority_lookahead_hours: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+/**
+ * evidence_policy (09 §U6b): how old cited evidence may be before the claim
+ * guard refuses a draft (`stale_evidence`). Versioned, never hardcoded.
+ */
+export const evidencePolicySchema = z
+  .object({
+    max_age_days: z.number().int().min(1).max(365),
   })
   .strict();
 

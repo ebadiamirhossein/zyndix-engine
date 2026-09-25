@@ -31,6 +31,8 @@ Brief §14 lists its phases as: 1 Reconcile → 2 Knowledge → 3 Research/Match
 
 **The residual risk, stated rather than assumed away:** the approval gate bounds *what goes out*, not *how much operator attention each message costs*. Until U17 every first touch needs a real human read, so the early sending weeks are deliberately low-volume — which is what the 15→30/day warmup ramp permits anyway.
 
+**Build order after the claim guard (operator decision, 2026-09-25, Session 15):** **email first-send path → research sources (UR) → LinkedIn (U18).** UR (§UR, under Phase 3) is pulled forward because it must land before the first real prospect send; LinkedIn via HeyReach follows it. *Open for the next planning session:* where U7, UD, U8 and U9 fall relative to UR — the operator has not yet placed them.
+
 **Nothing is cut.** Knowledge lands as U10–U13 and matching as U14–U17, and the brief's central acceptance criterion (§332 — upload a handoff, approve what may be used, get better recommendations without changing code) is satisfied at U17 and re-verified at U22.
 
 ---
@@ -52,6 +54,8 @@ One campaign sends reviewed email end to end through Instantly with every stop r
 U5 alone makes the engine *able* to send. It is not *safe* to send until U6's stop path is proven, which is why the milestone sits on U6.
 
 > **2026-09-25 (Session 13, operator decision):** U6 makes the engine *safe to stop*. It does not make a draft *true*. **No prospect send happens until U6b (claim guard) passes.** The U6 drill (operator-owned recipient) is unaffected.
+>
+> **2026-09-25 (Session 15):** U6b passed locally (87/87 + 45/45, one live writer call). The first real prospect send now also waits for **UR** (research sources via Apify, operator decision), plus warmup + inbox placement (Session 14) and fresh evidence.
 
 ### 🛒 INSTANTLY PURCHASE TRIGGER — start of **U2** · cumulative session 3 · ≈ day 7
 
@@ -374,6 +378,18 @@ All existing guard, draft and approval tests stay green. A live `test-draft --li
 
 **Effort.** 1 session. **Depends on.** U6 (it may run before the U6 drill; it must finish before any prospect send).
 
+**As built (2026-09-25, Session 15)** — ✅ **tested locally**; the v9 writer's ledger **verified with provider** (one live Anthropic call on a synthetic fixture, not a send). Evidence in `07` Session 15.
+- **Checker:** `src/lib/stages/draft/claims.ts` (pure) + `claims-context.ts` (one loader for the draft stage and approval). All the reasons listed above, plus `span_not_in_body`, `unknown_evidence_id` and **`no_cited_evidence`** (no `prospect_fact`/`inference` cites evidence). It never trusts kind tags: fact tokens in any non-offer claim must be in the evidence that claim cites.
+- **Operator addition:** a `prospect_fact` citing a `website` item must also be on the raw `apify_site` page text (fact tokens, quoted fragments in the span, and quoted fragments of the cited evidence the span reuses) → else `unsupported_prospect_fact` "not in source page". Claims citing only `apollo` items skip it. The Steffen fixture is in the DoD.
+- **Offer allowlist:** `cta_variants` v3 `approved_lines` = ["Happy to write up what I'd change, if that's useful."] (operator). Any other offer sentence, or offer language outside it → `unapproved_offer`.
+- **Draft stage:** one revision retry → `drafting → manual_hold`, event `claim_guard_hold` (violations + refused draft), one alert, no touch. Malformed ledger → hold. Generic-guard failures still park (a figure in no evidence is caught there first).
+- **Approval:** `bindApproval` re-runs the guard on the exact subject + body (footer stripped); an edit keeps only claims whose span is still present. The accepted ledger → `touches.claim_ledger` and `approval_snapshot.claim_ledger`; preflight's recompute includes it (send stage now passes the column). A ledger-less touch cannot be approved in Telegram.
+- **Card:** CLAIMS block, each claim with its evidence id, fetch date and excerpt, plus the evidence-policy version.
+- **Settings:** `writer_prompt_email` v9, `cta_variants` v3, new key `evidence_policy` v1 (`scripts/update-writer-prompt-v9-claims.ts`). Migration `0009c_claim_ledger.sql` (applied by the operator).
+- **Tests:** `pnpm test:claims` 45/45, `pnpm test:claim-guard` 87/87, live `test-draft --limit 1` 39/39.
+- **Deviations:** the DoD's "$1.2M" case runs as the audit's Gottesman pattern (in the evidence paraphrase, not on the page); a figure in no evidence at all is parked by the generic guard before the claim guard. Interim gaps (token-based, not semantic) are listed in `06` §6.
+- **Still blocking prospect sends:** the U6 re-test, warmup + inbox placement, stale evidence (re-crawl is a costed decision), and **UR**.
+
 ---
 
 #### U7 — Reply classifier and deterministic routing policy
@@ -530,6 +546,10 @@ Legacy `proof_points` stays readable through an adapter. **Scholarcert** is regi
 
 Industry tags, products and offers are managed in the interface, not hard-coded enumerations.
 
+**Operator decisions (2026-09-25, Session 15).**
+- **Services catalog.** The library carries Zyndix's services: AI automation, CRM build, email marketing, AI agents / RAG, and vibe-coded MVP / product builds. Each service records who it is for, the problems it solves, its proof, and its approved claims (the only text an outbound message may use).
+- **Offers with rules.** An offer (e.g. "free automation build") has an operator on/off switch, a monthly slot cap, a minimum fit score and eligible segments. The engine only **proposes** it to eligible leads (U16); the operator approves each one.
+
 **Touches.** Migration **`0014_catalog.sql`**. UI: `/dashboard/products`. Lib: `src/lib/catalog/{core,proof-adapter}.ts`.
 
 **Provider.** None. **Completable with mocks: yes.**
@@ -553,6 +573,8 @@ Industry tags, products and offers are managed in the interface, not hard-coded 
 Prospect import: CSV and manual, column mapping, preview before commit, deduplication by normalized domain and provider ids **without collapsing distinct people**, recipient checks, suppression checked at import. Operator merge with an audit trail.
 
 **Do not silently replace existing live segment settings with the earlier UK/events proposal** (§8, explicit).
+
+**Operator decision (2026-09-25, Session 15).** A campaign is either **single-service** (e.g. a "vibe coding MVP" campaign with its own ICP, its own search filters and only that service offered) or **general** (any matching service).
 
 **Touches.** Migrations **`0015_campaigns.sql`**, **`0015b_lead_merges.sql`**. UI: `/dashboard/campaigns`, `/dashboard/companies/import`. Lib: `src/lib/campaigns/core.ts`, `src/lib/import/prospects.ts`.
 
@@ -586,6 +608,24 @@ Prospect import: CSV and manual, column mapping, preview before commit, deduplic
 
 ---
 
+#### UR — Research sources (Apify)  ⛔ **before the first real prospect send** *(with U15; added 2026-09-25, operator, Session 15)*
+
+**Why.** Today the only evidence is one site crawl and a tech scan, paraphrased by the qualifier. The claim guard (U6b) can only verify what is stored. Richer, dated, source-linked evidence is needed before a real prospect is written to.
+
+**Scope (operator decisions, 2026-09-25).**
+- **Apify only. Never the operator's own LinkedIn account for scraping.**
+- Sources: person LinkedIn posts, company LinkedIn posts, the LinkedIn profile, job posts, Google reviews, news and the company blog.
+- **Each item becomes typed evidence with URL + date + excerpt**, so the claim guard can verify it (per-item `fetched_at` replaces U6b's one-date-per-lead proxy; excerpts are verbatim).
+- It carries U15's evidence record forward for these sources; the rest of U15 (observed / inferred / prospect-confirmed / contradicted labels, company-level reuse, crawl limits) stays in U15 unless the planning session merges them.
+
+**Placement.** After the email first-send path, before LinkedIn (U18) — build order in §1. **Must land before the first real prospect send.**
+
+**Provider.** Apify (actors chosen and costed at planning; every run is a costed operator decision). **Completable with mocks:** yes for parsing and evidence typing; each actor needs a separately reported live test.
+
+**Effort.** To be estimated at its planning session. **Depends on.** U6b.
+
+---
+
 #### U16 — Matching and recommendations  ⭐ central acceptance criterion
 
 **Scope.** Implements §6 in full — **the brief's central acceptance criterion rests here.**
@@ -595,6 +635,10 @@ A `recommendations` table and the decision contract exactly as §6's JSON exampl
 Four distinct choices: recommend an existing product · cite a relevant case study · propose discovery for a custom build · **use no asset at all**. `no_relevant_asset` and `insufficient_evidence` are first-class and **there is no mandatory top recommendation**. An industry match alone is insufficient. Existing software that adequately solves the problem is not ignored to force a custom build. Both reasons are exposed to the operator.
 
 Retrieve a small candidate set, filter by approval/status/permissions, then rank for relevance, evidence strength, limitations and freshness — **do not insert the entire library into each prompt**. Record retrieved versions and decision reasons. At most one relevant product or proof point in an initial email. A library update triggers a **review task**, never an automatic email to previously contacted people.
+
+**Operator decisions (2026-09-25, Session 15).**
+- **Service matcher.** An evidence-backed pain → the best service from the catalog (U13) plus the reason, shown on the Telegram approval card. Offer text comes only from that service's approved facts. In a single-service campaign (U14) only that service is a candidate.
+- **Offer eligibility.** An offer is proposed only when it is switched on, has a free monthly slot, the lead meets its minimum fit score and its segment is eligible; the operator approves each.
 
 **Touches.** Migration **`0017_recommendations.sql`**. UI: recommendation panel with reasons on company/lead detail. Lib: `src/lib/matching/{retrieve,rank,decide}.ts`.
 
@@ -648,6 +692,13 @@ Plus: any `asset_id` or `knowledge_fact_id` absent from the database fails valid
 LinkedIn prohibits unauthorized automation and scraping; low daily limits do not make it permitted. Show that operational risk in integration setup. **Do not create fake engagement, evade restrictions, or promise a safe quota.** An unsupported action becomes a clear manual task, never a fake completed step. Aggregate cross-channel contact limits and cooldowns — §8's "silence is not permission to continually add channels".
 
 `linkedin_senders` becomes a settings key, per the 2026-08-23 decision.
+
+**Operator decisions (2026-09-25, Session 15).**
+- **HeyReach is bought only when this unit starts.** It runs after UR (build order, §1).
+- Actions: profile view, like a recent post, connection request (no note or a short one), message after accept. Replies flow back into the engine, and **a reply on any channel stops all channels**.
+- Senders are chosen per campaign: Amir, Ingrida, or Amir only (a per-sender writer persona is already backlogged, §5).
+- Low limits: about **15–20 connection requests per day per account**.
+- External execution still defaults off until the operator enables it (`CLAUDE.md`).
 
 **Touches.** Migration **`0018_manual_tasks.sql`**. Lib: `src/lib/integrations/heyreach.ts`, `src/lib/tasks/manual.ts`. UI: `/dashboard/tasks`.
 
@@ -804,6 +855,8 @@ Carried from `05-build-plan.md` §4, still valid:
 - **Reply poll skips leads already `replied`** (Session 14): `pollWindow` covers `queued/sent/no_reply/sequence_done` only, and a finished lead with a recorded inbound touch is counted `already_seen` before the processor. A *second* reply from an already-replied lead is therefore only caught by the webhook. Decide whether U7 needs the poll to cover recently replied leads.
 - **Step-1 touch `provider_message_id` stays null** (Session 14): the enroll returns a lead id and the `email_sent` webhook writes the email id to `outbox.provider_email_id` only. Copy it onto the touch in `handleSent` when the dashboards (U10) need it.
 - **Exclude drill leads everywhere** (Session 14): `segment='drill'` companies (lead `7fd018fa`, `drill:s14`; Monday's `drill:s14b`) must be excluded from U7 classification, digests, Attio sync and any lead listing.
+- **Preflight does not re-run the claim guard** (Session 15): the approval hash binds the ledger, and the guard ran at approval time. If evidence ages past `evidence_policy` between approval and send, the send still goes. Decide at U9 whether preflight should re-check freshness.
+- **Claim guard interim gaps** (Session 15): token-based, not semantic; lowercase place names; number words below three; three contradiction attributes only (`06` §6). Closed by U15/U17.
 - **Durable webhook endpoint** (Session 14): quick tunnels drop; the next live drill should probe the tunnel before each provider event, and U9's deploy URL replaces them.
 
 ---
@@ -818,7 +871,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U4 | Instantly adapter | 4 | 2 | Instantly | partial | U2 |
 | U5 | Send stage, preflight, guards | 4 | 3 | Instantly | yes | U3, U4 |
 | **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 3 (+1 live re-test, Session 14) | Instantly | yes | U2, U5 |
-| **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends | 4 | 1 | Anthropic | yes | U6 |
+| **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends — ✅ tested locally (Session 15) | 4 | 1 | Anthropic | yes | U6 |
 | U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
 | **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |
 | U8 | Calendly, meetings, booking stop | 4 | 2 | Calendly | yes | U6 |
@@ -829,6 +882,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U13 | Structured catalog | 2 | 2 | — | yes | U12 |
 | U14 | Campaigns, enrollments, prospect import | 3 | 2 | — | yes | U9, U13 |
 | U15 | Typed evidence model | 3 | 2 | Apify, Anthropic | yes | U14 |
+| **UR** | **Research sources (Apify)** ⛔ before the first prospect send | 3 (with U15) | TBD | Apify | yes (parsing) | U6b |
 | **U16** | **Matching and recommendations** ⭐ | 3 | 3 | Anthropic | yes | U15 |
 | U17 | Draft rewired to matching, approvals UI | 3 | 3 | Anthropic | yes | U16 |
 | U18 | Heyreach + manual LinkedIn mode (OFF) | 5 | 3 | Heyreach | partial | U9 |
@@ -838,14 +892,14 @@ Carried from `05-build-plan.md` §4, still valid:
 | U22 | Dashboard pass, e2e, chaos, red-team | 6 | 3 | all, mocked | yes | U21 |
 | U23 | Fresh-project migrations, handoff | 6 | 2 | all | **no** | U22 |
 
-**Totals:** 24 units, **57 sessions ≈ 19 weeks** at 3 sessions/week.
+**Totals:** 24 units, **57 sessions ≈ 19 weeks** at 3 sessions/week. *UR (added 2026-09-25) is not yet in the totals; its sessions are estimated at its planning session.*
 Phase 1 = 4 · first-send block (U3–U9 + UD) = 18 · Knowledge = 11 · Matching = 9 · Integrations/commercial = 12 · Verification = 5.
 
 UD adds 2 sessions after U7. It therefore does **not** move either of the two milestones above it — 🛒 at U2 and 🚩 at U6 are unaffected — and pushes everything below it by two sessions.
 
 **Milestones:**
 🛒 buy Instantly + mailboxes at the **start of U2** — cumulative session 3, ≈ day 7
-🚩 **FIRST SEND READY at the end of U6** — cumulative session 14, ≈ week 4.7 · **first *prospect* send additionally requires U6b** (+1 session, 2026-09-25)
+🚩 **FIRST SEND READY at the end of U6** — cumulative session 14, ≈ week 4.7 · **first *prospect* send additionally requires U6b** (+1 session, 2026-09-25; ✅ tested locally Session 15) **and UR** (research sources, operator decision Session 15), plus warmup + inbox placement (Session 14)
 ⭐ central acceptance criterion satisfied at **U16–U17** — cumulative session 40, ≈ week 13.3 *(was session 38 / week 12.7 before UD)* · **+2 sessions from 2026-09-25** (U6b +1, U17 +1): cumulative session ≈ 42
 
 **Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009`, `0009b` (U6: send prereqs, exceptions) · `0009c` (U6b: claim ledger) · `0010` (U8) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.

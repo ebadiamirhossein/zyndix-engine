@@ -291,6 +291,7 @@ async function buildContext(
       body: touch.body,
       prompt_version: touch.prompt_version,
       approval_hash: touch.approval_hash,
+      claim_ledger: touch.claim_ledger,
     },
     lead: {
       id: lead.id,

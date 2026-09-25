@@ -22,8 +22,11 @@ import type {
   proofPointsSchema,
 } from "@/lib/validation/jsonb";
 import { writerOutputSchema } from "@/lib/validation/llm";
-import type { Database } from "@/types/database";
+import type { Database, Json } from "@/types/database";
+import type { DatabaseWithSending } from "@/types/database-extensions";
 
+import { formatViolations, type ClaimViolation } from "./claims";
+import { loadClaimContext, runClaimCheck, toClaimEvidence, type ClaimContext } from "./claims-context";
 import { checkGenericDraft, wordCount } from "./guard";
 
 type WriterOutput = z.infer<typeof writerOutputSchema>;
@@ -36,6 +39,8 @@ export type DraftStageSummary = {
   drafted: number;
   generic_rejected: number;
   parked_generic: number;
+  /** Held by the claim guard (09 §U6b): drafting → manual_hold, no touch written. */
+  claim_held: number;
   failed: number;
   tokens_used: number;
   est_cost_usd: number;
@@ -129,7 +134,8 @@ function buildWriterInput(
   return {
     qualification: {
       problem_hypothesis: lead.qualification.problem_hypothesis,
-      evidence: asEvidence(lead.qualification.evidence),
+      // Interim ids E1…En (09 §U6b): the writer cites these in its claims.
+      evidence: toClaimEvidence(lead.qualification.evidence),
       recommended_angle: lead.qualification.recommended_angle,
       visible_tools: asStringArray(lead.qualification.visible_tools),
       triggers: asStringArray(lead.qualification.triggers),
@@ -164,8 +170,12 @@ function normalizeWriterRaw(raw: unknown): unknown {
   return {
     subject: obj.subject,
     body: obj.body,
+    claims: obj.claims,
   };
 }
+
+const RETURN_SHAPE =
+  'Return ONLY {"subject":"...","body":"...","claims":[{"span":"...","kind":"...","evidence_ids":["E1"]}]}.';
 
 function isWordCountSchemaError(error: unknown): boolean {
   if (!error || typeof error !== "object" || !("issues" in error)) {
@@ -190,9 +200,17 @@ async function writeDraftWithGuard(
   proofPoint: string | null,
   complianceFooter: string,
   ctaText: string,
+  claimContext: ClaimContext,
 ): Promise<
   | { ok: true; output: WriterOutput; tokens: number; cost: number }
-  | { ok: false; rejections: string[] }
+  | {
+      ok: false;
+      rejections: string[];
+      /** Hold (not park): malformed output, or the claim guard refused twice. */
+      hold: boolean;
+      violations?: ClaimViolation[];
+      lastDraft?: unknown;
+    }
 > {
   const rejections: string[] = [];
   let totalTokens = 0;
@@ -200,6 +218,8 @@ async function writeDraftWithGuard(
   let wordCountRetryHint: string | null = null;
   let guardRetryHint: string | null = null;
   let signOffRetryHint: string | null = null;
+  let claimRetryHint: string | null = null;
+  let lastFailure: "nonjson" | "schema" | "signoff" | "generic" | "claims" | null = null;
   const evidence = asEvidence(lead.qualification.evidence);
 
   const numberSourceTexts = [
@@ -223,6 +243,9 @@ async function writeDraftWithGuard(
     if (signOffRetryHint) {
       userParts.push(signOffRetryHint);
     }
+    if (claimRetryHint) {
+      userParts.push(claimRetryHint);
+    }
     userParts.push(JSON.stringify(writerInput, null, 2));
 
     const completion = await deps.anthropic.complete({
@@ -242,6 +265,7 @@ async function writeDraftWithGuard(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       rejections.push(`attempt ${attempt}: non-json: ${message.slice(0, 120)}`);
+      lastFailure = "nonjson";
       console.warn(`[draft] non-JSON response for lead ${lead.id}: ${message.slice(0, 120)}`);
       continue;
     }
@@ -262,7 +286,7 @@ async function writeDraftWithGuard(
         wordCountRetryHint = [
           `REVISION REQUIRED: your previous body was ${count} words.`,
           "Cut it to ≤120 words.",
-          'Return ONLY {"subject":"...","body":"..."} with no other keys.',
+          RETURN_SHAPE,
         ].join(" ");
         console.warn(
           `[draft] word-count rejection for lead ${lead.id} (${count} words) — retrying`,
@@ -275,6 +299,7 @@ async function writeDraftWithGuard(
         .map((issue) => issue.message)
         .join("; ");
       rejections.push(`attempt ${attempt}: schema: ${reason}`);
+      lastFailure = "schema";
       console.warn(`[draft] schema rejected lead ${lead.id}: ${reason}`);
       continue;
     }
@@ -286,12 +311,13 @@ async function writeDraftWithGuard(
     const signOff = findSignOff(output.body);
     if (signOff) {
       rejections.push(`attempt ${attempt}: signs itself (${JSON.stringify(signOff)})`);
+      lastFailure = "signoff";
       console.warn(`[draft] sign-off rejection for lead ${lead.id} — ${signOffRetryHint ? "no retry left" : "retrying"}`);
       if (!signOffRetryHint) {
         signOffRetryHint = [
           `REVISION REQUIRED: your previous body ended with a sign-off (${JSON.stringify(signOff)}).`,
           "Do NOT sign off and do NOT write any name at the end; the signature is added separately.",
-          'Return ONLY {"subject":"...","body":"..."}.',
+          RETURN_SHAPE,
         ].join(" ");
         attempt -= 1;
       }
@@ -310,20 +336,44 @@ async function writeDraftWithGuard(
     });
 
     if (guard.ok) {
-      const bodyWithFooter = appendComplianceFooter(output.body, complianceFooter);
-      return {
-        ok: true,
-        output: {
-          subject: output.subject,
-          body: bodyWithFooter,
-        },
-        tokens: totalTokens,
-        cost: totalCost,
-      };
+      // Claim guard (09 §U6b): deterministic, on the pre-footer text.
+      const claimCheck = runClaimCheck(claimContext, output);
+      if (claimCheck.ok) {
+        const bodyWithFooter = appendComplianceFooter(output.body, complianceFooter);
+        return {
+          ok: true,
+          output: {
+            subject: output.subject,
+            body: bodyWithFooter,
+            claims: output.claims,
+          },
+          tokens: totalTokens,
+          cost: totalCost,
+        };
+      }
+
+      const lines = formatViolations(claimCheck.violations);
+      rejections.push(`attempt ${attempt}: claim guard: ${lines.join(" | ")}`);
+      lastFailure = "claims";
+      console.warn(`[draft] claim guard rejected lead ${lead.id} — ${claimRetryHint ? "no retry left, holding" : "retrying"}`);
+      if (claimRetryHint) {
+        return { ok: false, rejections, hold: true, violations: claimCheck.violations, lastDraft: output };
+      }
+      claimRetryHint = [
+        "REVISION REQUIRED: the claim guard refused your draft:",
+        ...lines.map((line) => `- ${line}`),
+        "Fix every item. Remove any fact you cannot cite; never state weekdays or times of day;",
+        "never say you have prepared or mapped out anything; end with the approved line verbatim.",
+        "Every claim span must be copied verbatim from the subject or body.",
+        RETURN_SHAPE,
+      ].join("\n");
+      attempt -= 1;
+      continue;
     }
 
     const reason = guard.reason;
     rejections.push(`attempt ${attempt}: ${reason}`);
+    lastFailure = "generic";
     console.warn(
       `[draft] generic guard rejected lead ${lead.id} (${reason})`,
     );
@@ -340,13 +390,17 @@ async function writeDraftWithGuard(
         `Problem: ${nums}.`,
         "Remove ALL invented numbers, percentages, time thresholds, and stat phrases.",
         "Convey urgency by describing the mechanism only.",
-        'Return ONLY {"subject":"...","body":"..."}.',
+        RETURN_SHAPE,
       ].join(" ");
       attempt -= 1;
     }
   }
 
-  return { ok: false, rejections };
+  return {
+    ok: false,
+    rejections,
+    hold: lastFailure === "claims" || lastFailure === "schema" || lastFailure === "nonjson",
+  };
 }
 
 async function pickDraftingLeads(
@@ -423,6 +477,7 @@ export async function runDraftStage(
     drafted: 0,
     generic_rejected: 0,
     parked_generic: 0,
+    claim_held: 0,
     failed: 0,
     tokens_used: 0,
     est_cost_usd: 0,
@@ -473,6 +528,7 @@ export async function runDraftStage(
           .eq("id", lead.id);
       }
 
+      const claimContext = await loadClaimContext(deps.db, deps.getActiveSetting, lead.id);
       const writerInput = buildWriterInput(lead, cadenceStep, proofPoint);
       const result = await writeDraftWithGuard(
         deps,
@@ -483,7 +539,30 @@ export async function runDraftStage(
         proofPoint,
         complianceFooter,
         ctaText,
+        claimContext,
       );
+
+      if (!result.ok && result.hold) {
+        // 09 §U6b: one revision retry, then hold. No touch is written, so
+        // nothing reaches approval; the refused draft is kept on the event.
+        await deps.transition(lead.id, "drafting", "manual_hold", "claim_guard_hold", {
+          rejections: result.rejections,
+          violations: result.violations ?? [],
+          draft: result.lastDraft ?? null,
+          prompt_version: promptVersion,
+          evidence_policy_version: claimContext.evidencePolicyVersion,
+        });
+        summary.claim_held += 1;
+        const reasons = [...new Set((result.violations ?? []).map((v) => v.reason))].join(", ") || "malformed writer output";
+        try {
+          await deps.telegram.sendAlert(
+            `⛔ Claim guard hold — lead ${lead.id} (${lead.company.name}): ${reasons}. No draft reached approval.`,
+          );
+        } catch (error) {
+          console.warn(`[draft] claim-hold alert failed for lead ${lead.id}:`, error);
+        }
+        continue;
+      }
 
       if (!result.ok) {
         summary.generic_rejected += result.rejections.length;
@@ -499,7 +578,8 @@ export async function runDraftStage(
       summary.tokens_used += result.tokens;
       summary.est_cost_usd += result.cost;
 
-      const { data: touch, error: touchError } = await deps.db
+      const sendDb = deps.db as unknown as SupabaseClient<DatabaseWithSending>;
+      const { data: touch, error: touchError } = await sendDb
         .from("touches")
         .insert({
           lead_id: lead.id,
@@ -512,6 +592,7 @@ export async function runDraftStage(
           draft_body: output.body,
           body: null,
           prompt_version: promptVersion,
+          claim_ledger: output.claims as unknown as Json,
         })
         .select("*")
         .single();
@@ -526,6 +607,7 @@ export async function runDraftStage(
         touch_id: touch.id,
         subject: output.subject,
         word_count: wordCount(output.body),
+        claims_count: output.claims.length,
         prompt_version: promptVersion,
         model,
       });
@@ -543,8 +625,12 @@ export async function runDraftStage(
           fit_score: lead.qualification.fit_score,
           segment: lead.qualification.segment,
           problem_hypothesis: lead.qualification.problem_hypothesis,
-          evidence: asEvidence(lead.qualification.evidence),
+          evidence: claimContext.evidence,
           recommended_angle: lead.qualification.recommended_angle,
+          claims: output.claims,
+          evidence_fetched_at: claimContext.evidenceFetchedAt,
+          evidence_policy_version: claimContext.evidencePolicyVersion,
+          max_age_days: claimContext.maxAgeDays,
         },
         {
           name: lead.company.name,

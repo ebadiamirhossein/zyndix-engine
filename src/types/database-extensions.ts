@@ -197,6 +197,8 @@ type TouchApprovalColumns = {
   approved_at: string | null;
   approved_by: string | null;
   idempotency_key: string | null;
+  /** 0009c_claim_ledger.sql (09 §U6b, Session 15). */
+  claim_ledger: Json | null;
 };
 
 export type OutboxRowShape = {
@@ -228,7 +230,8 @@ export type OutboxRowShape = {
 /**
  * Columns and table added in 0008_touch_approval_binding.sql and
  * 0008b_outbox.sql (09 §U5), plus the columns of 0009_send_prereqs.sql
- * (Session 12) — merge into database.ts after gen:types.
+ * (Session 12) and touches.claim_ledger of 0009c_claim_ledger.sql (Session 15)
+ * — merge into database.ts after gen:types.
  */
 export type DatabaseWithSending = Omit<DatabaseWithCapacity, "public"> & {
   public: Omit<DatabaseWithCapacity["public"], "Tables"> & {
