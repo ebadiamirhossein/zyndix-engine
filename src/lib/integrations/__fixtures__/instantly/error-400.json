@@ -1,0 +1,1 @@
+{ "statusCode": 400, "error": "Bad Request", "message": "body must have required property 'campaign_id'" }

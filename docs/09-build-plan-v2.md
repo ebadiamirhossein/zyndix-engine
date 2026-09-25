@@ -178,6 +178,12 @@ Record which plan and permissions are required, and which requested operations t
 
 **Effort.** 2 sessions. **Depends on.** U2.
 
+**Provider record (2026-09-25, Session 10).** Source: the official OpenAPI spec `https://api.instantly.ai/openapi/api_v2.json` plus `developer.instantly.ai`, read this session.
+- *Plan.* Growth (`plan_id pid_g_v2`). API v2 and `GET /api/v2/webhooks/event-types` answered live on Growth. The docs name no tier for webhooks; a third-party source says Hypergrowth. Webhook **creation** is unproven — check at the start of U6.
+- *Scopes the key needs.* `workspaces:read`, `accounts:read`, `campaigns:read`, `leads:read` (proven live except `leads:read`); U5 adds `leads:create`, `leads:delete`, `campaigns:update`; U6 adds `block_list_entries:create` and webhook scopes. A missing scope surfaces as `InstantlyPermanentError` `kind:'scope'`.
+- *Unsupported, so designed around.* No idempotency-key header (enrollment dedupes with `skip_if_in_workspace`/`skip_if_in_campaign` on `POST /api/v2/leads/add`). No per-lead pause (stops are `DELETE /api/v2/leads/{id}` or the block list). **No per-lead sending-account field** (drives U5's sender pinning). No documented `Retry-After` or rate-limit headers (limit is 100 req/s, 6,000 req/min per workspace; parsed if present, else U2 backoff). The live webhook event list differs from both the spec and the guide — U6 uses the live list.
+- *Taxonomy refinement.* For **mutations**, any 5xx is `InstantlyUncertainOutcomeError`, not retryable — the write may have been committed (`06` §5, 2026-09-25). Reads keep 5xx → retryable.
+
 ---
 
 #### U5 — Send stage, preflight, guards
@@ -190,6 +196,8 @@ The send stage runs as a U2 job: claim → preflight → reserve capacity → **
 
 Minimal single-campaign configuration — no campaigns table until U14.
 
+**Sender pinning (added 2026-09-25, operator requirement).** The same mailbox names (`amir@`, `ingrida@`) exist on both sending domains, so **a lead keeps one `send_account` for its whole sequence and never rotates mid-sequence.** Instantly has no per-lead sending-account field (U4 provider record), so pinning is structural: **one Instantly campaign per `send_account`**, and an engine-side lead→`send_account` binding written at first send (carried by `0008`). Preflight refuses any later touch whose sender differs from the binding with `sender_mismatch`; capacity is reserved against the bound account only.
+
 > ⚠️ `STEP-11-RUNBOOK.md` claimed this guard already existed in `stages/send.ts`. It did not. It arrives **here**, and this unit's DoD is what verifies it.
 
 **Touches.** Migrations **`0008_touch_approval_binding.sql`** (`touches`: `approval_hash`, `approved_at`, `approved_by`, unique `idempotency_key`), **`0008b_outbox.sql`**. Lib: `src/lib/sending/{preflight,guard,suppression}.ts`, `src/lib/stages/send/{core,reconcile}.ts`. Edit: `src/lib/telegram/handler.ts` approve and edit paths now write the binding.
@@ -197,7 +205,8 @@ Minimal single-campaign configuration — no campaigns table until U14.
 **Provider.** Instantly, injected through a `deps` object exactly as `stages/draft/core.ts` does today. **Completable with mocks: yes** for all behavior; the provider-id round trip is verified live in U6.
 
 **Tests / DoD.**
-- A 14-case preflight table, each asserting an **exact refusal reason string**: `suppressed_email`, `suppressed_domain`, `reply_freeze`, `booking_hold`, `manual_hold`, `email_unverified`, `email_invalid`, `sender_unhealthy`, `quota_exhausted`, `outside_window`, `duplicate_company_active`, `stale_approval`, `blocked_sender_domain`, plus one `ok`.
+- A 15-case preflight table, each asserting an **exact refusal reason string**: `suppressed_email`, `suppressed_domain`, `reply_freeze`, `booking_hold`, `manual_hold`, `email_unverified`, `email_invalid`, `sender_unhealthy`, `quota_exhausted`, `outside_window`, `duplicate_company_active`, `stale_approval`, `blocked_sender_domain`, `sender_mismatch`, plus one `ok`.
+- Sender pinning: a lead's first touch binds its `send_account`; a follow-up routed to the same local part on the *other* domain (e.g. `amir@getzyndix.com` after `amir@zyndixhq.com`) is refused with `sender_mismatch`, and no capacity is reserved.
 - Domain-guard sub-table rejects `zyndix.com`, `mail.zyndix.com`, `ZYNDIX.COM`, `zyndix.com.` (trailing dot), `a.b.zyndix.com` and `" zyndix.com "` (whitespace), and accepts the two purchased domains.
 - Happy path: lead `approved → sent`, adapter called **exactly once**, `accepted = 1`.
 - Uncertain outcome injected: `outbox.state='uncertain'`, lead still `queued`, re-running the job calls the adapter **zero** additional times.
@@ -635,7 +644,7 @@ Two separate clocks. Conflating them is what the original runbook got wrong.
 |---|---|---|
 | **Two sending domains** + 301 redirect to `zyndix.com` | **Done 2026-09-21** | Cheap, and domain age is a deliverability input that only accrues with time. |
 | MX, SPF, DKIM (authentication *started*), DMARC, tracking CNAME | **With the mailboxes, at U2** | DKIM is generated in Google Workspace Admin, so it cannot exist before the mailboxes do. The rest follows it rather than being split across two visits. |
-| **Instantly Hypergrowth** + four Google Workspace mailboxes + MillionVerifier credits | **Start of U2** (≈ day 7) | Warmup is a calendar clock nothing shortens. Buying here puts ~24 days of warmup against a FIRST SEND READY at U6 (≈ day 33), and unblocks the DKIM record. |
+| **Instantly Growth** + four mailboxes (2 Google Workspace on `zyndixhq.com`, 2 Microsoft 365 on `getzyndix.com`) + MillionVerifier (495 free credits) | ✅ **Bought 2026-09-24**; warmup started 2026-09-24 | Warmup is a calendar clock nothing shortens. Originally planned as Hypergrowth + four Google mailboxes; the as-built choice is recorded in `06` §5 (2026-09-25). |
 | Attio API key | Before **U19** | Step 8 was deferred; nothing before U19 needs it. |
 | Heyreach | Before **U18**, and external execution stays **off** | Adapter and tests complete without it. |
 | An embeddings provider | Decided in **U12**, optional | FTS ships first and remains the labeled fallback. |

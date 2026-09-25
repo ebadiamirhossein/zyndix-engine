@@ -1,0 +1,229 @@
+import { z } from "zod";
+
+// Instantly API v2 response shapes. Source: the official OpenAPI spec at
+// https://api.instantly.ai/openapi/api_v2.json and developer.instantly.ai,
+// read 2026-09-25. Only fields the engine consumes are typed; everything else
+// passes through untouched. A consumed field of the wrong type fails the parse
+// (no coercion) — that is the contract the tests lock.
+
+// ---------------------------------------------------------------------------
+// Enums (spec descriptions). Unknown codes stay numbers and map to "unknown".
+// ---------------------------------------------------------------------------
+
+export const ACCOUNT_STATUS_LABELS: Record<number, string> = {
+  1: "active",
+  2: "paused",
+  3: "maintenance_paused",
+  [-1]: "connection_error",
+  [-2]: "soft_bounce_error",
+  [-3]: "sending_error",
+};
+
+export const ACCOUNT_WARMUP_STATUS_LABELS: Record<number, string> = {
+  1: "active",
+  0: "paused",
+  [-1]: "banned",
+  [-2]: "spam_folder_unknown",
+  [-3]: "permanent_suspension",
+};
+
+export const ACCOUNT_PROVIDER_LABELS: Record<number, string> = {
+  1: "custom_imap_smtp",
+  2: "google",
+  3: "microsoft",
+  4: "aws",
+  8: "airmail",
+  11: "airmail_instant",
+};
+
+export const CAMPAIGN_STATUS_LABELS: Record<number, string> = {
+  0: "draft",
+  1: "active",
+  2: "paused",
+  3: "completed",
+  4: "running_subsequences",
+  [-99]: "account_suspended",
+  [-1]: "accounts_unhealthy",
+  [-2]: "bounce_protect",
+};
+
+export const LEAD_STATUS_LABELS: Record<number, string> = {
+  1: "active",
+  2: "paused",
+  3: "completed",
+  [-1]: "bounced",
+  [-2]: "unsubscribed",
+  [-3]: "skipped",
+};
+
+export function label(map: Record<number, string>, code: number | null | undefined): string {
+  if (code === null || code === undefined) return "unknown";
+  return map[code] ?? `unknown(${code})`;
+}
+
+// ---------------------------------------------------------------------------
+// Error body: { statusCode, error, message } (a few endpoints send { error })
+// ---------------------------------------------------------------------------
+
+export const instantlyErrorBodySchema = z
+  .object({
+    statusCode: z.number().optional(),
+    error: z.string().optional(),
+    message: z.string().optional(),
+  })
+  .passthrough();
+
+// ---------------------------------------------------------------------------
+// Workspace — GET /api/v2/workspaces/current
+// ---------------------------------------------------------------------------
+
+export const instantlyWorkspaceSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string(),
+    plan_id: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+// ---------------------------------------------------------------------------
+// Accounts — GET /api/v2/accounts, GET /api/v2/accounts/{email}
+// ---------------------------------------------------------------------------
+
+export const instantlyAccountSchema = z
+  .object({
+    email: z.string().min(1),
+    status: z.number().int(),
+    warmup_status: z.number().int(),
+    provider_code: z.number().int(),
+    setup_pending: z.boolean(),
+    daily_limit: z.number().nullable().optional(),
+    stat_warmup_score: z.number().nullable().optional(),
+    timestamp_created: z.string(),
+    timestamp_warmup_start: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+function pageSchema<T extends z.ZodTypeAny>(item: T) {
+  return z
+    .object({
+      items: z.array(item),
+      next_starting_after: z.string().nullable().optional(),
+    })
+    .passthrough();
+}
+
+export const instantlyAccountPageSchema = pageSchema(instantlyAccountSchema);
+
+// ---------------------------------------------------------------------------
+// Warmup analytics — POST /api/v2/accounts/warmup-analytics
+// ---------------------------------------------------------------------------
+
+export const instantlyWarmupAggregateSchema = z
+  .object({
+    sent: z.number().nullable().optional(),
+    received: z.number().nullable().optional(),
+    landed_inbox: z.number().nullable().optional(),
+    landed_spam: z.number().nullable().optional(),
+    health_score: z.number().nullable().optional(),
+    health_score_label: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export const instantlyWarmupAnalyticsSchema = z
+  .object({
+    email_date_data: z.record(z.string(), z.unknown()).optional(),
+    aggregate_data: z.record(z.string(), instantlyWarmupAggregateSchema),
+  })
+  .passthrough();
+
+// ---------------------------------------------------------------------------
+// Campaigns — GET /api/v2/campaigns, GET /api/v2/campaigns/{id},
+// POST /api/v2/campaigns/{id}/pause|activate
+// ---------------------------------------------------------------------------
+
+export const instantlyCampaignSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string(),
+    status: z.number().int(),
+    timestamp_created: z.string(),
+  })
+  .passthrough();
+
+export const instantlyCampaignPageSchema = pageSchema(instantlyCampaignSchema);
+
+// ---------------------------------------------------------------------------
+// Leads — POST /api/v2/leads/list, DELETE /api/v2/leads/{id}
+// ---------------------------------------------------------------------------
+
+export const instantlyLeadSchema = z
+  .object({
+    id: z.string().min(1),
+    email: z.string().nullable().optional(),
+    campaign: z.string().nullable().optional(),
+    status: z.number().int(),
+    timestamp_created: z.string(),
+  })
+  .passthrough();
+
+export const instantlyLeadPageSchema = pageSchema(instantlyLeadSchema);
+
+// ---------------------------------------------------------------------------
+// Bulk add — POST /api/v2/leads/add. Used for single-lead enrollment because
+// it is the only create endpoint that reports skips explicitly.
+// ---------------------------------------------------------------------------
+
+export const instantlyLeadsAddResponseSchema = z
+  .object({
+    status: z.string(),
+    total_sent: z.number().int(),
+    leads_uploaded: z.number().int(),
+    in_blocklist: z.number().int(),
+    duplicated_leads: z.number().int(),
+    skipped_count: z.number().int(),
+    invalid_email_count: z.number().int(),
+    incomplete_count: z.number().int(),
+    duplicate_email_count: z.number().int(),
+    remaining_in_plan: z.number().nullable().optional(),
+    created_leads: z.array(
+      z
+        .object({
+          index: z.number().int(),
+          id: z.string().min(1),
+          email: z.string().nullable().optional(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+
+// ---------------------------------------------------------------------------
+// Block list — POST /api/v2/block-lists-entries
+// ---------------------------------------------------------------------------
+
+export const instantlyBlockListEntrySchema = z
+  .object({
+    id: z.string().min(1),
+    bl_value: z.string(),
+    is_domain: z.boolean(),
+  })
+  .passthrough();
+
+// ---------------------------------------------------------------------------
+// Webhook event types — GET /api/v2/webhooks/event-types (plan-tier probe)
+// ---------------------------------------------------------------------------
+
+export const instantlyWebhookEventTypesSchema = z
+  .object({
+    event_types: z.array(z.object({}).passthrough()),
+  })
+  .passthrough();
+
+export type InstantlyWorkspace = z.infer<typeof instantlyWorkspaceSchema>;
+export type InstantlyAccount = z.infer<typeof instantlyAccountSchema>;
+export type InstantlyWarmupAggregate = z.infer<typeof instantlyWarmupAggregateSchema>;
+export type InstantlyWarmupAnalytics = z.infer<typeof instantlyWarmupAnalyticsSchema>;
+export type InstantlyCampaign = z.infer<typeof instantlyCampaignSchema>;
+export type InstantlyLead = z.infer<typeof instantlyLeadSchema>;
+export type InstantlyLeadsAddResponse = z.infer<typeof instantlyLeadsAddResponseSchema>;
+export type InstantlyBlockListEntry = z.infer<typeof instantlyBlockListEntrySchema>;

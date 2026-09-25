@@ -1,0 +1,1 @@
+{ "event_types": [ { "id": "reply_received", "label": "Reply received", "type": "email" } ] }

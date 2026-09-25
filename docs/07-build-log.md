@@ -58,6 +58,217 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-25 — Session 10 — sending infra recorded; U4 Instantly adapter
+
+**Unit:** U4, the Instantly adapter (`09` §U4), on `main`. Also docs: the sending infrastructure as built.
+**Status at end:** ✅ **tested locally** (63/63). The **read paths are verified with the provider** (live, read-only, 2026-09-25). The write paths are mocked only; they reach *verified* at U6 Part 2.
+
+**Did**
+- **Recorded the sending infrastructure as built.** This covers `06` §1/§5/§6, `STEP-11-RUNBOOK.md` §B.0–B.6 and §E, and the `09` §4 purchases row.
+  - **zyndixhq.com:** Google Workspace tenant with `amir@` and `ingrida@`. SPF, DKIM and DMARC verified; mail-tester 9.6 on both.
+  - **getzyndix.com:** Microsoft 365 Business Basic tenant (2 licences, admin account unlicensed) with `amir@` and `ingrida@`. DKIM enabled.
+    - mail-tester 9.6 on both mailboxes, so the **≥9 gate is met**.
+    - Both also showed **"You're not fully authenticated"** (operator correction), so authentication is **open pending a re-test**.
+  - **Instantly Growth**, with all 4 mailboxes connected and warmup running.
+  - **MillionVerifier:** 495 free credits.
+- **Sender pinning added to U5's scope and DoD** (operator requirement). The same local parts exist on both domains, so a lead keeps one `send_account` for its whole sequence. Instantly has no per-lead sender field, so the pinning is structural: one Instantly campaign per `send_account`, a lead→account binding in `0008`, and a new preflight reason `sender_mismatch`.
+- **Read the official Instantly API v2 docs before writing code:** the OpenAPI spec `api.instantly.ai/openapi/api_v2.json`, plus `developer.instantly.ai` (auth, rate limit, quickstart, webhook guide). Every endpoint in the adapter comes from them.
+- **`src/lib/integrations/instantly.ts`** is the client plus the three-way error taxonomy. It has no DB access and no `server-only`.
+  - **Reads:** workspace, accounts (cursor paging with a page cap), a single account, warmup analytics, campaigns, `findLeadInCampaign` (U5's reconcile primitive), and webhook event types.
+  - **Mutations:** `enrollLead` (single-lead `POST /api/v2/leads/add`, `skip_if_in_workspace` by default), pause/activate campaign, `deleteLead`, and `addBlockListEntry`.
+  - **`accountHealth()`** is pure, and the caller supplies the score threshold.
+  - **`createInstantlyReadClient()`** exposes no mutating operation at all.
+- **`instantly-types.ts`** holds the Zod schemas and the spec's enum label maps. It validates only the fields the adapter consumes, with no coercion, and passes everything else through.
+- **`__fixtures__/instantly/*.json`:** 22 synthetic fixtures shaped from the spec, using `example.invalid` addresses and zero UUIDs.
+- **`instantly.test.ts`** (`pnpm test:instantly`) is a `node:test` contract suite with fetch mocked.
+- **`scripts/live-instantly.ts`** is a read-only live check with an output-buffer secret self-check.
+
+**Files touched**
+- `src/lib/integrations/instantly.ts`, `instantly-types.ts`, `instantly.test.ts`: new
+- `src/lib/integrations/__fixtures__/instantly/` (22 files): new
+- `scripts/live-instantly.ts`: new
+- `package.json`: `test:instantly`
+- `docs/06-build-progress.md`:
+  - header
+  - §1: DNS split per domain, Instantly, mailboxes, mail-tester, key rows, MillionVerifier
+  - §2: U4 and U5 rows
+  - §5: six decisions
+  - §6: five issues
+- `docs/09-build-plan-v2.md`: U4 provider record, U5 sender pinning (scope and DoD), §4 purchases row
+- `docs/STEP-11-RUNBOOK.md`: as-built notes in §B.0/B.1/B.2/B.3/B.6, and §E checklist
+- `docs/07-build-log.md`: this entry
+
+**Verification**
+
+DNS (read-only, 2026-09-25):
+```
+$ dig +short MX/TXT/_dmarc/…_domainkey for both domains
+=== zyndixhq.com
+MX:     1 smtp.google.com.
+TXT(@): "v=spf1 include:_spf.google.com ~all"  (+ google-site-verification)
+DMARC:  "v=DMARC1; p=none; rua=mailto:dmarc@zyndix.com; pct=100; adkim=r; aspf=r"
+google._domainkey: "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjircPhdNMkHnbnj95…
+selector1/selector2._domainkey: (none — Google domain)
+track CNAME: (none)
+=== getzyndix.com
+MX:     0 getzyndix-com.mail.protection.outlook.com.
+TXT(@): "MS=ms97682603"  "v=spf1 include:spf.protection.outlook.com -all"
+DMARC:  (none)
+google._domainkey: (none — M365 domain)
+selector1._domainkey (CNAME): selector1-getzyndix-com._domainkey.zyndix.q-v1.dkim.mail.microsoft.
+selector2._domainkey (CNAME): selector2-getzyndix-com._domainkey.zyndix.q-v1.dkim.mail.microsoft.
+selector1 TXT (resolved): "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0o59YAbj/vnVlt+P1…
+selector2 TXT (resolved): "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt5F6tdkhgPWUgOtsH…
+track CNAME: (none)
+
+$ dig TXT _dmarc.getzyndix.com @1.1.1.1 | grep status   → status: NXDOMAIN
+$ dig TXT _dmarc.getzyndix.com @8.8.8.8 | grep status   → status: NXDOMAIN
+```
+Result: both getzyndix DKIM selectors **resolve**. **DMARC is absent on `getzyndix.com`**, which is the likely cause of mail-tester's "not fully authenticated". There is no tracking CNAME on either domain. (DKIM public keys truncated at 80 characters; they are public DNS, not secrets.)
+
+```
+$ pnpm exec tsc --noEmit                         → clean
+$ pnpm build                                     → clean
+$ pnpm exec eslint src/lib/integrations/instantly.ts src/lib/integrations/instantly-types.ts \
+    src/lib/integrations/instantly.test.ts scripts/live-instantly.ts   → exit 0
+$ pnpm lint                                      → ✖ 21 problems (17 errors, 4 warnings) — unchanged pre-existing backlog (09 §5)
+
+$ pnpm exec tsx --test --test-reporter=spec src/lib/integrations/instantly.test.ts
+▶ 09 §U4 DoD
+  ✔ 200 enroll parses to the typed created shape
+  ✔ 429 → InstantlyRetryableError carrying the parsed retry-after (seconds)
+  ✔ 429 → retry-after parsed from an HTTP-date
+  ✔ 429 without retry-after → retryAfterMs null (caller's backoff decides)
+  ✔ 422 → InstantlyPermanentError kind validation
+  ✔ 400 → InstantlyPermanentError kind validation
+  ✔ timeout raised after the request body flushed → InstantlyUncertainOutcomeError
+  ✔ abort raised after the request body flushed → InstantlyUncertainOutcomeError
+  ✔ unexpected field shape fails Zod and throws — no silent coercion
+  ✔ missing items array fails Zod
+▶ taxonomy completeness
+  ✔ the same timeout on a read → retryable, retried once
+  ✔ connect-phase ECONNREFUSED on a mutation → retryable, not uncertain
+  ✔ connect-phase ENOTFOUND on a mutation → retryable
+  ✔ ECONNRESET after dispatch on a mutation → uncertain (network_after_dispatch)
+  ✔ 500 on a mutation → uncertain (server_error), not retryable
+  ✔ 502 on pauseCampaign → uncertain with the campaign fingerprint
+  ✔ 500 on a read → retryable, retried once, then succeeds
+  ✔ 500 twice on a read → retryable after exactly two calls
+  ✔ a read retry honours retry-after, and skips a wait above 10s
+  ✔ a mutation is never retried inside the adapter (429 / 500 / timeout) — fetch called once   (3 tests)
+  ✔ 401 → auth / 402 → plan / 403 → scope   (3 tests)
+  ✔ 404 → permanent validation
+  ✔ 2xx with a non-JSON body on a mutation → uncertain (unreadable_response)
+  ✔ 2xx with a body that fails Zod on a mutation → uncertain, never a contract error
+  ✔ 2xx whose body stream fails mid-read on a mutation → uncertain
+  ✔ 200 enroll with inconsistent counts → uncertain (reconcile, do not resend)
+  ✔ missing key → permanent config error, and fetch is never called
+  ✔ enroll input without an email → permanent validation, no network
+  ✔ every error class extends InstantlyError
+▶ behaviour
+  ✔ skipped duplicate → { outcome: skipped, reason: already_enrolled }
+  ✔ blocklisted → { outcome: skipped, reason: blocklisted }
+  ✔ enroll request shape: POST /api/v2/leads/add, Bearer auth, workspace dedupe by default
+  ✔ dedupe: campaign turns workspace skipping off but keeps campaign skipping
+  ✔ pause and delete send no body and no content-type
+  ✔ addBlockListEntry posts bl_value
+  ✔ findLeadInCampaign matches case-insensitively and posts campaign + contacts
+  ✔ findLeadInCampaign returns null when absent
+  ✔ listAllAccounts follows next_starting_after across two pages
+  ✔ listAllAccounts stops at the page cap and says so
+  ✔ getAccount url-encodes the email
+  ✔ getWarmupAnalytics parses the aggregate and rejects an empty list without a call
+  ✔ workspace and webhook event types parse
+  ✔ parseRetryAfter: seconds, fractional, date, past date, garbage, absent
+▶ read-only client
+  ✔ exposes every read operation and no mutating operation
+  ✔ the full client's operations are exactly read ∪ mutating
+▶ accountHealth
+  ✔ healthy / paused account / connection error / maintenance / warmup banned / warmup paused /
+    setup pending / missing score → unknown, never 0 / unknown status code   (9 tests)
+  ✔ missing score stays null, not 0
+  ✔ score threshold is caller policy: judged only when given
+  ✔ worst reason wins
+▶ secrets
+  ✔ a key echoed back in an error body is redacted
+  ✔ the key appears in no message, String(), JSON or stack of any error thrown in this suite
+ℹ tests 63
+ℹ pass 63
+ℹ fail 0
+```
+(Trimmed: per-test durations. The three parametrised families are collapsed to one line each. Nothing else was edited.)
+
+Live, read-only, against the real account:
+```
+$ pnpm tsx scripts/live-instantly.ts --all
+=== live-instantly (read-only) ===
+INSTANTLY_API_KEY: configured
+
+--- whoami ---
+workspace: Zyndix
+plan_id: pid_g_v2
+accounts: 4
+
+--- accounts ---
+ingrida@getzyndix.com  provider=microsoft  status=active  warmup=active  daily_limit=30  warmup_score=100  setup_pending=false  warmup_start=2026-09-24T20:52:52.604Z  health=healthy
+amir@getzyndix.com  provider=microsoft  status=active  warmup=active  daily_limit=30  warmup_score=100  setup_pending=false  warmup_start=2026-09-24T20:51:25.193Z  health=healthy
+ingrida@zyndixhq.com  provider=google  status=active  warmup=active  daily_limit=30  warmup_score=100  setup_pending=false  warmup_start=2026-09-24T19:32:18.719Z  health=healthy
+amir@zyndixhq.com  provider=google  status=active  warmup=active  daily_limit=30  warmup_score=100  setup_pending=false  warmup_start=2026-09-24T19:31:13.984Z  health=healthy
+
+--- campaigns ---
+campaigns: 0
+
+--- warmup analytics ---
+ingrida@getzyndix.com  sent=3 received=11 inbox=3 spam=— health_score=100 (100%)
+amir@getzyndix.com  sent=3 received=27 inbox=3 spam=— health_score=100 (100%)
+ingrida@zyndixhq.com  sent=3 received=17 inbox=3 spam=— health_score=100 (100%)
+amir@zyndixhq.com  sent=3 received=30 inbox=3 spam=— health_score=100 (100%)
+
+--- webhooks probe (plan tier) ---
+webhook event types reachable: 18 types
+  email_sent, email_bounced, email_opened, email_link_clicked, reply_received, lead_unsubscribed, campaign_completed, account_error, lead_interested, lead_not_interested, lead_neutral, lead_meeting_booked, lead_meeting_completed, lead_closed, lead_out_of_office, lead_wrong_person, custom_label_any_positive, custom_label_any_negative
+
+secret material in output: none
+RESULT: pass
+```
+Result: **pass**.
+- Every live response parsed under the same Zod schemas as the fixtures, so the fixtures match reality.
+- The run made about 6 read requests. No Instantly data was created or changed.
+- `spam=—` is a null `landed_spam`, not zero.
+
+**Status claims, kept separate:**
+- U4 is **tested locally** (63/63).
+- **Verified with provider** covers workspace, accounts, campaigns list, warmup analytics and webhook event types.
+- Not exercised live: `getCampaign`, `findLeadInCampaign` (needs a campaign), and every mutation. Those stay mocked until U6 Part 2.
+
+**Decisions** (all in `06` §5)
+- **Instantly Growth, not Hypergrowth.** This supersedes 2026-08-23. The API and webhook event types work on Growth; webhook *creation* is unproven.
+- **Two tenants (Google plus Microsoft),** for provider diversity.
+- **A lead keeps one `send_account` for its whole sequence,** enforced structurally in U5.
+- **For mutations, any 5xx is uncertain, not retryable.** This refines `09` §U4's "429/5xx → retryable", because a 5xx after a POST may have committed. 429 and connect-phase failures stay retryable.
+- **Enrollment is a single-lead `leads/add` with `skip_if_in_workspace`.** Instantly has no idempotency-key header, and only the bulk endpoint reports skips.
+- **The adapter never retries a mutation** (the U2 jobs own that). The health score threshold is caller policy, and a missing score is `unknown`, never 0.
+
+**Problems hit**
+- **The spec and the guide disagree on webhook event names,** and the live list matches neither exactly: it has `custom_label_any_*`, and no `auto_reply_received` or `lead_no_show`. Recorded for U6, which must use the live list.
+- **`POST /api/v2/leads` (single create) does not document its skip response,** hence the bulk endpoint with one lead.
+- **`getzyndix.com` has no DMARC record.** This is an operator DNS fix, not code.
+- **Accounts show `daily_limit=30`,** while the runbook says 0 until U6. Nothing can send without a campaign, and changing it is a live-settings write, so it was not touched. Raised with the operator.
+- None in code. `tsc` passed on the first run.
+
+**Open, carried forward**
+- **Operator:** add the DMARC TXT on `getzyndix.com`, then re-run mail-tester on both getzyndix mailboxes. Authentication stays open until it passes.
+- **Operator:** confirm the intended Instantly `daily_limit` (currently 30 per account).
+- **Operator, before U6:** set up the tracking CNAME (`track.`) on both domains.
+- **Start of U6:** prove webhook creation on Growth. That is a write, so ask first. If it is refused, U6 needs a plan change or a polling fallback.
+- **U5:** sender pinning (`sender_mismatch`); set `send_accounts.ramp_started_on`; treat `InstantlyUncertainOutcomeError` as the outbox `uncertain` state and reconcile via `findLeadInCampaign`; check `reservation.state` on idempotency replays (from Session 9).
+- **U5:** the key's write scopes (`leads:create`, `leads:delete`, `campaigns:update`) are first exercised here. A missing scope surfaces as `kind:'scope'`.
+
+**Next action**
+- **U5: send stage, preflight, guards** (`09` §U5). Plan mode, because it touches sending. Start with migration `0008` (the touch approval binding plus the lead→`send_account` binding) and `0008b` outbox. Build `sending/guard.ts`: the `zyndix.com` block and the allowed list `zyndixhq.com`/`getzyndix.com`. Inject the U4 adapter through `deps`, as `draft/core.ts` does.
+
+---
+
 ### 2026-09-24 — Session 9 — U3 capacity ledger and send windows
 
 **Unit:** U3 — Scheduler: atomic capacity ledger and send windows (`09` §U3), on `main`

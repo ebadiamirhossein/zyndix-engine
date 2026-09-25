@@ -1,6 +1,6 @@
 # Sending Infrastructure Runbook
 
-**Owner:** Amir · **Created:** 2026-08-23 · **Rewritten:** 2026-09-21 (Session 3) · **Revised:** 2026-09-21 (Session 4)
+**Owner:** Amir · **Created:** 2026-08-23 · **Rewritten:** 2026-09-21 (Session 3) · **Revised:** 2026-09-21 (Session 4) · **Recorded as built:** 2026-09-25 (Session 10)
 **Type:** manual setup task — not a Claude Code unit.
 **Implements the purchase side of:** `09-build-plan-v2.md` §4.
 
@@ -15,7 +15,7 @@
 | Clock | What | When |
 |---|---|---|
 | **A** | Two sending domains + 301 redirects | ✅ **Done 2026-09-21** |
-| **B** | Instantly + four mailboxes + MillionVerifier credits **+ all DNS authentication** | **Start of U2** (≈ day 7) |
+| **B** | Instantly + four mailboxes + MillionVerifier credits **+ all DNS authentication** | ✅ **Bought 2026-09-24**, warmup running — open items in §E |
 
 ---
 
@@ -62,6 +62,18 @@ One piece of free margin if you want it: **MX, SPF and DMARC do not need Workspa
 
 ### B.0 DNS and authentication — both domains *(do this first)*
 
+> **As built (2026-09-25).** The two domains ended up on **different providers**, so they have different records. `dig` on 2026-09-25:
+>
+> | | `zyndixhq.com` — Google Workspace | `getzyndix.com` — Microsoft 365 |
+> |---|---|---|
+> | MX | `1 smtp.google.com.` | `0 getzyndix-com.mail.protection.outlook.com.` |
+> | SPF | `v=spf1 include:_spf.google.com ~all` | `v=spf1 include:spf.protection.outlook.com -all` |
+> | DKIM | `google._domainkey` TXT published | `selector1._domainkey` → `selector1-getzyndix-com._domainkey.zyndix.q-v1.dkim.mail.microsoft.` and `selector2` likewise — **both resolve** to `v=DKIM1` keys |
+> | DMARC | `v=DMARC1; p=none; rua=mailto:dmarc@zyndix.com; pct=100; adkim=r; aspf=r` | **missing — `_dmarc.getzyndix.com` is NXDOMAIN** |
+> | `track` CNAME | not set | not set |
+>
+> **Open for `getzyndix.com`:** publish the same DMARC TXT as `zyndixhq.com` (below), then re-run mail-tester on both getzyndix mailboxes. The Google records below apply to `zyndixhq.com` only; the M365 equivalents are shown in the table.
+
 Do this **first on purchase day**, as soon as the Workspace mailboxes exist. Everything else here can wait; the DKIM clock cannot.
 
 DNS at Cloudflare (consistent with `zyndix.com`) or Namecheap. Be consistent.
@@ -100,11 +112,24 @@ The tracking CNAME comes last — its target is shown by Instantly, so it waits 
 
 ### B.1 Instantly — Hypergrowth ($97/mo)
 
+> **As built: Instantly Growth**, bought 2026-09-24 (live `plan_id pid_g_v2`). This supersedes the Hypergrowth recommendation below (`06` §5, 2026-09-25). The API v2 works on Growth. Whether Growth can *create* webhooks is unproven — check at the start of U6.
+
 Growth at $47 covers the real volume (25–50 sends/week for months). Hypergrowth buys A/B testing, premium support and headroom. Since budget is not the binding constraint and deliverability support matters when something breaks mid-campaign, take Hypergrowth. Every tier includes unlimited inboxes and unlimited warmup — you are not paying for inbox count.
 
 Skip: SuperSearch credits (you have Apollo), Instantly CRM (you have Attio), AI Sales Agent (your engine *is* the agent — that is the case study).
 
 ### B.2 Four mailboxes
+
+> **As built (2026-09-25)** — this supersedes the table below:
+>
+> | Domain | Tenant | Mailbox | Licence |
+> |---|---|---|---|
+> | `zyndixhq.com` | Google Workspace (own tenant) | `amir@` | licensed |
+> | `zyndixhq.com` | Google Workspace (own tenant) | `ingrida@` | licensed |
+> | `getzyndix.com` | Microsoft 365 Business Basic (own tenant; admin account unlicensed) | `amir@` | licensed |
+> | `getzyndix.com` | Microsoft 365 Business Basic (own tenant; admin account unlicensed) | `ingrida@` | licensed |
+>
+> **Same local parts on both domains.** A lead must therefore keep **one** sending mailbox for its whole sequence and never rotate mid-sequence: a follow-up from `amir@getzyndix.com` after a first touch from `amir@zyndixhq.com` looks like a different sender with the same name. Enforced in code at U5 (`09` §U5).
 
 Two per domain. Google Workspace Business Starter, ~€6–7 per mailbox/month. **Use real human names matching real people. Do not invent personas.**
 
@@ -118,6 +143,8 @@ Two per domain. Google Workspace Business Starter, ~€6–7 per mailbox/month. 
 Each mailbox needs a profile photo and a full signature with the Zyndix name, address and a working link to `zyndix.com`. An empty-profile sender is a spam signal.
 
 ### B.3 MillionVerifier credits
+
+> **As built:** account holds **495 free credits** (2026-09-25) — enough for testing. Top up before sending volume.
 
 Pay-as-you-go, ~$37 for a starter block. No subscription. The key is already in `MILLIONVERIFIER_API_KEY`; this is topping up the balance that U5's preflight will spend.
 
@@ -140,6 +167,8 @@ Send one email from each of the four mailboxes to the address at **mail-tester.c
 **Every mailbox scores ≥ 9/10. Do not start warmup below 9.** Fix and retest — a mailbox that starts warmup misconfigured spends three weeks building a bad reputation instead of a good one.
 
 ### B.6 Turn on warmup, then leave it alone
+
+> **As built:** all four mailboxes connected to Instantly; warmup started **2026-09-24** (19:31–20:52 UTC per Instantly's `timestamp_warmup_start`), no campaigns. Live check 2026-09-25: all four warmup active, health score 100. Each account currently shows `daily_limit=30` in Instantly — confirm that is intended; nothing can send while there are no campaigns.
 
 | Setting | Value |
 |---|---|
@@ -187,14 +216,16 @@ U6's DoD requires the live drill to send to an **operator-owned mailbox, never a
 - [x] Both domains 301 to `zyndix.com`
 - [x] Domain names recorded in §A.1 above and in `06-build-progress.md` §1 — `zyndixhq.com`, `getzyndix.com`
 
-**Clock B — at U2 (≈ day 7)**
-- [ ] MX, SPF, DKIM (authentication *started*), DMARC verified by `dig` on both domains — §B.0
-- [ ] Instantly Hypergrowth active
-- [ ] Four mailboxes live with photos and signatures
-- [ ] MillionVerifier credits topped up
-- [ ] Tracking CNAME live on both domains; link tracking OFF, open tracking ON
-- [ ] All four mailboxes score ≥9/10 on mail-tester
-- [ ] Warmup running with daily send limit 0
+**Clock B — bought 2026-09-24**
+- [x] `zyndixhq.com`: MX, SPF, DKIM, DMARC verified by `dig` (2026-09-25) — §B.0
+- [ ] `getzyndix.com`: MX, SPF, DKIM resolve by `dig` — **DMARC missing (NXDOMAIN)** — §B.0
+- [x] Instantly active — **Growth**, not Hypergrowth (§B.1)
+- [x] Four mailboxes live (`amir@`, `ingrida@` on each domain) — photos and signatures **not recorded**
+- [x] MillionVerifier credits: 495 free, enough for testing — top up before volume
+- [ ] Tracking CNAME live on both domains; link tracking OFF, open tracking ON — no `track` CNAME on either yet
+- [x] All four mailboxes score ≥9/10 on mail-tester — **9.6/10 each** (operator-reported)
+- [ ] `getzyndix.com` mailboxes re-tested as **authenticated** on mail-tester (first test: "You're not fully authenticated"; DKIM had just been enabled; DMARC absent)
+- [x] Warmup running (started 2026-09-24) — daily send limit: accounts show `daily_limit=30`, operator to confirm
 - [ ] Day-28 re-test passed
 
 **Parallel**

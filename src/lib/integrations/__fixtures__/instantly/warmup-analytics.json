@@ -1,0 +1,13 @@
+{
+  "email_date_data": {
+    "sender.one@alpha.example.invalid": {
+      "2026-09-25": { "sent": 4, "landed_inbox": 4, "landed_spam": 0, "received": 3 }
+    }
+  },
+  "aggregate_data": {
+    "sender.one@alpha.example.invalid": {
+      "sent": 4, "received": 3, "landed_inbox": 4, "landed_spam": 0,
+      "health_score": 100, "health_score_label": "100%"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "status": "success",
+  "total_sent": 1,
+  "leads_uploaded": 1,
+  "in_blocklist": 0,
+  "blocklist_used": null,
+  "duplicated_leads": 0,
+  "skipped_count": 0,
+  "invalid_email_count": 0,
+  "incomplete_count": 0,
+  "duplicate_email_count": 0,
+  "remaining_in_plan": 994,
+  "created_leads": [
+    { "index": 0, "id": "00000000-0000-4000-8000-00000000d001", "email": "prospect@target.example.invalid" }
+  ]
+}

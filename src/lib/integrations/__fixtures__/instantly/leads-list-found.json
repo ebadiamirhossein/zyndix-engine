@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "id": "00000000-0000-4000-8000-00000000d001",
+      "timestamp_created": "2026-09-25T10:10:00.000Z",
+      "timestamp_updated": "2026-09-25T10:10:00.000Z",
+      "organization": "00000000-0000-4000-8000-00000000a001",
+      "campaign": "00000000-0000-4000-8000-00000000c001",
+      "email": "Prospect@Target.example.invalid",
+      "status": 1,
+      "email_open_count": 0,
+      "email_reply_count": 0,
+      "email_click_count": 0,
+      "company_domain": "target.example.invalid",
+      "status_summary": {}
+    }
+  ],
+  "next_starting_after": null
+}

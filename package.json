@@ -11,7 +11,8 @@
     "gen:types": "supabase gen types typescript --db-url \"$SUPABASE_DB_URL\" --schema public > src/types/database.ts",
     "test:jobs": "tsx scripts/test-u2-jobs.ts",
     "test:source-filters": "tsx --test src/lib/stages/source/filters.test.ts",
-    "test:scheduler": "tsx scripts/test-u3-scheduler.ts"
+    "test:scheduler": "tsx scripts/test-u3-scheduler.ts",
+    "test:instantly": "tsx --test src/lib/integrations/instantly.test.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

@@ -1,0 +1,11 @@
+{
+  "id": "00000000-0000-4000-8000-00000000c001",
+  "name": "Fixture Campaign",
+  "status": 2,
+  "campaign_schedule": { "schedules": [] },
+  "timestamp_created": "2026-09-25T10:00:00.000Z",
+  "timestamp_updated": "2026-09-25T10:05:00.000Z",
+  "stop_on_reply": true,
+  "open_tracking": true,
+  "link_tracking": false
+}
