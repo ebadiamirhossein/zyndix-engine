@@ -98,6 +98,8 @@ type Mock = {
   reply: ReplyToEmailInput[];
   listEmails: ListEmailsParams[];
   findLead: Array<{ campaignId: string; email: string }>;
+  /** getAccount + getWarmupAnalytics reads (Session 13: a paused sender makes none). */
+  health: string[];
   enrollBehaviour: "created" | "uncertain" | "already";
   anchorEmail: InstantlyEmail | null;
   findLeadResult: boolean;
@@ -109,6 +111,7 @@ const mock: Mock = {
   reply: [],
   listEmails: [],
   findLead: [],
+  health: [],
   enrollBehaviour: "created",
   anchorEmail: null,
   findLeadResult: true,
@@ -165,9 +168,11 @@ function deps(now: Date, hooks?: SendDeps["hooks"]): SendDeps {
         } as InstantlyEmail;
       },
       async getAccount(email) {
+        mock.health.push(`getAccount:${email}`);
         return healthyAccount(email);
       },
       async getWarmupAnalytics(emails) {
+        mock.health.push(`getWarmupAnalytics:${emails.join(",")}`);
         return { aggregate_data: Object.fromEntries(emails.map((e) => [e, { health_score: 100 }])) };
       },
       async findLeadInCampaign(campaignId, email) {
@@ -623,6 +628,29 @@ async function suppressionBetween(accountC: string): Promise<void> {
   assert("suppression: send_refused event records the final-preflight verdicts", refused.length === 1 && (refused[0].detail as Record<string, unknown>).phase === "final_preflight");
 }
 
+function providerCalls(): number {
+  return mock.enroll.length + mock.reply.length + mock.listEmails.length + mock.findLead.length + mock.health.length;
+}
+
+async function pausedSender(accountC: string): Promise<void> {
+  console.log("\n--- paused sender → refused with ZERO provider calls of any kind (Session 13, U6 DoD) ---");
+  const f = await createLead("paused");
+  const touch = await createApprovedTouch(f, { sendAccountId: accountC });
+  const { error } = await db.from("send_accounts").update({ health: "paused", paused_reason: "test_u5 paused" }).eq("id", accountC);
+  if (error) throw new Error(`pause: ${error.message}`);
+  const before = providerCalls();
+  const outcome = await runSendJob(deps(INSIDE), jobCtx(touch));
+  const after = providerCalls();
+  const restore = await db.from("send_accounts").update({ health: "ok", paused_reason: null }).eq("id", accountC);
+  if (restore.error) throw new Error(`unpause: ${restore.error.message}`);
+  assert(
+    "paused: refused sender_unhealthy, lead still approved",
+    outcome.kind === "refused" && outcome.verdicts.some((v) => v.reason === "sender_unhealthy") && (await leadRow(f.leadId)).state === "approved",
+    JSON.stringify(outcome.kind === "refused" ? outcome.verdicts : outcome),
+  );
+  assert("paused: zero provider calls (no enroll, reply, listEmails, findLead, getAccount or warmup read)", after === before, `${before} → ${after}`);
+}
+
 async function signatureEditedAfterApproval(accountC: string): Promise<void> {
   console.log("\n--- signature edited after approval → stale_approval (Session 12) ---");
   const f = await createLead("sig-edit");
@@ -769,6 +797,7 @@ async function main(): Promise<void> {
       await workerCrash(accountA);
       await suppressionBetween(accountC);
       await signatureEditedAfterApproval(accountC);
+      await pausedSender(accountC);
       await timezoneCases(accountC);
     } catch (error) {
       assert("no unexpected exception", false, error instanceof Error ? `${error.name}: ${error.message}` : String(error));

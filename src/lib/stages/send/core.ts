@@ -272,7 +272,11 @@ async function buildContext(
     ).length;
   }
 
-  const anchor = step > 1 ? await findStepOneAnchor(deps, lead) : null;
+  // A sender the engine has paused (bounce auto-pause, stop_processing_stale)
+  // is refused by preflight on `health` alone, so no provider call is made
+  // for it at all: no health/warmup read, no anchor lookup (U6 DoD).
+  const senderPaused = sender.health !== "ok";
+  const anchor = step > 1 ? await findStepOneAnchor(deps, lead, { providerLookup: !senderPaused }) : null;
 
   const ctx: PreflightContext = {
     now,
@@ -305,7 +309,7 @@ async function buildContext(
       instantly_campaign_id: sender.instantly_campaign_id,
       signature_text: sender.signature_text,
     },
-    providerHealth: await providerHealth(deps, sender.identifier ?? "", settings.policy),
+    providerHealth: senderPaused ? null : await providerHealth(deps, sender.identifier ?? "", settings.policy),
     suppression: { email: suppression.email, domain: suppression.domain },
     hasReply: (replyCount ?? 0) > 0,
     companyConflicts,
@@ -326,7 +330,11 @@ type StepOneAnchor = { emailId: string; threadId: string | null; subject: string
  * step-1 outbox row when known, else looked up with GET /api/v2/emails and
  * persisted. Null → thread_anchor_missing.
  */
-async function findStepOneAnchor(deps: SendDeps, lead: LeadRow): Promise<StepOneAnchor | null> {
+async function findStepOneAnchor(
+  deps: SendDeps,
+  lead: LeadRow,
+  options: { providerLookup: boolean },
+): Promise<StepOneAnchor | null> {
   const { data: rows, error } = await deps.db
     .from("outbox")
     .select("*")
@@ -350,6 +358,7 @@ async function findStepOneAnchor(deps: SendDeps, lead: LeadRow): Promise<StepOne
   if (first.provider_email_id) {
     return { emailId: first.provider_email_id, threadId: first.provider_thread_id, subject: stepOne.subject, outboxId: first.id };
   }
+  if (!options.providerLookup) return null;
   const stepOneSender = await loadAccount(deps.db, first.send_account_id);
   if (!lead.email || !stepOneSender?.identifier) return null;
   let page;

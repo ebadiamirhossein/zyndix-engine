@@ -304,7 +304,8 @@ async function authCases(a: { campaign: string; identifier: string }): Promise<v
   const before = { events: await count("webhook_events"), exceptions: await count("exceptions"), leadEvents: await count("lead_events") };
   const p = payload("reply_received", { email: `x@${TAG}.example.invalid` }, a);
   const none = await post(p, { token: null });
-  const wrong = await post(p, { token: `${SECRET.slice(0, -1)}0` });
+  // Flip the last hex digit; appending a fixed "0" equals the secret 1 time in 16.
+  const wrong = await post(p, { token: `${SECRET.slice(0, -1)}${SECRET.endsWith("0") ? "1" : "0"}` });
   const unset = await post(p, { deps: deps({ secret: undefined }) });
   const badJson = await post(null, { rawBody: "{not json" });
   const after = { events: await count("webhook_events"), exceptions: await count("exceptions"), leadEvents: await count("lead_events") };

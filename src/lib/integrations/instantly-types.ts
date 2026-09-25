@@ -213,6 +213,15 @@ export const instantlyEmailSchema = z
     campaign_id: z.string().nullable().optional(),
     ue_type: z.number().nullable().optional(),
     step: z.string().nullable().optional(),
+    // Documented Email fields the reply poll (U6 reconcile) reads.
+    timestamp_email: z.string().nullable().optional(),
+    from_address_email: z.string().nullable().optional(),
+    lead_id: z.string().nullable().optional(),
+    body: z.object({ text: z.string().nullable().optional(), html: z.string().nullable().optional() }).passthrough().nullable().optional(),
+    content_preview: z.string().nullable().optional(),
+    /** 0 = false, 1 = true (OpenAPI Email.is_auto_reply). */
+    is_auto_reply: z.number().nullable().optional(),
+    i_status: z.number().nullable().optional(),
   })
   .passthrough();
 

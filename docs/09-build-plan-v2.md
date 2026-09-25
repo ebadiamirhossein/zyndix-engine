@@ -288,6 +288,14 @@ Only after Part 2 may `06-build-progress.md` say **verified with provider**.
     - the threading-header check;
     - the first live `leads:create` / `emails:create` / `campaigns:update`.
 
+**As built, session 2 of 3 (2026-09-25, Session 13)** — Part 1 complete, `tested locally`. Evidence in `07` Session 13.
+- **Reconcile.** `src/lib/reconcile/{core,jobs}.ts` + `src/lib/reconcile.ts` (server wiring). Jobs `reconcile.stale_stop` and `reconcile.reply_poll`, not on cron (U9). `stop_processing_stale` pauses via the new shared `pauseSender` (also used by the bounce auto-pause). The poll feeds `processInstantlyEvent`; `GET /emails` is spaced ≤20 req/min by `src/lib/integrations/rate-limit.ts` inside the adapter. Decisions in `06` §5.
+- **Deviation.** No cursor table (the window is derived from awaiting leads' sends); `reply_poll_truncated` exceptions are resolved by the job itself (`resolved_by reconcile.reply_poll`), not by a human.
+- **Zero provider calls for a paused sender** at send (`stages/send/core.ts`).
+- **Traversal.** `scripts/test-u6-traversal.ts` (`pnpm test:traversal`, 62/62). Stages gained an optional `leadIds` scope and verify an injectable Apollo client, so tests never pick real leads.
+- **Operator items.** The 2 Make.com webhooks deleted; the 4 drafts redrafted under v8 (new `pending_approval → drafting` / `approved → drafting` edges, `scripts/redraft-drafts.ts`).
+- **Remaining for session 3.** The Part 2 live drill with its gates (fresh tunnel webhook with approval, operator-owned recipient only, threading headers, first live `leads:create` / `emails:create` / `campaigns:update`), and confirming webhook `email_id` = `GET /emails` `id`.
+
 ---
 
 #### U7 — Reply classifier and deterministic routing policy
@@ -709,6 +717,7 @@ Carried from `05-build-plan.md` §4, still valid:
 - **Store location at sourcing/verify** (operator, Session 12): persist the person's city/state/country and the company's `hq_state`/`hq_city` from the Apollo data already fetched, so future leads get a timezone at no extra credit cost. **The person's own location wins over HQ** when both exist. Natural home: U15 (or earlier, as a small fix).
 - **Per-sender writer persona**: drafts are written as Amir, so `send_policy.assignable_senders` limits approval to the amir@ mailboxes. Enabling ingrida@ needs a persona per sender (the writer prompt and the signature must agree).
 - **Exclude `/api/webhooks/*` from the proxy matcher** at deploy: today every webhook delivery triggers a Supabase `getUser()` round trip (harmless, wasted).
+- **`scripts/draft-target-leads.ts` is deprecated** (Session 13): it hard-deletes touches and writes `leads.state` directly. Use `scripts/redraft-drafts.ts` (kills, never deletes; `lib/state` edges). Delete the old script in a cleanup session.
 - **`0002_transition_lead.sql` is `security definer` with no `set search_path`** — Supabase's linter calls this `function_search_path_mutable`. Fixing it means a new migration that replaces the function; it does not belong inside a feature unit.
 
 ---

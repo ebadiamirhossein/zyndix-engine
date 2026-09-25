@@ -17,6 +17,7 @@ import {
   parseRetryAfter,
 } from "./instantly";
 import type { InstantlyAccount } from "./instantly-types";
+import { createSpacingLimiter, INSTANTLY_EMAILS_MIN_INTERVAL_MS } from "./rate-limit";
 
 // Contract suite for the Instantly adapter (09 §U4). fetch is mocked: no
 // network, no DB. Fixtures are synthetic, shaped from the official OpenAPI spec.
@@ -63,6 +64,8 @@ function client(fetchImpl: typeof fetch) {
     sleep: async (ms) => {
       sleeps.push(ms);
     },
+    // Spacing is tested on its own below; contract tests must not wait.
+    emailsLimiter: { take: async () => undefined },
   });
 }
 
@@ -617,6 +620,68 @@ describe("U5 additions: campaigns and threaded replies", () => {
     const campaign = await client(impl).getCampaign(CAMPAIGN);
     assert.equal(campaign.email_list, undefined);
     assert.equal(campaign.open_tracking, true);
+  });
+});
+
+describe("U6 session 2: received emails and the 20 req/min spacing", () => {
+  test("a received page parses the documented reply fields (body.text, is_auto_reply 0/1, lead)", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("emails-received")));
+    const page = await client(impl).listEmails({
+      eaccount: "amir@sender.example.invalid",
+      emailType: "received",
+      sortOrder: "asc",
+      minTimestampCreated: "2026-09-20T00:00:00.000Z",
+    });
+    const url = new URL(calls[0].url);
+    assert.equal(url.searchParams.get("email_type"), "received");
+    assert.equal(url.searchParams.get("eaccount"), "amir@sender.example.invalid");
+    assert.equal(url.searchParams.get("sort_order"), "asc");
+    assert.equal(page.items.length, 2);
+    assert.equal(page.items[0].ue_type, 2);
+    assert.equal(page.items[0].body?.text, "Thanks, tell me more.");
+    assert.equal(page.items[0].is_auto_reply, 0);
+    assert.equal(page.items[1].is_auto_reply, 1);
+    assert.equal(page.items[0].lead, EMAIL);
+    assert.equal(page.next_starting_after, "00000000-0000-4000-8000-0000000e0102");
+  });
+
+  test("every listEmails call takes a limiter slot before the request", async () => {
+    const order: string[] = [];
+    const { impl } = mockFetch(() => {
+      order.push("fetch");
+      return jsonResponse(200, fixture("emails-received"));
+    });
+    const limited = createInstantlyClient({
+      apiKey: SENTINEL_KEY,
+      fetch: impl,
+      emailsLimiter: {
+        take: async () => {
+          order.push("take");
+        },
+      },
+    });
+    await limited.listEmails({ emailType: "received" });
+    await limited.listEmails({ emailType: "sent" });
+    assert.deepEqual(order, ["take", "fetch", "take", "fetch"]);
+  });
+
+  test("the spacing limiter waits out the gap: 3 calls at t=0 → sleeps 3050, 3050", async () => {
+    let clock = 0;
+    const waits: number[] = [];
+    const limiter = createSpacingLimiter({
+      minIntervalMs: INSTANTLY_EMAILS_MIN_INTERVAL_MS,
+      now: () => clock,
+      sleep: async (ms) => {
+        waits.push(ms);
+        clock += ms;
+      },
+    });
+    await Promise.all([limiter.take(), limiter.take(), limiter.take()]);
+    assert.deepEqual(waits, [3050, 3050]);
+    clock += 10_000;
+    await limiter.take();
+    assert.deepEqual(waits, [3050, 3050], "no wait after the gap has passed");
+    assert.ok(INSTANTLY_EMAILS_MIN_INTERVAL_MS * 20 >= 60_000, "never more than 20 calls per minute");
   });
 });
 

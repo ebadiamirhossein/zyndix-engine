@@ -23,6 +23,8 @@ type VerifyDeps = {
   db: SupabaseClient<Database>;
   millionverifier: MillionVerifierClient;
   transition: ReturnType<typeof createStateStore>["transition"];
+  /** Injected by tests; defaults to the real client (reveal is the only call). */
+  apollo?: Pick<ReturnType<typeof createApolloClient>, "revealPersonEmail">;
 };
 
 type LeadPick = {
@@ -114,11 +116,15 @@ function domainFromEmail(email: string): string | null {
 
 export async function runVerifyStage(
   deps: VerifyDeps,
-  options?: { limit?: number },
+  options?: {
+    limit?: number;
+  /** Only these leads (scripts and tests; production passes nothing and picks by state). */
+  leadIds?: string[];
+  },
 ): Promise<VerifyStageSummary> {
   const batchCap = options?.limit ?? verifyBatchSize();
   const cap = revealCap();
-  const apollo = createApolloClient();
+  const apollo = deps.apollo ?? createApolloClient();
 
   const summary: VerifyStageSummary = {
     leads_picked: 0,
@@ -132,12 +138,14 @@ export async function runVerifyStage(
     failed: 0,
   };
 
-  const { data: rows, error: pickError } = await deps.db
+  let pickQuery = deps.db
     .from("leads")
     .select(
       "id, company_id, apollo_person_id, email, first_name, last_name, linkedin_url, do_not_contact, companies!inner(domain, name)",
     )
-    .eq("state", "qualified")
+    .eq("state", "qualified");
+  if (options?.leadIds) pickQuery = pickQuery.in("id", options.leadIds);
+  const { data: rows, error: pickError } = await pickQuery
     .order("created_at", { ascending: true })
     .limit(batchCap);
 

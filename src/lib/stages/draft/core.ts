@@ -13,6 +13,7 @@ import {
   getActiveCtaText,
   interpolateWriterPrompt,
 } from "@/lib/settings/cta";
+import { findSignOff } from "@/lib/sending/approval";
 import { getSegmentProofPoint } from "@/lib/settings/proof";
 import { createStateStore } from "@/lib/state/core";
 import type {
@@ -198,6 +199,7 @@ async function writeDraftWithGuard(
   let totalCost = 0;
   let wordCountRetryHint: string | null = null;
   let guardRetryHint: string | null = null;
+  let signOffRetryHint: string | null = null;
   const evidence = asEvidence(lead.qualification.evidence);
 
   const numberSourceTexts = [
@@ -217,6 +219,9 @@ async function writeDraftWithGuard(
     }
     if (wordCountRetryHint) {
       userParts.push(wordCountRetryHint);
+    }
+    if (signOffRetryHint) {
+      userParts.push(signOffRetryHint);
     }
     userParts.push(JSON.stringify(writerInput, null, 2));
 
@@ -275,6 +280,24 @@ async function writeDraftWithGuard(
     }
 
     const output = parsed.data;
+
+    // writer_prompt_email v8 forbids a sign-off (the mailbox signature is
+    // appended at send); approval refuses a self-signed body, so catch it here.
+    const signOff = findSignOff(output.body);
+    if (signOff) {
+      rejections.push(`attempt ${attempt}: signs itself (${JSON.stringify(signOff)})`);
+      console.warn(`[draft] sign-off rejection for lead ${lead.id} — ${signOffRetryHint ? "no retry left" : "retrying"}`);
+      if (!signOffRetryHint) {
+        signOffRetryHint = [
+          `REVISION REQUIRED: your previous body ended with a sign-off (${JSON.stringify(signOff)}).`,
+          "Do NOT sign off and do NOT write any name at the end; the signature is added separately.",
+          'Return ONLY {"subject":"...","body":"..."}.',
+        ].join(" ");
+        attempt -= 1;
+      }
+      continue;
+    }
+
     const guard = checkGenericDraft({
       body: output.body,
       problemHypothesis: lead.qualification.problem_hypothesis,
@@ -329,8 +352,9 @@ async function writeDraftWithGuard(
 async function pickDraftingLeads(
   db: SupabaseClient<Database>,
   limit: number,
+  leadIds?: string[],
 ): Promise<LeadPick[]> {
-  const { data, error } = await db
+  let query = db
     .from("leads")
     .select(
       `
@@ -353,9 +377,9 @@ async function pickDraftingLeads(
       )
     `,
     )
-    .eq("state", "drafting")
-    .order("created_at", { ascending: true })
-    .limit(limit);
+    .eq("state", "drafting");
+  if (leadIds) query = query.in("id", leadIds);
+  const { data, error } = await query.order("created_at", { ascending: true }).limit(limit);
 
   if (error) {
     throw new Error(`Failed to pick drafting leads: ${error.message}`);
@@ -387,7 +411,11 @@ async function pickDraftingLeads(
 
 export async function runDraftStage(
   deps: DraftDeps,
-  options?: { limit?: number },
+  options?: {
+    limit?: number;
+  /** Only these leads (scripts and tests; production passes nothing and picks by state). */
+  leadIds?: string[];
+  },
 ): Promise<DraftStageSummary> {
   const limit = options?.limit ?? draftBatchSize();
   const summary: DraftStageSummary = {
@@ -427,7 +455,7 @@ export async function runDraftStage(
   const promptVersion = writerSetting.version;
   const model = await resolveModel(deps.getActiveSetting);
 
-  const leads = await pickDraftingLeads(deps.db, limit);
+  const leads = await pickDraftingLeads(deps.db, limit, options?.leadIds);
   summary.leads_picked = leads.length;
 
   for (const lead of leads) {

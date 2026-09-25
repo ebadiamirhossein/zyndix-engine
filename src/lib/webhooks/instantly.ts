@@ -57,7 +57,15 @@ export type WebhookOutcome =
   | { kind: "processed"; eventId: string; action: string; leadId?: string }
   | { kind: "exception"; eventId: string; exception: ExceptionKind };
 
-export type ExceptionKind = "unmatched_recipient" | "foreign_campaign" | "stop_failed" | "invalid_payload" | "unexpected_state";
+export type ExceptionKind =
+  | "unmatched_recipient"
+  | "foreign_campaign"
+  | "stop_failed"
+  | "invalid_payload"
+  | "unexpected_state"
+  // Raised by the reconcile job (src/lib/reconcile/core.ts), not by a delivery.
+  | "stop_processing_stale"
+  | "reply_poll_truncated";
 
 export class WebhookProcessingError extends Error {
   constructor(message: string) {
@@ -369,6 +377,18 @@ function monthIndex(token: string): number {
 
 /** Auto-reply: recorded, nothing else — the lead stays where it is and nothing is cancelled. */
 const handleAutoReply: Handler = async (deps, { eventId, payload, lead, now }) => {
+  // The same auto-reply can arrive by webhook and by the reconcile poll.
+  if (payload.email_id) {
+    const { data: seen, error } = await deps.db
+      .from("lead_events")
+      .select("id")
+      .eq("lead_id", lead.id)
+      .eq("event", "auto_reply")
+      .eq("detail->>email_id", payload.email_id)
+      .limit(1);
+    if (error) throw new WebhookProcessingError(`auto-reply lookup: ${error.message}`);
+    if ((seen ?? []).length > 0) return { kind: "processed", eventId, action: "duplicate_auto_reply", leadId: lead.id };
+  }
   await logEvent(deps.db, lead.id, "auto_reply", {
     webhook_event_id: eventId,
     event_type: payload.event_type,
@@ -385,6 +405,21 @@ const TERMINAL_STATES: readonly LeadState[] = ["suppressed", "manual_hold", "bou
 
 /** Human reply: freeze first, classify later (U7). */
 const handleReply: Handler = async (deps, { eventId, payload, lead, now }) => {
+  // Dedupe by Instantly email id across delivery paths (webhook and reconcile
+  // poll, either order). Only once the first delivery finished the freeze —
+  // the lead is frozen or terminal — is the second a no-op. A half-finished
+  // earlier attempt falls through and replays every idempotent step.
+  if (payload.email_id && (await hasInboundTouch(deps.db, lead.id, payload.email_id))) {
+    const state = await currentState(deps.db, lead.id);
+    if (state && (REPLY_FROZEN_STATES.includes(state) || TERMINAL_STATES.includes(state))) {
+      // Re-freeze anyway: cheap, idempotent, and catches anything queued since.
+      const frozen = await freezeOutreach(deps.db, lead.id, now);
+      if (frozen.cancelled_jobs > 0 || frozen.killed_touches > 0) {
+        await logEvent(deps.db, lead.id, "reply_refrozen", { webhook_event_id: eventId, email_id: payload.email_id, ...frozen });
+      }
+      return { kind: "processed", eventId, action: "duplicate_reply", leadId: lead.id };
+    }
+  }
   const repliedAt = eventTime(payload, now);
   await recordInboundTouch(deps.db, lead.id, payload, repliedAt);
   await markLatestOutbound(deps.db, lead.id, { replied_at: repliedAt });
@@ -513,19 +548,21 @@ async function logEvent(db: WebhookDb, leadId: string, event: string, detail: Re
   if (error) throw new WebhookProcessingError(`lead_event ${event}: ${error.message}`);
 }
 
+async function hasInboundTouch(db: WebhookDb, leadId: string, emailId: string): Promise<boolean> {
+  const { data: existing, error } = await db
+    .from("touches")
+    .select("id")
+    .eq("lead_id", leadId)
+    .eq("direction", "inbound")
+    .eq("provider_message_id", emailId)
+    .limit(1);
+  if (error) throw new WebhookProcessingError(`inbound touch lookup: ${error.message}`);
+  return (existing ?? []).length > 0;
+}
+
 /** The reply as an inbound touch; this alone makes preflight refuse `reply_freeze`. Idempotent per email id. */
 async function recordInboundTouch(db: WebhookDb, leadId: string, p: InstantlyWebhookPayload, repliedAt: string): Promise<void> {
-  if (p.email_id) {
-    const { data: existing, error } = await db
-      .from("touches")
-      .select("id")
-      .eq("lead_id", leadId)
-      .eq("direction", "inbound")
-      .eq("provider_message_id", p.email_id)
-      .limit(1);
-    if (error) throw new WebhookProcessingError(`inbound touch lookup: ${error.message}`);
-    if ((existing ?? []).length > 0) return;
-  }
+  if (p.email_id && (await hasInboundTouch(db, leadId, p.email_id))) return;
   const { error } = await db.from("touches").insert({
     lead_id: leadId,
     channel: "email",
@@ -648,34 +685,81 @@ async function checkBounceRate(deps: InstantlyWebhookDeps, eventId: string, acco
   if (accountError) throw new WebhookProcessingError(`bounce rate update: ${accountError.message}`);
   if (!paused) return;
 
+  await pauseSender(deps, {
+    account: { id: accountId, identifier: account?.identifier ?? null, instantly_campaign_id: account?.instantly_campaign_id ?? null },
+    reason: null, // health/paused_reason already written above, together with bounce_rate_7d
+    eventId,
+    why: `bounce_rate_7d ${(rate * 100).toFixed(1)}% > ${(threshold * 100).toFixed(1)}% (${total} sent in 7d)`,
+  });
+}
+
+export type StopDeps = Pick<InstantlyWebhookDeps, "db" | "alert" | "now"> & {
+  instantly: Pick<InstantlyClient, "pauseCampaign">;
+};
+
+/**
+ * Stops a sender: engine side first (health=paused, which preflight and
+ * pickSender both refuse), then the provider side (its Instantly campaign).
+ * A failed provider pause is escalated, never ignored. Shared by the bounce
+ * auto-pause and the reconcile job's stop_processing_stale.
+ */
+export async function pauseSender(
+  deps: StopDeps,
+  input: {
+    account: AccountMatch;
+    /** Written to paused_reason; null when the caller already wrote health/paused_reason. */
+    reason: string | null;
+    eventId?: string | null;
+    /** The alert's second line. */
+    why: string;
+  },
+): Promise<{ campaignPaused: boolean }> {
+  const { account } = input;
+  if (input.reason !== null) {
+    const { error } = await deps.db
+      .from("send_accounts")
+      .update({ health: "paused", paused_reason: input.reason.slice(0, 500) })
+      .eq("id", account.id);
+    if (error) throw new WebhookProcessingError(`pause sender: ${error.message}`);
+  }
+
   let campaignPaused = false;
-  if (account?.instantly_campaign_id) {
+  if (account.instantly_campaign_id) {
     try {
       await deps.instantly.pauseCampaign(account.instantly_campaign_id);
       campaignPaused = true;
     } catch (pauseError) {
       await raiseException(deps, {
         kind: "stop_failed",
-        eventId,
+        eventId: input.eventId ?? null,
         escalate: true,
         detail: {
           stop: "instantly_pause_campaign",
-          send_account_id: accountId,
+          send_account_id: account.id,
           error: pauseError instanceof Error ? pauseError.message : String(pauseError),
         },
       });
     }
   }
   await deps.alert(
-    `⛔ Sender auto-paused: ${account?.identifier ?? accountId}\n` +
-      `bounce_rate_7d ${(rate * 100).toFixed(1)}% > ${(threshold * 100).toFixed(1)}% (${total} sent in 7d)\n` +
+    `⛔ Sender auto-paused: ${account.identifier ?? account.id}\n` +
+      `${input.why}\n` +
       `Engine: health=paused. Instantly campaign pause: ${campaignPaused ? "done" : "NOT done — see exceptions"}.`,
   );
+  return { campaignPaused };
 }
 
-async function raiseException(
-  deps: InstantlyWebhookDeps,
-  input: { kind: ExceptionKind; eventId: string; leadId?: string; detail: Record<string, unknown>; escalate?: boolean },
+export async function raiseException(
+  deps: Pick<InstantlyWebhookDeps, "db" | "alert" | "now">,
+  input: {
+    kind: ExceptionKind;
+    eventId: string | null;
+    leadId?: string;
+    detail: Record<string, unknown>;
+    escalate?: boolean;
+    /** Send the escalation alert. Defaults to `escalate`; false when the caller alerts itself. */
+    notify?: boolean;
+  },
 ): Promise<void> {
   const now = (deps.now ?? (() => new Date()))().toISOString();
   const { error } = await deps.db.from("exceptions").insert({
@@ -688,7 +772,7 @@ async function raiseException(
     escalated_at: input.escalate ? now : null,
   });
   if (error) throw new WebhookProcessingError(`exception insert: ${error.message}`);
-  if (input.escalate) {
+  if (input.notify ?? input.escalate) {
     await deps.alert(`⚠️ Instantly ${input.kind}${input.leadId ? ` · lead ${input.leadId}` : ""}\n${JSON.stringify(input.detail).slice(0, 400)}`);
   }
 }

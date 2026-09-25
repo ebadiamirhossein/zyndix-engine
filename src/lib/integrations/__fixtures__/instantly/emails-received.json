@@ -1,0 +1,44 @@
+{
+  "items": [
+    {
+      "id": "00000000-0000-4000-8000-0000000e0101",
+      "timestamp_created": "2026-09-24T14:05:00.000Z",
+      "timestamp_email": "2026-09-24T14:04:31.000Z",
+      "message_id": "<reply-0101@target.example.invalid>",
+      "subject": "Re: Fixture subject",
+      "from_address_email": "prospect@target.example.invalid",
+      "to_address_email_list": "amir@sender.example.invalid",
+      "body": { "text": "Thanks, tell me more.", "html": "<p>Thanks, tell me more.</p>" },
+      "organization_id": "00000000-0000-4000-8000-00000000a001",
+      "campaign_id": "00000000-0000-4000-8000-00000000c001",
+      "lead": "prospect@target.example.invalid",
+      "lead_id": "00000000-0000-4000-8000-0000000l0001",
+      "eaccount": "amir@sender.example.invalid",
+      "ue_type": 2,
+      "step": null,
+      "is_unread": 1,
+      "is_auto_reply": 0,
+      "i_status": null,
+      "thread_id": "00000000-0000-4000-8000-0000000t0001",
+      "content_preview": "Thanks, tell me more."
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000e0102",
+      "timestamp_created": "2026-09-24T15:10:00.000Z",
+      "timestamp_email": "2026-09-24T15:09:58.000Z",
+      "message_id": "<ooo-0102@target.example.invalid>",
+      "subject": "Automatic reply: Fixture subject",
+      "from_address_email": "other@target.example.invalid",
+      "to_address_email_list": "amir@sender.example.invalid",
+      "body": { "text": "I am out of the office until October 5." },
+      "organization_id": "00000000-0000-4000-8000-00000000a001",
+      "campaign_id": "00000000-0000-4000-8000-00000000c001",
+      "lead": "other@target.example.invalid",
+      "eaccount": "amir@sender.example.invalid",
+      "ue_type": 2,
+      "is_auto_reply": 1,
+      "thread_id": "00000000-0000-4000-8000-0000000t0002"
+    }
+  ],
+  "next_starting_after": "00000000-0000-4000-8000-0000000e0102"
+}

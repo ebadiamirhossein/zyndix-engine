@@ -9,6 +9,7 @@ import {
   IllegalTransitionError,
   TransitionError,
 } from "../src/lib/state/core";
+import { canTransition } from "../src/types/enums";
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -274,6 +275,15 @@ async function main(): Promise<void> {
     "next_action_at null when not passed",
     afterParked.next_action_at === null,
     String(afterParked.next_action_at),
+  );
+
+  // Redraft edges (operator decision, Session 13): only from the two pre-send
+  // review states; nothing after a send may go back to drafting.
+  assert("redraft edge pending_approval → drafting", canTransition("pending_approval", "drafting"));
+  assert("redraft edge approved → drafting", canTransition("approved", "drafting"));
+  assert(
+    "no redraft after dispatch: queued/sent/replied → drafting all illegal",
+    !canTransition("queued", "drafting") && !canTransition("sent", "drafting") && !canTransition("replied", "drafting"),
   );
   } finally {
     if (leadId && companyId) {

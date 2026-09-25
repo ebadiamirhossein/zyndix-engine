@@ -450,7 +450,11 @@ async function parkCompany(
 
 export async function runQualifyStage(
   deps: QualifyDeps,
-  options?: { limit?: number },
+  options?: {
+    limit?: number;
+  /** Only these leads (scripts and tests; production passes nothing and picks by state). */
+  leadIds?: string[];
+  },
 ): Promise<QualifyStageSummary> {
   const batchCap = options?.limit ?? qualifyBatchSize();
   const maxSiteChars = qualifyMaxSiteChars();
@@ -480,12 +484,14 @@ export async function runQualifyStage(
     segmentsSetting.value,
   );
 
-  const { data: rows, error: pickError } = await deps.db
+  let pickQuery = deps.db
     .from("leads")
     .select(
       "id, company_id, first_name, last_name, title, companies!inner(name, domain, industry, employee_range, country, city)",
     )
-    .eq("state", "qualifying")
+    .eq("state", "qualifying");
+  if (options?.leadIds) pickQuery = pickQuery.in("id", options.leadIds);
+  const { data: rows, error: pickError } = await pickQuery
     .order("created_at", { ascending: true })
     .limit(batchCap);
 

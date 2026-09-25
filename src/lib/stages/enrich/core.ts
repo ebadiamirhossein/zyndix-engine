@@ -274,7 +274,11 @@ function runSummaryFromOutcome(
 
 export async function runEnrichStage(
   deps: EnrichDeps,
-  options?: { limit?: number },
+  options?: {
+    limit?: number;
+  /** Only these leads (scripts and tests; production passes nothing and picks by state). */
+  leadIds?: string[];
+  },
 ): Promise<EnrichStageSummary> {
   const batchCap = options?.limit ?? enrichBatchSize();
   const summary: EnrichStageSummary = {
@@ -292,11 +296,13 @@ export async function runEnrichStage(
   const nowIso = new Date().toISOString();
 
   // Prefer retries first (enriching + due), then fill with sourced.
-  const { data: retryRows, error: retryError } = await deps.db
+  let retryQuery = deps.db
     .from("leads")
     .select("id, linkedin_url, company_id, companies!inner(domain)")
     .eq("state", "enriching")
-    .lte("next_action_at", nowIso)
+    .lte("next_action_at", nowIso);
+  if (options?.leadIds) retryQuery = retryQuery.in("id", options.leadIds);
+  const { data: retryRows, error: retryError } = await retryQuery
     .order("next_action_at", { ascending: true })
     .limit(batchCap);
 
@@ -305,12 +311,14 @@ export async function runEnrichStage(
   }
 
   const remaining = Math.max(0, batchCap - (retryRows?.length ?? 0));
+  let sourcedQuery = deps.db
+    .from("leads")
+    .select("id, linkedin_url, company_id, companies!inner(domain)")
+    .eq("state", "sourced");
+  if (options?.leadIds) sourcedQuery = sourcedQuery.in("id", options.leadIds);
   const { data: sourcedRows, error: sourcedError } =
     remaining > 0
-      ? await deps.db
-          .from("leads")
-          .select("id, linkedin_url, company_id, companies!inner(domain)")
-          .eq("state", "sourced")
+      ? await sourcedQuery
           .order("created_at", { ascending: true })
           .limit(remaining)
       : { data: [], error: null };

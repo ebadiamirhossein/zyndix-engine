@@ -159,8 +159,10 @@ export const LEAD_STATE_TRANSITIONS: Record<LeadState, LeadState[]> = {
   qualified: ["verifying", "parked", "suppressed", "manual_hold"],
   verifying: ["parked", "drafting", "suppressed", "manual_hold"],
   drafting: ["pending_approval", "parked", "suppressed", "manual_hold"],
-  pending_approval: ["approved", "parked", "suppressed", "manual_hold"],
-  approved: ["queued", "suppressed", "manual_hold"],
+  // → drafting is a redraft (operator decision, Session 13): the old touch is
+  // killed first, never deleted, and the event is `redraft_requested`.
+  pending_approval: ["approved", "drafting", "parked", "suppressed", "manual_hold"],
+  approved: ["queued", "drafting", "suppressed", "manual_hold"],
   queued: ["sent", "suppressed", "manual_hold"],
   sent: ["replied", "bounced", "no_reply", "suppressed", "manual_hold"],
   replied: ["classifying", "suppressed", "manual_hold"],

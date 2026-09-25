@@ -58,6 +58,173 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-25 — Session 13 — U6 (2 of 3): reconcile, traversal + 8 stop rules, redraft, legacy webhooks
+
+**Unit:** U6, Instantly webhooks, reply freeze, suppression and reconciliation (`09` §U6), session 2 of 3, on `main`. The operator added two items: redraft the 4 drafts under v8, and delete the 2 legacy Make.com webhooks.
+**Status at end:** 🟨 **U6 in progress.**
+- **Part 1 is complete and tested locally:** `test:traversal` 62/62 (traversal, 8 stop-rule siblings, reconcile).
+- Part 2, the live drill, is session 3.
+- 🚩 not reached. Nothing was sent to anyone, and nothing can send (no worker until U9).
+
+**Did**
+- **Step 0, provider docs.**
+  - Read the official OpenAPI spec for `GET /api/v2/emails`. Confirmed: the 20 req/min limit, `email_type` received/sent/manual, `is_auto_reply` 0/1, `lead` (lead email), `body.text`, `timestamp_email`.
+  - One read-only live call (`email_type=received`, `limit=3`, field names only) returned **0 items**. So `emails:read` works, and the fixture `emails-received.json` is shaped from the spec with synthetic values.
+- **Reconcile** (`src/lib/reconcile/core.ts`, `jobs.ts`, `src/lib/reconcile.ts`):
+  - `runStaleStopCheck`, the `stop_processing_stale` rule:
+    - A sender with a send accepted 25h–7d ago and zero webhook events since is paused: `health=paused`, its Instantly campaign paused, an escalated exception, one alert.
+    - Poll-sourced rows never count as webhook activity.
+    - Idempotent.
+  - `runReplyPoll`:
+    - Per sender, reads received mail from the oldest awaiting send (floored at 30 days). There is no cursor table.
+    - Feeds each unseen reply to `processInstantlyEvent` as a deterministic `reply_received` payload marked `source=reconcile_poll`.
+    - Caps: 3 pages per sender, 10 requests per run. A 429 or a cap truncates the run; two truncated runs in a row escalate.
+  - `webhooks/instantly.ts`:
+    - `pauseSender` is extracted and shared with the bounce auto-pause, whose behaviour is unchanged (58/58). `raiseException` is exported.
+    - `handleReply` returns `duplicate_reply` for an email id already recorded on a frozen lead. Auto-replies dedupe on `email_id`.
+  - `integrations/rate-limit.ts`: a spacing limiter (≥3.05s between calls) applied inside the adapter's `listEmails`, so it is shared with `send.reconcile`.
+  - `stages/send/core.ts`: a paused sender now makes **zero** provider calls. Before, it made 2 account-health reads before refusing.
+- **Traversal** (`scripts/test-u6-traversal.ts`):
+  - One synthetic lead runs `sourced → sent` through the real enrich, qualify, verify and draft stages, the Telegram approve handler and the send job, with every provider mocked.
+  - 8 sibling stop rules, then the reconcile cases.
+  - To make this possible, the stages gained an optional `leadIds` scope, and verify takes an injectable Apollo client.
+- **Redraft** (operator: "go" after the cost statement):
+  - New state edges `pending_approval → drafting` and `approved → drafting` (operator decision).
+  - The draft stage now rejects a self-signed body, with one revision retry.
+  - `scripts/redraft-drafts.ts` is dry-run by default and has a hard ceiling of $0.10.
+  - Result: 4 old touches killed (kept), 4 new v8 drafts in `pending_approval`, and 4 Telegram cards sent to the operator.
+- **Legacy webhooks:** both Make.com hooks deleted with operator approval.
+- **Small blocking fix:** `test-u6-webhooks.ts`'s "wrong token" was `SECRET.slice(0,-1)+"0"`. It equalled the secret whenever the secret ended in `0`, 1 run in 16; seen once this session. It now flips the last digit.
+
+**Files touched**
+- `src/lib/reconcile/core.ts`, `src/lib/reconcile/jobs.ts`, `src/lib/reconcile.ts`, `src/lib/integrations/rate-limit.ts`, `src/lib/integrations/__fixtures__/instantly/emails-received.json`: new
+- `src/lib/webhooks/instantly.ts`: `pauseSender`, exported `raiseException` (nullable event id, `notify`), `duplicate_reply`, auto-reply dedupe, two new exception kinds
+- `src/lib/integrations/instantly.ts` (limiter option), `instantly-types.ts` (documented Email fields), `instantly.test.ts` (+3 tests)
+- `src/lib/stages/send/core.ts`: paused-sender pre-check
+- `src/lib/stages/{enrich,qualify,verify,draft}/core.ts`: `leadIds` scope. Verify also gets `apollo` injection, and draft gets the sign-off guard
+- `src/types/enums.ts`: redraft edges
+- `scripts/test-u6-traversal.ts`, `scripts/redraft-drafts.ts`: new. `scripts/test-u5-send.ts` (paused-sender case, health-call counter), `scripts/test-state.ts` (redraft edges), `scripts/test-u6-webhooks.ts` (flake fix)
+- `package.json` (`test:traversal`)
+- `docs/06-build-progress.md`, `docs/09-build-plan-v2.md`, `docs/07-build-log.md`
+
+**Verification**
+
+Provider docs and the live read (read-only):
+```
+$ curl -s https://api.instantly.ai/openapi/api_v2.json → GET /api/v2/emails
+"Rate Limit: This endpoint has a rate limit of 20 requests per minute" · scopes emails:read|emails:all|all:read|all:all
+Email.is_auto_reply: "0 (zero) - is false, and 1 is true" · lead: "The email address of the lead" · ue_type [1,2,3,4]
+$ tsx <scratchpad>/probe-emails.ts   (listEmails email_type=received limit=3, field names/types only)
+items: 0 next_starting_after: undefined
+```
+
+Traversal + stop rules + reconcile, against Supabase (all providers mocked, fetch guard, synthetic fixtures; UUIDs → `<uuid>`, trimmed):
+```
+$ pnpm test:traversal
+BEFORE  leads=34 touches=4 lead_events=223 jobs=0 companies=34 send_accounts=4 suppression_list=0 webhook_events=4 exceptions=0 outbox=0 enrichment_payloads=106 qualification=17 qualification_history=19 sequences=1 capacity_ledger=0 capacity_reservations=0
+PASS: happy: send outcome sent (enroll), exactly one enroll call
+PASS: happy: lead state sent, touch sent, ledger accepted = 1 — sent/sent/{"accepted":1}
+PASS: happy: every hop recorded by lib/state, in order — enriching → qualifying → qualified → verifying → drafting → pending_approval → approved → queued → sent
+PASS: stop 1: lead parked at qualify, never qualified or drafted · no hypothesis stored (only "(disqualified: insufficient_evidence)"), zero draft calls
+PASS: stop 2: parked at verify, email_status invalid, never drafted · suppression row written (invalid_email)
+PASS: stop 3: send refused with suppressed_email · zero enroll calls, lead never sent
+PASS: stop 4: send refused with suppressed_domain · zero enroll calls, lead never sent
+PASS: stop 5: webhook processed, the queued send job cancelled before any model call · refused ["stale_approval","reply_freeze","manual_hold"] · zero enroll
+PASS: stop 6: lead suppressed + do_not_contact; email job AND linkedin_msg job cancelled · refused suppressed_email · zero enroll
+PASS: stop 7: send refused with booking_hold · zero enroll
+PASS: stop 8: stale check paused the sender (engine health + Instantly campaign) and escalated · alerted once · refused ["sender_unhealthy"] · the send made ZERO Instantly calls of any kind
+PASS: stale: webhook event since the send → ok · poll-sourced row does NOT count → paused · send younger than 25h → no_aged_sends · idempotent
+PASS: poll: GET /emails with email_type=received, this sender, window from the oldest awaiting send, asc
+PASS: poll: missed reply → lead 1 sent → replied, inbound touch, queued job cancelled — replied 1 cancelled
+PASS: poll: no model call (freeze before classification) and no network · went through webhook_events marked source=reconcile_poll
+PASS: poll: reply already applied by the webhook → already_seen, no second lead_events row · unmatched ignored, no exception · auto-reply recorded only
+PASS: poll→webhook: late webhook → duplicate_reply, no second lead_events row, one inbound touch
+PASS: poll: second run → both replies already_seen, auto-reply deduped (one auto_reply event)
+PASS: 429: truncated (rate_limited), one open exception, no alert · 429 again: escalated, alerted once · page cap: 3 pages → page_cap · complete run → resolved
+PASS: the whole run made one enroll call (the happy path) and no network call
+PASS: real leads and real senders untouched (state, email status, DNC, health)
+AFTER   (identical to BEFORE, 16 tables)
+All 62 checks passed.
+```
+(Grouped: several PASS lines are joined with `·`; nothing else edited.)
+
+Legacy webhooks (operator-approved deletes):
+```
+$ pnpm tsx scripts/instantly-webhooks.ts --list
+webhooks: 2
+  0199e630-78d2-71fb-a504-dbfe1fee0cf5 email_sent status=1 → https://hook.eu1.make.com/… headers=[]
+  0199e630-78cf-78cc-bbab-d2e9aba15c2f reply_received status=1 → https://hook.eu1.make.com/… headers=[]
+$ … --delete 0199e630-78d2-71fb-a504-dbfe1fee0cf5   → DELETED
+$ … --delete 0199e630-78cf-78cc-bbab-d2e9aba15c2f   → DELETED
+$ … --list   → webhooks: 0
+```
+
+Redraft (dry run, then `--apply` after the operator's "go"):
+```
+$ pnpm tsx scripts/redraft-drafts.ts
+=== redraft-drafts (dry run) · writer_prompt_email v8 · compliance_footer v3 ===
+5976b68f-…  Real Estate Brokerage Group       lead=pending_approval touch=8fec19d5-… pending_approval pv=7 signs_itself="— Amir"
+041142cc-…  Gottesman Residential Real Estate lead=pending_approval touch=9d902e04-… pending_approval pv=7 signs_itself="— Amir"
+0f20b919-…  Steffen Group Auctioneers …        lead=approved         touch=5f8f40ff-… approved         pv=7 signs_itself="— Amir"
+b48ad46e-…  Stride Real Estate                lead=pending_approval touch=52c8c08a-… pending_approval pv=7 signs_itself="— Amir"
+Anthropic estimate: 4 calls × ≈$0.0066 = ≈$0.026 (one retry each ≈$0.053); hard ceiling $0.10.
+$ pnpm tsx scripts/redraft-drafts.ts --apply
+KILLED touch 8fec19d5-… (pending_approval) · lead 5976b68f-… pending_approval → drafting      (×4; Steffen approved → drafting)
+[draft] generic guard rejected lead 041142cc-… (invented number(s) not in evidence/firmographics: 4)   → one revision retry, then passed
+Real Estate Brokerage Group          lead=pending_approval pv=8 words_incl_footer=117 signs_itself=no subject="inbound leads sitting in your inbox"
+Gottesman Residential Real Estate    lead=pending_approval pv=8 words_incl_footer=118 signs_itself=no subject="inquiry path on your listings"
+Steffen Group Auctioneers and Real E lead=pending_approval pv=8 words_incl_footer=103 signs_itself=no subject="consignment leads going cold?"
+Stride Real Estate                   lead=pending_approval pv=8 words_incl_footer=106 signs_itself=no subject="leads slipping between offices"
+Anthropic: 5 call(s), 9008 tokens, $0.03548 (stage summary: {"drafted":4,"failed":0,"parked_generic":0})
+```
+
+Regression:
+```
+$ pnpm test:send           → All 69 checks passed.   (67 + paused sender: refused sender_unhealthy · zero provider calls 44 → 44)
+$ pnpm test:webhooks       → All 58 checks passed.   (×2 after the flake fix; one earlier run hit the 1-in-16 token collision, cleanup restored all counts)
+$ pnpm test:webhook-rules 10/10 · test:sending 68/68 · test:instantly 80/80 (+3) · test:apollo 6/6 · test:source-filters 9/9
+$ pnpm test:jobs 63/63 · test:scheduler 80/80 · test-state 14/14 (+3 redraft edges) · test-validation 16/16 · test-settings 8/8
+$ pnpm tsx scripts/test-draft.ts --limit 1   (1 Anthropic call, 1,578 tokens, $0.00657; Telegram to the operator only) → 36/36
+$ pnpm exec tsc --noEmit → clean · pnpm build → clean
+$ pnpm exec eslint <every new/changed file> → 0 errors (2 pre-existing unused-var warnings: qualify/core.ts, verify/core.ts)
+```
+
+**Status claims, kept separate:**
+- **Tested locally:**
+  - reconcile (stale stop, reply poll, truncation), cross-path reply dedupe, the paused-sender zero-call path;
+  - the full `sourced → sent` traversal with 8 stop rules;
+  - the redraft edges and the draft sign-off guard.
+- **Verified with provider:** `GET /api/v2/emails` read (`emails:read`), and webhook list/delete (the legacy pair).
+- **Mocked only:** `pauseCampaign`, `leads/add`, `emails/reply`, the block list, and a received email from Instantly. There is no real one yet.
+- **Nothing is active in production.** Nothing reconcile-related is on cron (U9).
+
+**Decisions** (all in `06` §5)
+- **`stop_processing_stale` fails closed.** Poll rows never count as webhook activity.
+- **Missed replies are polled through the webhook processor, with no cursor table.** The window is derived from awaiting leads.
+- **A reply is deduped by Instantly email id across both paths.** A half-finished attempt still replays.
+- **A paused sender makes zero provider calls at send.**
+- **Redraft is an explicit state edge** (operator). Old touches are killed, never deleted.
+- **The 8 stop rules are pipeline-wide** (operator choice).
+
+**Problems hit**
+- **The `test-u6-webhooks` "wrong token" flake** (above). The 58-check suite had passed earlier in this session with the new `pauseSender`, so this was not a regression. Fixed, and re-run twice clean.
+- **The Telegram mock first returned `undefined`.** The draft stage reads `sendApproval(...).failed`, so each draft logged an error while the lead still reached `pending_approval`. The mock now returns `{ sent, failed: [] }`.
+- **Qualify stores `"(disqualified: <reason>)"`, not null, when disqualified** (the column is not null). The stop-1 assertion was written against null and is now corrected. This is existing, intended behaviour: a marker, never a hypothesis.
+- **One redraft hit the invented-number guard** ("4"). The existing one-time revision retry fixed it: 5 calls instead of 4, $0.035 against the $0.10 ceiling.
+- **Webhook `email_id` versus the `GET /emails` `id` is unproven equal.** The workspace has no received email yet. Recorded in `06` §6, to be confirmed in the drill.
+
+**Open, carried forward**
+- **Operator:**
+  - Review and re-approve the 4 v8 drafts in Telegram, Steffen's included. Approval only binds the touch and sender; nothing sends before U9.
+  - Add `INSTANTLY_WEBHOOK_SECRET` to the Vercel env at deploy.
+- **U6 session 3, the Part 2 live drill.** Gates: a fresh tunnel webhook (with approval); an operator-owned recipient only; threading headers checked; the first live `leads:create`, `emails:create` and `campaigns:update`; and confirming webhook `email_id` equals the `GET /emails` `id`.
+- **Backlog (`09` §5):** `scripts/draft-target-leads.ts` is deprecated (it hard-deletes touches).
+
+**Next action**
+- **U6 session 3: the Part 2 live drill** (`09` §U6). Use plan mode: it sends, and it writes to Instantly. Start with the gate list in `06` §6: create the tunnel webhook, then enroll the operator-owned mailbox only, observe the provider message id, `touches.status=sent`, `accepted=1` and `leads.state=sent`, then reply and observe the freeze before any classifier.
+
+---
+
 ### 2026-09-25 — Session 12 — U6 (1 of 3): timezone fill, signatures, webhooks, reply freeze, suppression
 
 **Unit:** U6, Instantly webhooks, reply freeze, suppression and reconciliation (`09` §U6), session 1 of 3, on `main`. The operator added two pre-items: the US timezone fill and plain-text signatures.

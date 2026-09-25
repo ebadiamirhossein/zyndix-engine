@@ -32,6 +32,7 @@ import {
   type InstantlyWebhookTestResult,
   type InstantlyWorkspace,
 } from "@/lib/integrations/instantly-types";
+import { instantlyEmailsLimiter, type RateLimiter } from "@/lib/integrations/rate-limit";
 
 // Instantly API v2 adapter (09 §U4). Endpoints are taken from the official
 // OpenAPI spec (https://api.instantly.ai/openapi/api_v2.json), read 2026-09-25.
@@ -238,6 +239,8 @@ export type InstantlyClientOptions = {
   baseUrl?: string;
   timeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** Spacing for GET /api/v2/emails (20 req/min). Defaults to the process-wide limiter. */
+  emailsLimiter?: RateLimiter;
 };
 
 type RequestSpec = {
@@ -347,6 +350,7 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
   const baseUrl = options.baseUrl ?? INSTANTLY_BASE_URL;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const emailsLimiter = options.emailsLimiter ?? instantlyEmailsLimiter;
 
   function apiKey(ctx: ErrorContext): string {
     const key = options.apiKey ?? process.env.INSTANTLY_API_KEY;
@@ -618,7 +622,8 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
     );
   }
 
-  function listEmails(params: ListEmailsParams = {}) {
+  async function listEmails(params: ListEmailsParams = {}) {
+    await emailsLimiter.take();
     return request(
       {
         op: "listEmails",
