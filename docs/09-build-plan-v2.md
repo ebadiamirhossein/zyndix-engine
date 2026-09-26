@@ -33,6 +33,8 @@ Brief §14 lists its phases as: 1 Reconcile → 2 Knowledge → 3 Research/Match
 
 **Build order after the claim guard (operator decision, 2026-09-25, Session 15):** **email first-send path → research sources (UR) → LinkedIn (U18).** UR (§UR, under Phase 3) is pulled forward because it must land before the first real prospect send; LinkedIn via HeyReach follows it. *Open for the next planning session:* where U7, UD, U8 and U9 fall relative to UR — the operator has not yet placed them.
 
+**Order to the first prospect send (operator decision, 2026-09-26, Session 22 / Wave 1):** **U6c → U9 → UR → first prospect send.** U7 and U8 may land before the first send, but first sends do **not** wait for them: replies are handled by hand, and the reply freeze + operator alert already exist (U6). **U9 no longer depends on U7/U8**: it wires source → enrich (+ research) → qualify → verify → draft → (Telegram approval) → step-1 send, plus the reconcile/stop jobs, and registers the classify job and the Calendly route as they exist. Wave 1 built U9, UR, U7 and U8 together (mocks only, tested locally); the U6c S22 engine drill still gates 🚩.
+
 **Nothing is cut.** Knowledge lands as U10–U13 and matching as U14–U17, and the brief's central acceptance criterion (§332 — upload a handoff, approve what may be used, get better recommendations without changing code) is satisfied at U17 and re-verified at U22.
 
 ---
@@ -814,6 +816,8 @@ S20 and S21 may merge. **🚩 moves to ≈ cumulative session 22.**
 
 **Effort.** 2 sessions. **Depends on.** U6.
 
+**As built (Wave 1, Session 22) — tested locally.** `src/lib/stages/classify/{core,policy,jobs}.ts` + `classify.ts`. The reply webhook enqueues `classify.reply` (key `classify:<email_id>`) after the freeze; `freezeOutreach` never cancels it. The model proposes; the versioned **`reply_policy`** setting decides (its action enum has no send action; decision in `06` §5). Order: negotiation → confidence floor → class action (referral → `redirect_new_contact`; OOO → snooze to the stated date, else 14 d) → `route_to_human` forces a human. Missing policy or prompt → hold, no model call. Drill leads (`segment='drill'`) → 0 model calls. Malformed → exactly 2 calls → `human_review`. `reply_classifier_prompt` v2 script is a **dry run** (v1 active; with v1 every reply costs 2 calls then holds — apply the `reply_policy` seed and v2 before the job runs live). `test:classify-policy` 27/27, `test:classify` 122/122.
+
 ---
 
 #### UD — Apply design system
@@ -858,6 +862,8 @@ U1 deliberately shipped the dashboard as plain semantic HTML with no colour, no 
 
 **Effort.** 2 sessions. **Depends on.** U6.
 
+**As built (Wave 1, Session 22) — tested locally.** Migration **`0010_meetings.sql`** (applied). `src/lib/webhooks/calendly{,-server}.ts`, `src/lib/meetings/{core,list}.ts`, route `/api/webhooks/calendly`, `/dashboard/pipeline` list, `scripts/meeting-outcome.ts` (held / no-show, dry run default). Signature `t=…,v1=…` HMAC-SHA256 over `t.` + raw body, ±3 min, timing-safe; unset/short key → 500, bad/stale → 401, zero rows either way. Persist first (`webhooks/persist.ts`). A booking: lead → `meeting_booked` (new edges from every pending/in-flight/finished state; a state with no edge → `manual_hold` + `booking_unexpected_state`), queued jobs cancelled (safety + classify exempt), unsent touches killed, `stopSequence(meeting_booked)`, `meeting_prep_due` + alert. Cancel/reschedule/no-show never restart outreach; reschedule works in both delivery orders. Unknown email → meeting row with null lead + one exception. `test:calendly-rules` 19/19, `test:calendly` 81/81.
+
 ---
 
 #### U9 — Orchestrator, crons, pause controls
@@ -874,7 +880,9 @@ Also set `TELEGRAM_WEBHOOK_SECRET` so `/api/webhooks/telegram` stops returning 5
 
 **Reuses.** `src/lib/telegram/handler.ts` (643 lines — approval, edit, reject, snooze already built), the five stage barrels, `src/lib/auth/cron.ts`, `src/lib/jobs/worker.ts`.
 
-**Effort.** 2 sessions. **Depends on.** U7, U8.
+**Effort.** 2 sessions. **Depends on.** ~~U7, U8~~ **U6c** (operator, 2026-09-26: U9 registers classify and Calendly as they exist).
+
+**As built (Wave 1, Session 22) — tested locally.** `src/lib/orchestrator/{registry,stages,send-enqueue,run,daily,pause,server}.ts`; routes `/api/cron/{orchestrate,safety,daily}` (GET, `maxDuration` 300); `vercel.json` (Vercel **Pro**, operator): orchestrate `*/5`, safety `2,7,…,57`, daily `30 0 * * *` UTC. Stage jobs `stage.*` are single-flight per 5-min bucket (idempotency key + a live-lease probe), limits from the versioned **`orchestrator_budgets`**; `stage.send_enqueue` enqueues **step 1 only**. **`operations_pause`** {global, reason, paused_campaign_ids} (campaign = the sender's Instantly campaign until U14): the global pause stops every outreach job before any provider client is built; the safety route (recipient check, send.reconcile, stale-stop, reply poll, lead sweep) always runs. Preflight refuses `operations_paused` / `campaign_paused` (deferrable, re-checked ≥ 1 h later). Telegram `/pause`, `/resume`, `/pause campaign <id>`, `/paused` write `operations_pause` (`engine_paused` retired); the webhook secret is compared in constant time (as is `CRON_SECRET`). Daily: `ramp_stage` from `rampQuota`, `bounce_rate_7d` via `sending/bounce-rate.ts`; the ledger needs no roll (rows are lazy). Dashboard Overview pause switch (operator role). `test:orchestrator-rules` 26/26, `test:orchestrator` 45/45.
 
 ---
 
@@ -1031,6 +1039,8 @@ Prospect import: CSV and manual, column mapping, preview before commit, deduplic
 **Provider.** Apify (actors chosen and costed at planning; every run is a costed operator decision). **Completable with mocks:** yes for parsing and evidence typing; each actor needs a separately reported live test.
 
 **Effort.** To be estimated at its planning session. **Depends on.** U6b.
+
+**As built (Wave 1, Session 22) — tested locally; no actor has been run.** Migration **`0010b_research_evidence.sql`** (applied): `research_runs` + `evidence_items` (verbatim excerpt, per-item `fetched_at`, `published_at`, source URL). `src/lib/research/**`: six adapters + Zod parsers (person and company LinkedIn posts `harvestapi/linkedin-profile-posts`, profile `harvestapi/linkedin-profile-scraper`, jobs `bebity/linkedin-jobs-scraper`, news `data_xplorer/google-news-scraper-fast`, blog `apify/website-content-crawler`, Google reviews `compass/crawler-google-places` — **reviews disabled**: the actor's `minimalMaxTotalChargeUsd` is $0.50, operator: evaluate `compass/Google-Maps-Reviews-Scraper` in Wave 2). Runs inside enrich when the versioned **`research_policy`** is enabled (seed: **off**); company sources run once per company and are reused for `reuse_days`; a per-lead cap (`max_cost_usd_per_lead` 0.10); every run carries Apify `maxTotalChargeUsd` + `maxItems`; a failed/empty run is a note, never evidence. Qualify appends up to 8 items (≤ 3 per source) to `qualification.evidence` with url/dates/`evidence_item_id`; the claim guard checks freshness per item and a research item's facts/quotes against its own excerpt. Writer **v12** and templates **v4** scripts: dry run only. `test:research-parsers` 32/32, `test:claims` 52/52, `test:research` 46/46. Actor facts, prices and the Wave 2 live list: `07` Session 22.
 
 ---
 
@@ -1260,18 +1270,26 @@ Carried from `05-build-plan.md` §4, still valid:
 - **Exclude `/api/webhooks/*` from the proxy matcher** at deploy: today every webhook delivery triggers a Supabase `getUser()` round trip (harmless, wasted).
 - **`scripts/draft-target-leads.ts` is deprecated** (Session 13): it hard-deletes touches and writes `leads.state` directly. Use `scripts/redraft-drafts.ts` (kills, never deletes; `lib/state` edges). Delete the old script in a cleanup session.
 - **`0002_transition_lead.sql` is `security definer` with no `set search_path`** — Supabase's linter calls this `function_search_path_mutable`. Fixing it means a new migration that replaces the function; it does not belong inside a feature unit.
-- **Reply poll skips leads already `replied`** (Session 14): `pollWindow` covers `queued/sent/no_reply/sequence_done` only, and a finished lead with a recorded inbound touch is counted `already_seen` before the processor. A *second* reply from an already-replied lead is therefore only caught by the webhook. Decide whether U7 needs the poll to cover recently replied leads.
+- ~~**Reply poll skips leads already `replied`**~~ — **decided Session 22 (U7): no change.** A second reply from a lead a human already owns (`human_review`) is not classified again. (Session 14): `pollWindow` covers `queued/sent/no_reply/sequence_done` only, and a finished lead with a recorded inbound touch is counted `already_seen` before the processor. A *second* reply from an already-replied lead is therefore only caught by the webhook. Decide whether U7 needs the poll to cover recently replied leads.
 - ~~**Step-1 touch `provider_message_id` stays null**~~ — **done in U6c S21**: `handleSent` writes every step's `email_id` onto its touch.
-- **Exclude drill leads everywhere** (Session 14): `segment='drill'` companies (lead `7fd018fa`, `drill:s14`; lead `387b413d`, `drill:s14b`, Session 16) must be excluded from U7 classification, digests, Attio sync and any lead listing.
-- **Preflight does not re-run the claim guard** (Session 15): the approval hash binds the ledger, and the guard ran at approval time. If evidence ages past `evidence_policy` between approval and send, the send still goes. Decide at U9 whether preflight should re-check freshness.
+- **Exclude drill leads everywhere** (Session 14) — **U7 done Session 22** (0 model calls); digests, Attio sync and listings still to do.: `segment='drill'` companies (lead `7fd018fa`, `drill:s14`; lead `387b413d`, `drill:s14b`, Session 16) must be excluded from U7 classification, digests, Attio sync and any lead listing.
+- **Preflight does not re-run the claim guard** (Session 15): the approval hash binds the ledger, and the guard ran at approval time. If evidence ages past `evidence_policy` between approval and send, the send still goes. Decide at U9 whether preflight should re-check freshness. **Still open after Wave 1** (U9 did not change it; the first prospect send should decide).
 - **Claim guard interim gaps** (Session 15): token-based, not semantic; lowercase place names; number words below three; three contradiction attributes only (`06` §6). Closed by U15/U17.
-- **Sequence completion state** (Session 17): after the last Instantly step, `campaign_completed_for_lead_without_reply` could move a lead `sent → no_reply` (→ `sequence_done`). U6c records the event only. Decide the transition at U7/U9.
+- **Sequence completion state** (Session 17): after the last Instantly step, `campaign_completed_for_lead_without_reply` could move a lead `sent → no_reply` (→ `sequence_done`). U6c records the event only. Decide the transition at U7/U9. **Still open after Wave 1.**
 - **Per-campaign cadences need one Instantly campaign per (sender × engine campaign × sequence)** (Session 17). Today there is one campaign per sender. U14 must design the mapping and the migration of `send_accounts.instantly_campaign_id`.
 - **`GET /emails` `step` format `0_0_0` is undocumented** (Session 17). Use the webhook's 1-indexed `step`; confirm the mapping in the S18 spike.
 - **UR prompt work: the writer reserves ≥ 1 evidence item for step 2** (Session 21, from the S20 live v11 draft). Step 1 cited both of the fixture's items, which left step 2 nothing new and made `step2_repeats_step1` (or the guard) the only barrier. The prompt should tell step 1 to leave at least one evidence item unused for step 2. Evidence in `07` Session 20 addendum.
 - **Telegram `/hold <lead>` command** (Session 21): the manual hold is `scripts/hold-lead.ts` for now (`holdAndStop`). A Telegram command should call the same function, with the operator allow-list.
 - **`sent_at` of step 1 is overwritten by the `email_sent` event time** (Session 21): the touch first gets the enroll-accept time, then the send time Instantly reports. The `followupsDueToday` offsets therefore count from the real send. Revisit if U10 needs both times.
 - **Durable webhook endpoint** (Session 14): quick tunnels drop; the next live drill should probe the tunnel before each provider event, and U9's deploy URL replaces them.
+- **Google reviews actor** (Session 22, operator): `compass/crawler-google-places` needs `maxTotalChargeUsd` ≥ $0.50. Evaluate `compass/Google-Maps-Reviews-Scraper` ($0.0006/review, needs a place URL or place id) in Wave 2; `google_review` stays disabled until then.
+- **Qualifier prompt v5 describing the `research` input** (Session 22, UR): the key only appears when research items exist; the prompt does not mention it yet.
+- **One shared suppression / freeze helper** (Session 22): `ensureSuppressed` (webhook, U7 classify) and `freezeOutreach` (webhook, U8 `freezeForMeeting`) exist twice. Move each to `lib/sending/` in a cleanup session.
+- **Stage functions ignore the abort signal** (Session 22, U9): a timed-out stage job keeps running until the instance ends. Thread the signal through `run*Stage`.
+- **`send_enqueue` rescans held-but-`approved` leads every tick** (Session 22, U9): one deduped insert per lead, scan capped at 500. Narrow the query when volume grows.
+- **Pause changes are seen up to 60 s late inside a run** (Session 22, U9): the settings cache TTL. The cron clears it at the start of each run.
+- **Calendly retry behaviour is undocumented** (Session 22, U8): a 500 relies on redelivery; the order-tolerance rule covers a lost `invitee.created`.
+- **Enrich wall time with research** (Session 22, UR): each actor run waits up to `APIFY_POLL_TIMEOUT_MS` (300 s); U9's enrich stage budget must allow for it.
 
 ---
 
@@ -1287,17 +1305,17 @@ Carried from `05-build-plan.md` §4, still valid:
 | **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 4 (re-test done Session 16 → STOP; 🚩 moves to U6c) | Instantly | yes | U2, U5 |
 | **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; S18 spike passed (Session 18); S19 done (Session 19); S20 done (Session 20); **S21 done (Session 21); S22 drill next** | 4 | 1 plan + 5 (S18 spike ✅ · S19 ✅ · S20–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven live by the S18 spike) | U6, U6b |
 | **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends — ✅ tested locally (Session 15) | 4 | 1 | Anthropic | yes | U6 |
-| U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
+| U7 | Reply classifier + routing policy — ✅ tested locally (Wave 1, Session 22) | 4 | 2 | Anthropic | yes | U6 |
 | **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |
-| U8 | Calendly, meetings, booking stop | 4 | 2 | Calendly | yes | U6 |
-| U9 | Orchestrator, crons, pause controls | 4 | 2 | Instantly, Telegram | partial | U7, U8 |
+| U8 | Calendly, meetings, booking stop — ✅ tested locally (Wave 1, Session 22) | 4 | 2 | Calendly | yes | U6 |
+| U9 | Orchestrator, crons, pause controls — ✅ tested locally (Wave 1, Session 22) | 4 | 2 | Instantly, Telegram | partial | U6c (was U7, U8) |
 | U10 | Storage, upload, extraction | 2 | 3 | Supabase Storage | yes | U1, U2 |
 | U11 | PDF/DOCX, OCR, review, screening | 2 | 3 | Anthropic (vision) | partial | U10 |
 | U12 | Search, retrieval, Ask the library | 2 | 3 | Embeddings (optional) | yes | U11 |
 | U13 | Structured catalog | 2 | 2 | — | yes | U12 |
 | U14 | Campaigns, enrollments, prospect import | 3 | 2 | — | yes | U9, U13 |
 | U15 | Typed evidence model | 3 | 2 | Apify, Anthropic | yes | U14 |
-| **UR** | **Research sources (Apify)** ⛔ before the first prospect send | 3 (with U15) | TBD | Apify | yes (parsing) | U6b |
+| **UR** | **Research sources (Apify)** ⛔ before the first prospect send — ✅ tested locally (Wave 1, Session 22); live actor runs in Wave 2 | 3 (with U15) | 1 (Wave 1) + Wave 2 live | Apify | yes (parsing) | U6b |
 | **U16** | **Matching and recommendations** ⭐ | 3 | 3 | Anthropic | yes | U15 |
 | U17 | Draft rewired to matching, approvals UI | 3 | 3 | Anthropic | yes | U16 |
 | U18 | Heyreach + manual LinkedIn mode (OFF) | 5 | 3 | Heyreach | partial | U9 |
@@ -1317,4 +1335,4 @@ UD adds 2 sessions after U7. It therefore does **not** move either of the two mi
 🚩 **FIRST SEND READY at the end of U6** — cumulative session 14, ≈ week 4.7 · **first *prospect* send additionally requires U6b** (+1 session, 2026-09-25; ✅ tested locally Session 15) **and UR** (research sources, operator decision Session 15), plus warmup + inbox placement (Session 14)
 ⭐ central acceptance criterion satisfied at **U16–U17** — cumulative session 40, ≈ week 13.3 *(was session 38 / week 12.7 before UD)* · **+2 sessions from 2026-09-25** (U6b +1, U17 +1): cumulative session ≈ 42
 
-**Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009`, `0009b` (U6: send prereqs, exceptions) · `0009c` (U6b: claim ledger) · `0009d` (U6c: Instantly enrollments + `record_provider_send`) · `0010` (U8) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.
+**Migration numbering:** `0005` (U1) · `0006` (U2) · `0007` (U3) · `0008` (U5) · `0009`, `0009b` (U6: send prereqs, exceptions) · `0009c` (U6b: claim ledger) · `0009d` (U6c: Instantly enrollments + `record_provider_send`) · `0010` (U8, applied Session 22) · `0010b` (UR research evidence, applied Session 22; `0016` stays for U15's labels) · `0011` (U10) · `0012` (U11) · `0013` (U12) · `0014` (U13) · `0015` (U14) · `0016` (U15) · `0017` (U16) · `0018` (U18) · `0019` (U19) · `0020` (U20) · `0021` (U21). All additive; none edits an applied file. Units needing more than one file suffix them `b`, `c`.

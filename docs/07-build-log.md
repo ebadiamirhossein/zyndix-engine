@@ -58,6 +58,206 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-26 — Session 22 — Wave 1: U9 + UR + U7 + U8 in one session (parallel subagents, mocks only)
+
+**Step:** U9, UR, U7, U8 (`09` §U9, §UR, §U7, §U8), on `main`. Plan mode first. Four phases:
+0. plan (approved);
+1. lead-only shared contracts, then a stop for the migrations;
+2. four subagents in parallel on disjoint files;
+3. lead integration and a full sequential test run;
+4. docs + commits.
+
+The U6c S22 engine drill (named "S22" in `09` §U6c) is **not** this session; it is still next for U6c.
+
+**Operator decisions** (recorded in `09` §1 and `06` §5):
+- **Order:** U6c → U9 → UR → first prospect send. U7 and U8 may land before it, but first sends do not wait for them: replies are handled by hand, and the freeze + alert exist.
+- **Dependencies:** U9 no longer depends on U7/U8.
+- **Vercel:** Pro.
+- **Campaign pause:** `operations_pause.paused_campaign_ids`, with no migration.
+- **Google reviews:** disabled, and an actor swap is evaluated in Wave 2 (Phase 2 finding, below).
+
+**Status at end:** 🟨 **U9, UR, U7, U8 all tested locally.** Nothing is verified with a provider. 🚩 not reached (the U6c S22 drill still gates it).
+
+**Safety and spend:**
+- No live call to Instantly, Apify, Anthropic, Calendly, Telegram or Apollo. **No Apify actor was run.** No settings write, no deploy, no email.
+- Public doc reads only: Apify store and API pages, the Calendly docs and OpenAPI spec, the Vercel cron docs.
+- Read-only Supabase reads: the settings dry runs and the jobs inspections below.
+- Every DB suite used synthetic fixtures with scoped cleanup, ran one at a time under `scripts/with-db-lock.ts`, and reported BEFORE = AFTER.
+- **Cleanup of my own test artifacts:** Phase 1's first `test:traversal` runs left 4 `classify.reply` jobs (`classify:test.u6t.*`, fixture leads already deleted). They were deleted by id; details under Problems.
+
+**Did**
+- **Phase 1 — shared contracts (lead only):**
+  - `enums.ts`:
+    - edges → `meeting_booked` from pending_approval / approved / queued / sent / replied / no_reply / sequence_done;
+    - `REPLY_POLICY_ACTIONS` (no send action);
+    - `EVIDENCE_SOURCE_TYPES`, `COMPANY_EVIDENCE_SOURCES`, `RESEARCH_RUN_STATUSES`, `MEETING_STATUSES`;
+    - preflight refusals `operations_paused`, `campaign_paused`.
+  - Webhooks:
+    - `webhooks/persist.ts`: the generic persist-first helper, extracted from `instantly.ts`;
+    - `exceptions.ts`: `provider` param plus 5 kinds;
+    - `sending/bounce-rate.ts`: `checkBounceRate`, moved out of the webhook for the daily cron;
+    - the reply webhook enqueues `classify.reply` (key `classify:<email_id>`) after the freeze, and `freezeOutreach` exempts it.
+  - `jobs/types.ts`: a leaf module holding the new job-type names and `SAFETY_JOB_TYPES`.
+  - Schemas:
+    - classifier + `return_date` / `referral` / `negotiation` (optional);
+    - `storedEvidenceItemSchema`;
+    - Calendly schema from the OpenAPI `InviteePayload`;
+    - templates schema widened.
+  - Settings: `operations_pause`, `orchestrator_budgets`, `research_policy` (off), `reply_policy` — schemas, seeds, and `scripts/seed-wave1-settings.ts` (dry run by default).
+  - Migrations `0010_meetings.sql` and `0010b_research_evidence.sql`.
+  - Plumbing: types, route registry (cron GET routes, calendly, plus the Instantly webhook, which was missing), `package.json` test entries, compile stubs for `classifyJobs()` / `researchJobs()`.
+  - `scripts/with-db-lock.ts` (Phase 2): an mkdir lock so parallel agents' DB suites never overlap.
+- **Migration verification (operator, pasted):**
+  ```
+  RLS: evidence_items | true, meetings | true, research_runs | true
+  meetings indexes (5): meetings_lead_idx, meetings_pkey, meetings_provider_external_uniq, meetings_rescheduled_from_idx, meetings_start_idx
+  check constraints: meetings 1, research_runs 3, evidence_items 3
+  ```
+- **U9** (agent), in `src/lib/orchestrator/**`:
+  - the registry (injectable groups) and single-flight `stage.*` jobs (5-min bucket key + live-lease probe, `maxAttempts` 1);
+  - `stage.send_enqueue` (step 1 only, skips paused senders/campaigns);
+  - `runOrchestrate` / `runSafety` / `drain`: pause re-read before each claim, registry built only after the pause check;
+  - `runDaily`: `ramp_stage` by position (warmup = not started, ramp1 = start quota, ramp2 = between, full = max quota); `bounce_rate_7d`; no ledger roll, because rows are lazy.
+  - Cron routes (GET, `maxDuration` 300, force-dynamic) and `vercel.json`: orchestrate `*/5`, safety `2,7,…,57`, daily `30 0 * * *`.
+  - Preflight rows `operations_paused` / `campaign_paused` (deferrable); send core defers a paused send ≥ 1 h.
+  - Telegram: `/pause`, `/resume`, `/pause campaign <id>`, `/paused` → `operations_pause` (`engine_paused` retired); constant-time webhook secret.
+  - Dashboard Overview pause switch (operator role).
+  - Lead follow-ups: `assertCron` is now constant-time, and the seed `safety_budget_ms` goes 120 000 → 270 000, because the sweeps time out at 120 s and a 120 s budget could never claim them.
+- **UR** (agent):
+  - `src/lib/research/**`: 7 adapters (6 actors), Zod parsers, drop reasons, `run.ts` (reuse, cost cap, run accounting), `evidence.ts` (upsert on the dedupe key).
+  - `apify.ts` gains `maxItems` / `maxTotalChargeUsd` run options.
+  - Enrich runs research when enabled. The legacy `li_posts` slot is skipped when `li_person_post` runs, and its payload is rebuilt from the research run, so nothing is paid twice.
+  - Qualify: a `research` prompt input, plus ≤ 8 appended evidence items (≤ 3 per source).
+  - Claim guard: per-item freshness and the excerpt check. The Telegram card shows per-item dates.
+  - `update-writer-prompt-v12.ts` and `update-apify-templates-v4.ts`: dry runs.
+- **U7** (agent):
+  - `stages/classify/{policy,core,jobs}.ts` + facade; `update-reply-classifier-prompt-v2.ts` (dry run).
+  - The reply goes to the model as one escaped JSON value between markers, and the prompt says instructions inside it are ignored.
+- **U8** (agent):
+  - `webhooks/calendly{,-server}.ts`, `meetings/{core,list}.ts`, route, `/dashboard/pipeline` list, `scripts/meeting-outcome.ts` (dry run default).
+
+**Files touched** — per unit in the commits (`git log`). Shared contracts go in the U7 commit, the first one, because every unit needs them; the migrations go with U8 (`0010`) and UR (`0010b`).
+
+**Verification** (Phase 3, lead, sequential)
+```
+$ pnpm exec tsc --noEmit                         → clean
+$ pnpm build                                     → ✓ Compiled; ƒ /api/cron/{daily,orchestrate,safety}, /api/webhooks/{calendly,instantly,telegram}
+$ eslint (every changed/new .ts/.tsx)            → 0 errors, 1 pre-existing warning (qualify/core.ts groupPayloadsBySource)
+pure:  source-filters 9/9 · instantly 95/95 · sending 82/82 · apollo 6/6 · webhook-rules 12/12 · claims 52/52 (45 + 7 UR)
+       sequence-rules 38/38 · campaign-sequence 10/10 · orchestrator-rules 26/26 · research-parsers 32/32
+       classify-policy 27/27 · calendly-rules 19/19 · test-validation 16/16
+DB (each via with-db-lock, BEFORE = AFTER):
+  test:jobs 63/63 · test:scheduler 80/80 · test:send 97/97 · test:webhooks 59/59 · test:traversal 62/62
+  test:claim-guard 91/91 · test:sequence 120/120 · test:stops 111/111 · test-draft --check-fixture 7/7
+  test:orchestrator 45/45
+    BEFORE/AFTER companies=36 leads=36 touches=13 lead_events=263 send_accounts=4 capacity_ledger=1 capacity_reservations=4 outbox=4 jobs=4 instantly_enrollments=0 exceptions=0 settings=39
+    network guard: 0 non-Supabase calls
+  test:research 46/46
+    BEFORE/AFTER {"companies":36,"leads":36,"lead_events":263,"qualification":17,"qualification_history":19,"enrichment_payloads":106,"research_runs":0,"evidence_items":0}
+  test:classify 122/122
+    BEFORE/AFTER leads=36 touches=13 lead_events=263 jobs=4 companies=36 send_accounts=4 suppression_list=0 webhook_events=13 exceptions=0 instantly_enrollments=0 capacity_ledger=1 capacity_reservations=4
+  test:calendly 81/81
+    BEFORE/AFTER leads=36 touches=13 lead_events=263 jobs=4 companies=36 send_accounts=4 webhook_events=13 exceptions=0 instantly_enrollments=0 meetings=0
+$ pnpm exec tsx scripts/seed-wave1-settings.ts   (dry run) → PLAN × 4, nothing written
+```
+Result: **pass**.
+
+**What each unit's DoD suite proves** (details in the `06` unit rows):
+- **U9:**
+  - cron 401/200 `{claimed,completed,failed}`;
+  - global pause → 0 provider calls and 0 stage jobs, while safety still runs;
+  - a paused campaign is deferred `campaign_paused` while the active sender enrolls ×1 in the same run; a paused account is refused;
+  - limits pass through, 0 = skip; concurrent runs → each stage once; step ≥ 2 never enqueued;
+  - Telegram 200/401/500; `/pause` writes v+1; daily is idempotent.
+- **UR:**
+  - two contacts → one company run per source; reuse within 14 d; `skipped_cap`;
+  - `maxTotalChargeUsd` + `maxItems` on every run; failed/empty → 0 evidence; disabled → 0 calls;
+  - guard: a research-supported claim passes, an unsupported fact fails, a stale item fails `stale_evidence` even when the site crawl is fresh.
+- **U7:** the 12 replies map to actions by name through the real reply webhook; OOO date / 14 d; referral → `redirect_new_contact`; price → `human_draft_review`; malformed → 2 calls → `human_review`; 0 send/reply calls; drill → 0 model calls; replay no-op.
+- **U8:**
+  - booking → `meeting_booked`, jobs cancelled, one row, DELETE ×1;
+  - cancel → 0 jobs created; reschedule in both orders;
+  - unknown email → 1 exception, 0 lead mutations; duplicate no-op;
+  - 500 / 401 with 0 rows.
+
+**Provider docs read** (quoted verbatim, 2026-09-26)
+- **Vercel:**
+  - https://vercel.com/docs/cron-jobs/usage-and-pricing: Hobby "Once per day", Pro "Once per minute".
+  - https://vercel.com/docs/cron-jobs/manage-cron-jobs:
+    - "The value of the variable will be automatically sent as an `Authorization` header when Vercel invokes your cron job."
+    - "Cron delivery can also occasionally invoke the same scheduled run more than once."
+    - "Vercel will not retry an invocation if a cron job fails."
+    - "Cron jobs do not follow redirects."
+  - https://vercel.com/docs/cron-jobs: "Vercel makes an HTTP GET request"; "The timezone is always UTC".
+- **Calendly:**
+  - https://developer.calendly.com/api-docs/overview/webhooks/webhook-signatures:
+    - "Calendly-Webhook-Signature: t=1492774577,v1=5257a869e7ec…"
+    - "Create the signed payload by concatenating the timestamp (t), the character '.', and the request body's JSON payload." (HMAC SHA256)
+    - the example tolerance zone is 3 minutes.
+  - https://developer.calendly.com/see-how-webhook-payloads-change-when-invitees-reschedule-events:
+    - "When an invitee reschedules an event, both webhook events (`invitee.created` and `invitee.canceled`) will be triggered."
+    - the canceled payload has "`true` on the `rescheduled` key".
+  - OpenAPI (`developer.calendly.com/openapi/calendly-api.yaml`): `InviteePayload` (`uri` "Canonical reference (unique identifier) for the invitee", `rescheduled`, `old_invitee`, `new_invitee`, `cancellation`, `no_show`, `scheduled_event`); events `invitee.created`, `invitee.canceled`, `invitee_no_show.created`, `invitee_no_show.deleted` need `scheduled_events:read`.
+- **Apify API** (https://docs.apify.com/api/v2/act-runs-post):
+  - maxItems: "Specifies the maximum number of dataset items that will be charged for pay-per-result Actors."
+  - maxTotalChargeUsd: "Specifies the maximum total cost of the run. Use it to cap the total amount charged for all pricing models."
+- **Apify actors** (store pages, public actor/build objects; FREE-tier prices; none were run):
+
+  | Actor | Used for | Input used | Output used | Price |
+  |---|---|---|---|---|
+  | `harvestapi/linkedin-profile-posts` | person + company posts ("List of LinkedIn profile or company URLs"; "No cookies or account required") | `targetUrls`, `maxPosts`, `postedLimit` "6months", `includeReposts` false | `id, linkedinUrl, content, postedAt.date, author.linkedinUrl` | Post $0.002 · 0-result $0.001 · start $0.00005/GB |
+  | `harvestapi/linkedin-profile-scraper` | profile | `profileScraperMode` "Profile details no email ($4 per 1k)", `urls` | `linkedinUrl, headline, about, currentPosition, experience[]` | $0.004/profile |
+  | `bebity/linkedin-jobs-scraper` | job posts ("Filter the search to specific companies by their LinkedIn page URL") | `companyUrls`, `rows`, `publishedAt` "r2592000" (past month), `companyProfile` false | `id, jobUrl, title, publishedAt, description, companyUrl, companyName` | Job result $0.0015 · start $0.00005/GB (store: "from $1.00 / 1,000") |
+  | `data_xplorer/google-news-scraper-fast` | news | `keywords` (quoted), `maxArticles`, `timeframe` "1y" (default "1h"), `extractDescriptions` true, `decodeUrls` | `title, url, source, publishedAt, description` | $0.004/result |
+  | `apify/website-content-crawler` | company blog | `startUrls` /blog, /news; `maxCrawlDepth` 1; cheerio | `url, text, metadata.title` | pay per usage; estimate **null** (measure live) |
+  | `compass/crawler-google-places` | Google reviews (**disabled**) | `searchStringsArray`, `locationQuery`, `maxReviews`, `reviewsSort` newest, `scrapeReviewsPersonalData` false (default **true**) | place `title, website, url`; `reviews[].text, stars, publishedAtDate` | place $0.004 + details add-on $0.002 + review $0.0005; **`minimalMaxTotalChargeUsd` 0.5** |
+
+**Decisions** (full rows in `06` §5)
+- Order U6c → U9 → UR → first send; U9 depends on U6c only. Reason: replies are handled by hand; freeze + alert exist.
+- The global pause halts outreach, and stop-path jobs keep running. Reason: stops must stay reliable (brief §10).
+- A missing `operations_pause` = not paused; an unreadable one = paused. Reason: the seed is not applied; a corrupt row fails closed.
+- `reply_policy` is a versioned setting with no send action; a missing policy → hold. Reason: CLAUDE.md, brief §11.
+- A booking in a state with no edge → `manual_hold` + exception, and the meeting is always recorded. Reason: a person with a meeting never reaches drafting.
+- Research is off by default, company sources are reused for 14 d, the cap is $0.10 per lead, and every run is hard-capped by Apify `maxTotalChargeUsd`. Reason: no spend without the operator.
+- Google reviews are disabled, with the actor swap evaluated in Wave 2 (operator). Reason: the actor's minimum run cap is $0.50.
+- Research evidence is appended to `qualification.evidence`. Reason: stable positional E-ids; the guard checks each item against its excerpt.
+
+**Problems hit**
+- **A Phase 1 test left rows behind.** The reply webhook now enqueues `classify.reply`, and `test:traversal`'s real queue kept 4 of them: "FAIL: jobs count unchanged — 6 → 8" (4 → 8 over two runs).
+  - Fix: its cleanup now deletes jobs by fixture `payload->>lead_id`.
+  - The 4 leaked rows (`classify:test.u6t.*`, fixture leads already deleted) were deleted by id.
+  - Re-run 62/62, `jobs` back to 4.
+- **Google reviews contradict the plan's cost cap:** the actor's `minimalMaxTotalChargeUsd` is $0.50, above the $0.01 per-run cap. I stopped and asked; the operator chose to disable the source and evaluate `compass/Google-Maps-Reviews-Scraper` in Wave 2.
+- **The safety budget in the seed (120 s) could never claim the reconcile sweeps** (timeout 120 s + reserve). Raised to 270 s, below `maxDuration` 300.
+- **U9 saw a queued `send.recipient_check` from U8's suite mid-run.** A later read showed only the 4 original rows, so cleanup worked. Tests and live crons share the `jobs` table; this is recorded in `06` §6.
+- **Not fixed, recorded in `09` §5:**
+  - duplicated suppression/freeze helpers;
+  - stage abort signal;
+  - `send_enqueue` rescans;
+  - 60 s pause lag from the settings cache;
+  - qualifier prompt v5 for the `research` input;
+  - Calendly retry behaviour undocumented;
+  - enrich wall time with research.
+- **Intermediate commits were not built on their own.** The final tree is built and tested, and the commit order (U7 with the shared contracts, then U8, UR, U9) follows the import direction.
+
+**Wave 2 — needs a live test** (each gated on the operator)
+1. **Settings applies:**
+   - `seed-wave1-settings.ts --apply`: `operations_pause`, `orchestrator_budgets`, `reply_policy`, `research_policy` (off);
+   - then classifier v2, templates v4, writer v12.
+2. **Vercel Pro deploy**, with `CRON_SECRET`: live 401/200 on the 3 cron routes; the comma-list schedule accepted.
+3. **Telegram:** `TELEGRAM_WEBHOOK_SECRET` + `setWebhook`; live 200/401/500; `/pause`, `/resume` against the real row; the dashboard switch as operator and as viewer.
+4. **Orchestrator ticks:** one orchestrate tick on the seed budgets (source 0) and one safety tick against live Instantly (reply poll, lead sweep); the first daily run.
+5. **UR:** one costed run per actor on an operator-chosen company — posts ×2, profile, jobs, news, blog ≈ $0.05 + the blog compute. Confirm the output shapes, that `maxTotalChargeUsd`/`maxItems` appear on the run, and the charged vs estimated cost. Evaluate `compass/Google-Maps-Reviews-Scraper`.
+6. **U7:** one live classification on synthetic replies with prompt v2 (≈ $0.02). It must pass the schema on the first try; price → `question`; an injection-style reply classified correctly.
+7. **U8:** Calendly plan and scope check; a subscription with a `signing_key` of at least 32 chars; `CALENDLY_WEBHOOK_SIGNING_KEY` server-side; a book / cancel / reschedule / no-show on the operator's own email.
+8. **U6c S22 engine drill:** still the gate for 🚩.
+
+**Next action**
+- **Operator:** `git push origin main`.
+- **Then** either the U6c S22 drill (09 §U6c), or Wave 2 step 1 (the settings applies, each asked for separately).
+
+---
+
 ### 2026-09-26 — Session 21 — U6c S21: follow-up tracking, post-send recipient check, stopSequence, reconcile lead sweep
 
 **Step:** U6c, build part 3 (`09` §U6c, S21), on `main`. Plan mode first. The plan fit one session (cut line: the sweep); no cut was needed.
