@@ -90,6 +90,12 @@ export type PreflightContext = {
   companyConflicts: number;
   /** Remaining capacity on the sender's ledger day; null = quota unknown (ramp not started is set at reserve). */
   capacityRemaining: number | null;
+  /**
+   * 09 §U9: operations_pause as the send stage read it — the global switch and
+   * whether the sender's Instantly campaign is in paused_campaign_ids. Absent
+   * = not paused (contexts built before U9).
+   */
+  pause?: { global: boolean; reason: string | null; campaignPaused: boolean } | null;
   policy: SendPolicy;
   windows: SendWindowsConfig;
 };
@@ -117,6 +123,11 @@ export function preflight(ctx: PreflightContext): PreflightResult {
   // emails/reply path kept our own mailbox in To (Sessions 14, 16), so it is
   // hard-disabled; runSendJob refuses before this, this is defence in depth.
   if (step > 1) add("followup_engine_send_disabled", { step });
+
+  // 09 §U9: the operator's pause switches. Deferrable: lifting the pause is
+  // an operator action, and the send goes in a window after that.
+  if (ctx.pause?.global) add("operations_paused", { reason: ctx.pause.reason });
+  if (ctx.pause?.campaignPaused) add("campaign_paused", { campaign_id: ctx.sender.instantly_campaign_id });
 
   // Sender: domain guard, then pinning.
   const domain = checkSenderDomain(ctx.sender.identifier);
@@ -281,7 +292,13 @@ export function preflight(ctx: PreflightContext): PreflightResult {
 }
 
 /** Refusals the send stage defers to the next window rather than holding. */
-export const DEFERRABLE_REFUSALS: readonly PreflightRefusal[] = ["outside_window", "quota_exhausted", "provider_daily_limit"];
+export const DEFERRABLE_REFUSALS: readonly PreflightRefusal[] = [
+  "operations_paused",
+  "campaign_paused",
+  "outside_window",
+  "quota_exhausted",
+  "provider_daily_limit",
+];
 
 export type SequenceIssue = { step: number; issue: "missing" | "killed" | "not_approved" | "blank"; status?: string | null };
 

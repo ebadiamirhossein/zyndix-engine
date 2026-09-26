@@ -1,3 +1,5 @@
+import { createHash, timingSafeEqual } from "node:crypto";
+
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 
@@ -5,6 +7,7 @@ import type { TelegramClient } from "@/lib/integrations/telegram";
 import { parseAllowedUserIds } from "@/lib/integrations/telegram";
 import { escapeTelegramHtml } from "@/lib/integrations/telegram-format";
 import { TELEGRAM_TEXT_LIMIT, telegramVisibleLength } from "@/lib/integrations/telegram-approval";
+import { applyPauseChange, readOperationsPause, type PauseChange } from "@/lib/orchestrator/pause";
 import { findSignOff } from "@/lib/sending/approval";
 import { chooseSenderForApproval } from "@/lib/sending/sender";
 import { appendComplianceFooter } from "@/lib/settings/compliance";
@@ -734,16 +737,64 @@ async function handleLead(
   await deps.telegram.sendMessage(chatId, lines.filter(Boolean).join("\n"));
 }
 
-async function setEnginePaused(
+/**
+ * /pause, /resume (global) and /pause campaign <id>, /resume campaign <id>
+ * (09 §U9). Each writes operations_pause as a new version; the orchestrator,
+ * the worker drain and send preflight all read it. A campaign id must be an
+ * Instantly campaign some send account uses — a typo must not look paused.
+ */
+async function handlePause(
   deps: TelegramHandlerDeps,
-  paused: boolean,
-  changedBy: string,
+  chatId: number,
+  userId: number,
+  text: string,
 ): Promise<void> {
-  await deps.writeNewVersion(
-    "engine_paused",
-    paused ? "true" : "false",
-    changedBy,
-    paused ? "paused via /pause" : "resumed via /resume",
+  const [command, scope, campaignId, ...rest] = text.split(/\s+/);
+  const paused = command === "/pause";
+  let change: PauseChange;
+  if (scope === undefined) {
+    change = { kind: "global", paused, reason: paused ? `telegram /pause by ${userId}` : null };
+  } else if (scope === "campaign" && campaignId && rest.length === 0) {
+    const { data, error } = await (deps.db as unknown as SupabaseClient<DatabaseWithSending>)
+      .from("send_accounts")
+      .select("id")
+      .eq("instantly_campaign_id", campaignId)
+      .limit(1);
+    if (error) throw new Error(`pause: look up campaign ${campaignId}: ${error.message}`);
+    if (!data || data.length === 0) {
+      await deps.telegram.sendMessage(chatId, `Unknown campaign ${campaignId}: no send account uses it. Nothing changed.`);
+      return;
+    }
+    change = { kind: "campaign", paused, campaignId };
+  } else {
+    await deps.telegram.sendMessage(chatId, "Usage: /pause · /resume · /pause campaign <instantly_campaign_id> · /resume campaign <id>");
+    return;
+  }
+
+  const result = await applyPauseChange(deps, change, `telegram:${userId}`);
+  const what = change.kind === "global" ? "Engine" : `Campaign ${change.campaignId}`;
+  if (!result.changed) {
+    await deps.telegram.sendMessage(chatId, `${what} already ${paused ? "paused" : "running"} (operations_pause v${result.version}).`);
+    return;
+  }
+  const version = (result.previousVersion ?? 0) + 1;
+  await deps.telegram.sendMessage(
+    chatId,
+    paused
+      ? `⏸ ${what} paused (operations_pause v${version}). Stop and reconcile jobs keep running.`
+      : `▶️ ${what} resumed (operations_pause v${version}).`,
+  );
+}
+
+async function handlePauseStatus(deps: TelegramHandlerDeps, chatId: number): Promise<void> {
+  const pause = await readOperationsPause(deps.getActiveSetting);
+  await deps.telegram.sendMessage(
+    chatId,
+    [
+      `operations_pause ${pause.version === null ? `(${pause.source})` : `v${pause.version}`}`,
+      `global: ${pause.global ? `PAUSED${pause.reason ? ` — ${pause.reason}` : ""}` : "running"}`,
+      `paused campaigns: ${pause.paused_campaign_ids.length > 0 ? pause.paused_campaign_ids.join(", ") : "none"}`,
+    ].join("\n"),
   );
 }
 
@@ -770,15 +821,13 @@ async function handleCommand(
     return true;
   }
 
-  if (text === "/pause") {
-    await setEnginePaused(deps, true, String(userId));
-    await deps.telegram.sendMessage(chatId, "⏸ Engine paused.");
+  if (/^\/(pause|resume)(\s|$)/.test(text)) {
+    await handlePause(deps, chatId, userId, text);
     return true;
   }
 
-  if (text === "/resume") {
-    await setEnginePaused(deps, false, String(userId));
-    await deps.telegram.sendMessage(chatId, "▶️ Engine resumed.");
+  if (text === "/paused") {
+    await handlePauseStatus(deps, chatId);
     return true;
   }
 
@@ -886,4 +935,47 @@ export async function processTelegramUpdate(
     console.error("[telegram] handler error:", error);
     throw error;
   }
+}
+
+// ---------------------------------------------------------------------------
+// The webhook route's core (09 §U9)
+// ---------------------------------------------------------------------------
+
+export const TELEGRAM_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
+
+/** Constant-time: both sides are hashed first, so lengths never short-circuit. */
+export function telegramSecretMatches(presented: string | null, expected: string): boolean {
+  if (presented === null) return false;
+  const a = createHash("sha256").update(presented).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
+}
+
+export type TelegramWebhookDeps = {
+  /** TELEGRAM_WEBHOOK_SECRET, read per request. Unset → 500 on every request. */
+  secret: string | undefined;
+  /** Built only after the secret check passes. */
+  handlerDeps: () => TelegramHandlerDeps;
+  process?: typeof processTelegramUpdate;
+};
+
+/** Secret unset → 500; wrong or missing header → 401; valid → the update is processed. */
+export async function handleTelegramWebhook(req: Request, deps: TelegramWebhookDeps): Promise<Response> {
+  if (!deps.secret) {
+    return Response.json({ error: "Webhook secret not configured" }, { status: 500 });
+  }
+  if (!telegramSecretMatches(req.headers.get(TELEGRAM_SECRET_HEADER), deps.secret)) {
+    console.warn("[telegram] webhook rejected: invalid secret");
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  let update: TelegramUpdate;
+  try {
+    update = (await req.json()) as TelegramUpdate;
+  } catch {
+    return Response.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  const result = await (deps.process ?? processTelegramUpdate)(deps.handlerDeps(), update);
+  return Response.json({ ok: true, processed: result.processed, rejected: result.rejected ?? false });
 }

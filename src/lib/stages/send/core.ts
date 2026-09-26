@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { z } from "zod";
 
 import type { JobQueue } from "@/lib/jobs/queue";
+import { isCampaignPaused, readOperationsPause, type PauseState } from "@/lib/orchestrator/pause";
 import type { JobContext } from "@/lib/jobs/registry";
 import {
   accountHealth,
@@ -113,6 +114,8 @@ const ACTIVE_OUTREACH_STATES: readonly LeadState[] = [
 ];
 
 const DAY_MS = 86_400_000;
+/** 09 §U9: a paused send is re-checked in the first window at least this far ahead. */
+const PAUSE_RECHECK_MS = 3_600_000;
 
 export class SendStageError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -191,6 +194,7 @@ async function pickSender(
   loaded: Loaded,
   ramp: CapacityDefaults["email_inbox"],
   today: string,
+  pause: PauseState,
 ): Promise<SendAccountRow | null> {
   const assigned = loaded.touch.send_account_id ?? loaded.lead.send_account_id;
   if (assigned) return loadAccount(deps.db, assigned);
@@ -208,6 +212,8 @@ async function pickSender(
   let best: { account: SendAccountRow; remaining: number } | null = null;
   for (const account of data ?? []) {
     if (!account.identifier || !checkSenderDomain(account.identifier).ok) continue;
+    // 09 §U9: never pick into a paused Instantly campaign.
+    if (isCampaignPaused(pause, account.instantly_campaign_id)) continue;
     const remaining = await remainingCapacity(deps, account, ramp, today);
     if (!best || (remaining ?? 0) > best.remaining) best = { account, remaining: remaining ?? 0 };
   }
@@ -334,7 +340,7 @@ async function buildContext(
   deps: SendDeps,
   loaded: Loaded,
   sender: SendAccountRow,
-  settings: { policy: SendPolicy; windows: SendWindowsConfig; ramp: CapacityDefaults["email_inbox"] },
+  settings: { policy: SendPolicy; windows: SendWindowsConfig; ramp: CapacityDefaults["email_inbox"]; pause: PauseState },
   now: Date,
 ): Promise<{ ctx: PreflightContext }> {
   const { touch, lead, company } = loaded;
@@ -425,6 +431,11 @@ async function buildContext(
     hasReply: (replyCount ?? 0) > 0,
     companyConflicts,
     capacityRemaining: await remainingCapacity(deps, sender, settings.ramp, today, provider.dailyLimit),
+    pause: {
+      global: settings.pause.global,
+      reason: settings.pause.reason,
+      campaignPaused: isCampaignPaused(settings.pause, sender.instantly_campaign_id),
+    },
     policy: settings.policy,
     windows: settings.windows,
   };
@@ -459,15 +470,18 @@ async function loadApprovedSequence(
 }
 
 async function loadSettings(deps: SendDeps) {
-  const [policy, windows, capacity] = await Promise.all([
+  const [policy, windows, capacity, pause] = await Promise.all([
     deps.getActiveSetting("send_policy"),
     deps.getActiveSetting("send_windows"),
     deps.getActiveSetting("capacity_defaults"),
+    // 09 §U9: a missing row = not paused; an unreadable one fails closed (paused).
+    readOperationsPause(deps.getActiveSetting),
   ]);
   return {
     policy: policy.value as SendPolicy,
     windows: windows.value as SendWindowsConfig,
     ramp: (capacity.value as CapacityDefaults).email_inbox,
+    pause,
   };
 }
 
@@ -501,6 +515,11 @@ async function refuse(
     if (reasons.includes("quota_exhausted") || reasons.includes("provider_daily_limit")) {
       const nextUtcDay = new Date(`${ledgerDate(new Date(now.getTime() + DAY_MS))}T00:00:00.000Z`);
       window = nextSendWindow(nextUtcDay, result.timezone!.timeZone, settings.windows);
+    } else if (reasons.includes("operations_paused") || reasons.includes("campaign_paused")) {
+      // 09 §U9: a pause is lifted by the operator, not by the clock. Re-check
+      // no sooner than PAUSE_RECHECK_MS, so a paused send is not re-queued
+      // (with its provider reads) every tick of an open window.
+      window = nextSendWindow(new Date(now.getTime() + PAUSE_RECHECK_MS), result.timezone!.timeZone, settings.windows);
     }
     const runAfter = jitteredSendAt(window, settings.windows.jitter_minutes, deps.rng).sendAt.toISOString();
     await deps.queue.enqueue({
@@ -575,7 +594,7 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
 
   // 2. Sender.
   const today = ledgerDate(now);
-  const sender = await pickSender(deps, loaded, settings.ramp, today);
+  const sender = await pickSender(deps, loaded, settings.ramp, today, settings.pause);
   if (!sender) {
     const result: PreflightResult = {
       verdicts: [{ reason: "sender_unhealthy", detail: { reasons: ["no_eligible_send_account"] } }],
