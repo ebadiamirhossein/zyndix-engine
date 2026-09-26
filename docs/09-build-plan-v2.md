@@ -628,7 +628,7 @@ All existing guard, draft and approval tests stay green. A live `test-draft --li
 - **Campaign script** `instantly-sender-campaigns.ts`: the desired shape comes from the ACTIVE `email_sequence`; `--verify` diffs the 3-step shape; `--update` is a dry run by default, and `--update --apply --only <mailbox>` PATCHes one campaign and re-verifies it (**not run live**).
 - **Scope additions:**
   - (a) `step2_repeats_step1`: draft → one revision retry → hold (`manual_hold`, event `step2_repeats_step1`, 0 touches); re-checked at approval.
-  - (b) `scripts/update-writer-prompt-v11.ts`: dry run shown; `--apply` awaits the operator.
+  - (b) `scripts/update-writer-prompt-v11.ts`: **applied** after the operator's OK. The one live draft (synthetic) was held by the claim guard and still showed behaviour narration and a step 1 citing both evidence items (`07` Session 20 addendum). The deterministic checks, not the prompt, are the barrier.
   - Footer: an edit that drops the compliance footer gets it re-appended (operator decision).
   - `test-validation`: the fixture is fixed.
 - **Tests:**

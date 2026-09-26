@@ -64,7 +64,7 @@ Result: pass / fail
 - **Operator decision in plan mode:** a Telegram edit that drops the compliance footer gets it **re-appended**, not refused.
 
 **Status at end:** 🟨 **S20 done — tested locally.**
-- Writer v11: **dry run only**; `--apply` awaits the operator's OK.
+- Writer v11: **applied** after the operator's OK (addendum below). The one live draft on a synthetic fixture was **held by the claim guard**, so no v11 draft has passed yet.
 - Tracking, recipient check, `stopSequence` and the reconcile sweep are S21.
 - The ⛔ row in `06` §6 stays open until S22. 🚩 not reached.
 
@@ -72,6 +72,10 @@ Result: pass / fail
 - No Instantly write, no email, no Anthropic call, no prospect read or touched.
 - Live Instantly **reads** only: the campaign script's `--verify` and `--update` dry runs (GET campaigns, `leads/list` with limit 1), and the OpenAPI spec download.
 - Supabase: reads (the active writer prompt and `email_sequence`). Every DB test used synthetic `*.example.com` / `*.example.invalid` fixtures with scoped cleanup; before/after counts were identical.
+- **Addendum (operator-approved):**
+  - one settings write (`writer_prompt_email` v11);
+  - one live `test-draft --limit 1`: 2 writer calls on a synthetic fixture, **≈ $0.035 estimated** (the stage reports $0 for a held draft; see Problems); no card or APPROVED text was sent because the draft was held;
+  - cap $0.04.
 
 **Did**
 - **Step 0: spec re-read** (`https://api.instantly.ai/openapi/api_v2.json`, 2026-09-26):
@@ -196,10 +200,51 @@ Result: **pass**.
 - **Two of my own test expectations were wrong at first:**
   - M1: the unshifted 0/7/14 differs on 2 steps, not 3 (step 3's 14 equals the repeated last delay);
   - E5: sent 1 + due 1 + 1 = 3 fits a limit of 3; the refusal case is sent 2.
-- **Found, not fixed:** the analytics `date` has no stated timezone (`06` §6, low).
+- **Found, not fixed:**
+  - the analytics `date` has no stated timezone (`06` §6, low);
+  - **a held draft's writer tokens and cost are not counted** in the draft stage summary: `tokens_used`/`est_cost_usd` only add on success, so the live v11 run reported $0 for 2 real calls (`06` §6).
+
+**Addendum — v11 applied + one live draft (operator-approved, same session)**
+```
+$ pnpm exec tsx scripts/update-writer-prompt-v11.ts --apply
+WROTE writer_prompt_email v11
+$ pnpm exec tsx scripts/test-draft.ts --limit 1        (live writer v11, synthetic fixture "Draft Fixture Realty 1", E1 + E2 as in S19)
+[draft] claim guard rejected lead addcbf78… — retrying
+[draft] claim guard rejected lead addcbf78… — holding
+{"leads_picked":1,"drafted":0,"claim_held":1,"tokens_used":0,"est_cost_usd":0}      ← held drafts are not costed (Problems)
+rejections:
+  attempt 1: claim guard: step 2: unsupported_prospect_fact "Hiring": inference: "Hiring" is not in the cited evidence (E1,E2)
+  attempt 2: claim guard: step 1: uncovered_fact "1": number "1" is not inside any claim
+lead → manual_hold (claim_guard_hold), prompt_version 11 · 0 touches, no card · 5/6 (the "touches exist" check fails on a hold, as designed)
+BEFORE = AFTER (leads 36, touches 13, lead_events 263)
+```
+The attempt-2 draft, kept on the `claim_guard_hold` event (attempt 1's text is not stored; only its rejection is):
+- **Step 1** — subject "Draft Fixture Realty 1 contact page". Body: "Every enquiry sent to Draft Fixture Realty 1 lands in a shared team inbox with no routing or auto-response behind it. / That means a buyer's question sits until someone on the team manually checks and replies — and Follow Up Boss on the listings pages doesn't change what happens at the contact step. If the inbox isn't watched, the lead waits. / Happy to write up what I'd change, if that's useful." Claims:
+  - [prospect_fact] "Every enquiry sent to … lands in a shared team inbox with no routing or auto-response behind it." ← E1, E2
+  - [inference] "Follow Up Boss on the listings pages doesn't change what happens at the contact step." ← E1, E2
+  - [offer] the approved line.
+- **Step 2** — Body: "One thing worth noting: Follow Up Boss is embedded on the listings pages, but there's no scheduling or auto-response widget on any page — so the CRM is receiving data without anything closing the loop on the contact side. / That gap means a lead can view a listing, send a message, and get nothing back until someone manually checks the team inbox. / Happy to write up …". Claims:
+  - [prospect_fact] "Follow Up Boss is embedded on the listings pages, but there's no scheduling or auto-response widget on any page" ← E2
+  - [inference] "the CRM is receiving data without anything closing the loop on the contact side." ← E1, E2
+  - [inference] "a lead can view a listing, send a message, and get nothing back until someone manually checks the team inbox." ← E1, E2
+  - [offer] the approved line.
+- **Step 3** — not assembled for a held draft. It is the fixed `honest_close` template, with no claims.
+
+**Checked against the S19 defects (my review):**
+
+| S19 defect | v11 attempt 2 | Verdict |
+|---|---|---|
+| Step 2 repeats step 1's evidence | Step 1 cites E1 + E2, i.e. the fixture's only two items; step 2 cites E2 and E1 + E2 | ❌ **Not fixed by the prompt.** The deterministic `step2_repeats_step1` would have refused it, but the claim guard held first. With 2 evidence items, a writer that cites both in step 1 leaves step 2 nothing new |
+| Visitor/buyer-behaviour claims ("they fill out the form and wait") | Step 2: "a lead can view a listing, send a message, and get nothing back …" is a behaviour narrative the evidence does not state. Step 1's uncited "a buyer's question sits …" / "the lead waits" restate the qualifier's hypothesis | ❌ **Still present** (weaker than S19, but present) |
+| "usually / most / often" generalisation | none | ✅ fixed |
+| Detail missing from, or contrary to, the evidence ("fill out the form" vs E1, "the next showing") | The form contradiction and "the next showing" are gone. New over-reaches: "every enquiry … lands", "no routing" (E1 only says the page posts team@ "rather than a routed form"), "on any page" (E2: "any page **crawled**"), and "the CRM is receiving data" (nowhere in the evidence) | ⚠️ **partly fixed** |
+
+The guard caught two other things: an invented "Hiring" (attempt 1 pulled the qualifier's `triggers`, which are not evidence) and the fixture name's "1" in an uncovered subject. The latter is a fixture artifact: S19's subject happened not to name the company.
+
+**Conclusion:** v11 removed the generic claims and the contradiction. It did not stop behaviour narration or the step-1-cites-everything pattern. The deterministic checks (claim guard, `step2_repeats_step1`) are what stop these drafts, and operator review remains the backstop for the semantic gap (`06` §6).
 
 **Next action**
-- **Operator:** OK or change `writer_prompt_email` v11 (dry run above), then `pnpm exec tsx scripts/update-writer-prompt-v11.ts --apply`. Optional: one live `test-draft --limit 1` on a synthetic fixture (≈ $0.02) to see v11 output.
+- **Operator:** decide whether a second live v11 draft is worth it (≈ $0.035). If so, the fixture should have a third evidence item and a company name without a digit; otherwise a hold is again likely for fixture reasons. Or leave v11 as is: it holds safely.
 - **S21 — U6c build, part 3** (`09` §U6c):
   - `email_sent` step N → touch N `sent` + `record_provider_send`;
   - `sent_step_unknown`;
