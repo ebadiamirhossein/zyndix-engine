@@ -24,7 +24,15 @@
     "test:sequence-rules": "tsx --test src/lib/stages/draft/sequence.test.ts",
     "test:sequence": "tsx scripts/test-u6c-sequence.ts",
     "test:stops": "tsx scripts/test-u6c-stops.ts",
-    "test:campaign-sequence": "tsx --test src/lib/sending/campaign-sequence.test.ts"
+    "test:campaign-sequence": "tsx --test src/lib/sending/campaign-sequence.test.ts",
+    "test:orchestrator-rules": "tsx --test src/lib/orchestrator/orchestrator.test.ts",
+    "test:orchestrator": "tsx scripts/test-u9-orchestrator.ts",
+    "test:research-parsers": "tsx --test src/lib/research/research.test.ts",
+    "test:research": "tsx scripts/test-ur-research.ts",
+    "test:classify-policy": "tsx --test src/lib/stages/classify/policy.test.ts",
+    "test:classify": "tsx scripts/test-u7-classify.ts",
+    "test:calendly-rules": "tsx --test src/lib/webhooks/calendly.test.ts",
+    "test:calendly": "tsx scripts/test-u8-calendly.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

@@ -4,10 +4,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { InstantlyClient } from "@/lib/integrations/instantly";
 import type { JobQueue } from "@/lib/jobs/queue";
+import { CLASSIFY_REPLY_JOB_TYPE } from "@/lib/jobs/types";
+import { checkBounceRate } from "@/lib/sending/bounce-rate";
 import { ledgerDate, rampQuota } from "@/lib/scheduler/windows";
 import { canonicalJson } from "@/lib/sending/approval";
 import { RECIPIENT_CHECK_DELAY_MS, RECIPIENT_CHECK_JOB_TYPE, type RecipientCheckPayload } from "@/lib/sending/recipient-check";
-import { pauseSender, stopSequence } from "@/lib/sending/stop";
+import { stopSequence } from "@/lib/sending/stop";
 import { normalizeEmail } from "@/lib/sending/suppression";
 import type { createStateStore } from "@/lib/state/core";
 import { instantlyWebhookSchema, type InstantlyWebhookPayload } from "@/lib/validation/external";
@@ -17,6 +19,7 @@ import type { DatabaseWithEnrollments, DatabaseWithWebhooks, InstantlyEnrollment
 import type { LeadState } from "@/types/enums";
 
 import { type ExceptionKind, raiseException, WebhookProcessingError } from "./exceptions";
+import { markFailed, markProcessed, persistEvent } from "./persist";
 
 // Moved in S21 (09 §U6c): raiseException/ExceptionKind to ./exceptions and
 // pauseSender to lib/sending/stop.ts. Re-exported for existing importers.
@@ -141,38 +144,6 @@ export function instantlyExternalId(raw: Record<string, unknown>): string {
   return `ix:${createHash("sha256").update(canonicalJson(basis)).digest("hex")}`;
 }
 
-async function persistEvent(
-  db: WebhookDb,
-  raw: Record<string, unknown>,
-): Promise<{ id: string; duplicate: boolean; processed: boolean }> {
-  const externalId = instantlyExternalId(raw);
-  const eventType = typeof raw.event_type === "string" ? raw.event_type : "invalid";
-  const { data, error } = await db
-    .from("webhook_events")
-    .insert({ provider: PROVIDER, external_id: externalId, event_type: eventType, payload: raw as Json, processed: false })
-    .select("id")
-    .single();
-  if (!error && data) return { id: data.id, duplicate: false, processed: false };
-  if (error?.code !== "23505") throw new WebhookProcessingError(`persist webhook_event: ${error?.message ?? "no row"}`);
-
-  const { data: existing, error: loadError } = await db
-    .from("webhook_events")
-    .select("id, processed")
-    .eq("provider", PROVIDER)
-    .eq("external_id", externalId)
-    .single();
-  if (loadError || !existing) throw new WebhookProcessingError(`load duplicate webhook_event: ${loadError?.message}`);
-  return { id: existing.id, duplicate: true, processed: Boolean(existing.processed) };
-}
-
-async function markProcessed(db: WebhookDb, eventId: string, now: Date): Promise<void> {
-  const { error } = await db
-    .from("webhook_events")
-    .update({ processed: true, processed_at: now.toISOString(), processing_error: null })
-    .eq("id", eventId);
-  if (error) throw new WebhookProcessingError(`mark processed: ${error.message}`);
-}
-
 // ---------------------------------------------------------------------------
 // Processing
 // ---------------------------------------------------------------------------
@@ -182,7 +153,12 @@ export async function processInstantlyEvent(
   raw: Record<string, unknown>,
 ): Promise<WebhookOutcome> {
   const now = (deps.now ?? (() => new Date()))();
-  const stored = await persistEvent(deps.db, raw);
+  const stored = await persistEvent(deps.db, {
+    provider: PROVIDER,
+    externalId: instantlyExternalId(raw),
+    eventType: typeof raw.event_type === "string" ? raw.event_type : "invalid",
+    raw,
+  });
   // A redelivery of a processed event changes nothing. An unprocessed one
   // (earlier failure) is replayed: every step below is idempotent.
   if (stored.duplicate && stored.processed) return { kind: "duplicate", eventId: stored.id };
@@ -192,8 +168,7 @@ export async function processInstantlyEvent(
     await markProcessed(deps.db, stored.id, now);
     return outcome;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await deps.db.from("webhook_events").update({ processing_error: message.slice(0, 2000) }).eq("id", stored.id);
+    await markFailed(deps.db, stored.id, error);
     throw error;
   }
 }
@@ -445,6 +420,15 @@ const handleReply: Handler = async (deps, { eventId, payload, lead, now }) => {
   }
   // Provider side, beside Instantly's own stop_on_reply (09 §U6c scope 4).
   await stopSequence(deps, lead.id, "reply_received", { eventId });
+  // U7: classify after the freeze, never before it. One job per reply email;
+  // the idempotency key makes a redelivery or the reply poll a no-op.
+  if (payload.email_id && (await currentState(deps.db, lead.id)) === "replied") {
+    await deps.queue.enqueue({
+      type: CLASSIFY_REPLY_JOB_TYPE,
+      payload: { lead_id: lead.id, email_id: payload.email_id, webhook_event_id: eventId },
+      idempotencyKey: `classify:${payload.email_id}`,
+    });
+  }
   return { kind: "processed", eventId, action: "reply_frozen", leadId: lead.id };
 };
 
@@ -785,10 +769,16 @@ async function markLatestOutbound(db: WebhookDb, leadId: string, patch: { replie
 const KILLABLE_TOUCH_STATUSES = ["drafted", "pending_approval", "approved", "edited"];
 
 /**
+ * Jobs a freeze never cancels: the post-send recipient check (an email that
+ * already left must still be checked) and the reply classifier (U7: it runs
+ * after the freeze, and a redelivery re-freezes).
+ */
+const FREEZE_EXEMPT_JOB_TYPES = `(${RECIPIENT_CHECK_JOB_TYPE},${CLASSIFY_REPLY_JOB_TYPE})`;
+
+/**
  * Stops everything not yet dispatched for this lead, on every channel: queued
  * jobs referencing its touches or the lead are cancelled (except the
- * post-send recipient check: an email that already left must still be
- * checked), and outbound touches that have not left are killed. A job already leased is stopped by the send
+ * FREEZE_EXEMPT_JOB_TYPES), and outbound touches that have not left are killed. A job already leased is stopped by the send
  * stage's second preflight, which sees the reply/suppression written here.
  */
 async function freezeOutreach(db: WebhookDb, leadId: string, now: Date): Promise<{ cancelled_jobs: number; killed_touches: number }> {
@@ -803,7 +793,7 @@ async function freezeOutreach(db: WebhookDb, leadId: string, now: Date): Promise
       .from("jobs")
       .update({ state: "cancelled", finished_at: finished, last_error: "frozen by webhook" })
       .eq("state", "queued")
-      .neq("type", RECIPIENT_CHECK_JOB_TYPE)
+      .not("type", "in", FREEZE_EXEMPT_JOB_TYPES)
       .in("payload->>touch_id", touchIds)
       .select("id");
     if (jobError) throw new WebhookProcessingError(`cancel touch jobs: ${jobError.message}`);
@@ -813,7 +803,7 @@ async function freezeOutreach(db: WebhookDb, leadId: string, now: Date): Promise
     .from("jobs")
     .update({ state: "cancelled", finished_at: finished, last_error: "frozen by webhook" })
     .eq("state", "queued")
-    .neq("type", RECIPIENT_CHECK_JOB_TYPE)
+    .not("type", "in", FREEZE_EXEMPT_JOB_TYPES)
     .eq("payload->>lead_id", leadId)
     .select("id");
   if (leadJobError) throw new WebhookProcessingError(`cancel lead jobs: ${leadJobError.message}`);
@@ -845,39 +835,3 @@ async function ensureSuppressed(db: WebhookDb, email: string, reason: string, so
   if (insertError) throw new WebhookProcessingError(`suppression insert: ${insertError.message}`);
 }
 
-/** bounce_rate_7d = bounced / sent over the last 7 days; above the auto_pause threshold → paused. */
-async function checkBounceRate(deps: InstantlyWebhookDeps, eventId: string, accountId: string, now: Date): Promise<void> {
-  const since = new Date(now.getTime() - 7 * DAY_MS).toISOString();
-  const { data: sent, error } = await deps.db
-    .from("touches")
-    .select("status")
-    .eq("send_account_id", accountId)
-    .eq("direction", "outbound")
-    .gte("sent_at", since);
-  if (error) throw new WebhookProcessingError(`bounce rate: ${error.message}`);
-  const total = (sent ?? []).length;
-  if (total === 0) return;
-  const rate = (sent ?? []).filter((t) => t.status === "bounced").length / total;
-
-  const defaults = capacityDefaultsSchema.parse((await deps.getActiveSetting("capacity_defaults")).value);
-  const threshold = defaults.auto_pause.bounce_rate_7d;
-  const paused = rate > threshold;
-  const { data: account, error: accountError } = await deps.db
-    .from("send_accounts")
-    .update({
-      bounce_rate_7d: rate,
-      ...(paused ? { health: "paused", paused_reason: `bounce_rate_7d ${rate.toFixed(3)} > ${threshold}` } : {}),
-    })
-    .eq("id", accountId)
-    .select("identifier, instantly_campaign_id")
-    .single();
-  if (accountError) throw new WebhookProcessingError(`bounce rate update: ${accountError.message}`);
-  if (!paused) return;
-
-  await pauseSender(deps, {
-    account: { id: accountId, identifier: account?.identifier ?? null, instantly_campaign_id: account?.instantly_campaign_id ?? null },
-    reason: null, // health/paused_reason already written above, together with bounce_rate_7d
-    eventId,
-    why: `bounce_rate_7d ${(rate * 100).toFixed(1)}% > ${(threshold * 100).toFixed(1)}% (${total} sent in 7d)`,
-  });
-}

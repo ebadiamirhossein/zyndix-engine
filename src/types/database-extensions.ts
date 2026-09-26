@@ -1,5 +1,13 @@
 import type { Database, Json } from "@/types/database";
-import type { AppRole, CapacityReservationState, JobState, OutboxOperation, OutboxState } from "@/types/enums";
+import type {
+  AppRole,
+  CapacityReservationState,
+  EvidenceSourceType,
+  JobState,
+  OutboxOperation,
+  OutboxState,
+  ResearchRunStatus,
+} from "@/types/enums";
 
 /** Table added in 0004_source_cursors.sql — merge into database.ts after gen:types. */
 export type DatabaseWithSourceCursors = Database & {
@@ -363,6 +371,103 @@ export type DatabaseWithEnrollments = Omit<DatabaseWithWebhooks, "public"> & {
           p_approved_by: string;
         };
         Returns: Json;
+      };
+    };
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Wave 1 — 0010_meetings.sql (U8) and 0010b_research_evidence.sql (UR)
+// ---------------------------------------------------------------------------
+
+export type MeetingRowShape = {
+  id: string;
+  provider: string;
+  external_id: string;
+  scheduled_event_uri: string | null;
+  rescheduled_from: string | null;
+  rescheduled_to: string | null;
+  lead_id: string | null;
+  company_id: string | null;
+  invitee_email: string;
+  invitee_name: string | null;
+  event_name: string | null;
+  status: "scheduled" | "canceled" | "rescheduled" | "held" | "no_show";
+  start_at: string | null;
+  end_at: string | null;
+  canceled_at: string | null;
+  canceled_by: string | null;
+  canceler_type: string | null;
+  cancel_reason: string | null;
+  no_show_at: string | null;
+  outcome_recorded_by: string | null;
+  outcome_recorded_at: string | null;
+  webhook_event_id: string | null;
+  raw: Json | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type ResearchRunRowShape = {
+  id: string;
+  company_id: string;
+  lead_id: string | null;
+  source_type: EvidenceSourceType;
+  actor_id: string | null;
+  apify_run_id: string | null;
+  status: ResearchRunStatus;
+  reused_run_id: string | null;
+  item_count: number;
+  est_cost_usd: number | null;
+  max_charge_usd: number | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type EvidenceItemRowShape = {
+  id: string;
+  company_id: string;
+  lead_id: string | null;
+  research_run_id: string | null;
+  source_type: EvidenceSourceType;
+  source_url: string;
+  title: string | null;
+  excerpt: string;
+  published_at: string | null;
+  fetched_at: string;
+  actor_id: string | null;
+  content_hash: string;
+  label: "observed" | "inferred" | "prospect_confirmed" | "contradicted" | "unknown";
+  raw: Json | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+/** The database with every Wave 1 table (meetings, research_runs, evidence_items). */
+export type DatabaseWithWave1 = Omit<DatabaseWithEnrollments, "public"> & {
+  public: Omit<DatabaseWithEnrollments["public"], "Tables"> & {
+    Tables: DatabaseWithEnrollments["public"]["Tables"] & {
+      meetings: {
+        Row: MeetingRowShape;
+        Insert: Partial<MeetingRowShape> & Pick<MeetingRowShape, "external_id" | "invitee_email">;
+        Update: Partial<MeetingRowShape>;
+        Relationships: [];
+      };
+      research_runs: {
+        Row: ResearchRunRowShape;
+        Insert: Partial<ResearchRunRowShape> & Pick<ResearchRunRowShape, "company_id" | "source_type">;
+        Update: Partial<ResearchRunRowShape>;
+        Relationships: [];
+      };
+      evidence_items: {
+        Row: EvidenceItemRowShape;
+        Insert: Partial<EvidenceItemRowShape> &
+          Pick<EvidenceItemRowShape, "company_id" | "source_type" | "source_url" | "excerpt" | "fetched_at" | "content_hash">;
+        Update: Partial<EvidenceItemRowShape>;
+        Relationships: [];
       };
     };
   };

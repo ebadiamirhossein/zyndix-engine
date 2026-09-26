@@ -94,33 +94,71 @@ export type InstantlyWebhookPayload = z.infer<typeof instantlyWebhookSchema>;
 // Calendly webhook envelope (doc 03 §4: invitee.created)
 // ---------------------------------------------------------------------------
 
-export const calendlyInviteeSchema = z
+// Field names from the Calendly OpenAPI spec (developer.calendly.com/openapi/
+// calendly-api.yaml, read 2026-09-26): WebhookPayload {event, created_at,
+// created_by, payload}; for invitee.* and invitee_no_show.* the payload is an
+// InviteePayload. Only the fields the engine reads are modelled; everything
+// else passes through into webhook_events.payload untouched.
+
+export const CALENDLY_INVITEE_EVENTS = [
+  "invitee.created",
+  "invitee.canceled",
+  "invitee_no_show.created",
+  "invitee_no_show.deleted",
+] as const;
+
+export type CalendlyInviteeEvent = (typeof CALENDLY_INVITEE_EVENTS)[number];
+
+export const calendlyCancellationSchema = z
   .object({
-    email: z.string().email(),
-    name: z.string().optional(),
-    uri: z.string().optional(),
+    canceled_by: z.string(),
+    reason: z.string().nullable(),
+    canceler_type: z.enum(["host", "invitee"]),
+    created_at: z.string(),
   })
   .passthrough();
 
-export const calendlyWebhookSchema = z
+export const calendlyScheduledEventSchema = z
   .object({
-    event: z.string(),
-    created_at: z.string().optional(),
-    payload: z
-      .object({
-        email: z.string().email().optional(),
-        invitee: calendlyInviteeSchema.optional(),
-        scheduled_event: z
-          .object({
-            uri: z.string().optional(),
-            start_time: z.string().optional(),
-          })
-          .passthrough()
-          .optional(),
-      })
-      .passthrough(),
+    uri: z.string().url(),
+    name: z.string().nullable().optional(),
+    status: z.enum(["active", "canceled"]).optional(),
+    start_time: z.string().datetime({ offset: true }),
+    end_time: z.string().datetime({ offset: true }),
   })
   .passthrough();
+
+/** InviteePayload: `uri` is the invitee's canonical id (the meeting key). */
+export const calendlyInviteeSchema = z
+  .object({
+    uri: z.string().url(),
+    email: z.string().email(),
+    name: z.string().optional(),
+    status: z.enum(["active", "canceled"]),
+    timezone: z.string().nullable().optional(),
+    event: z.string().optional(),
+    created_at: z.string().optional(),
+    rescheduled: z.boolean(),
+    old_invitee: z.string().url().nullable(),
+    new_invitee: z.string().url().nullable(),
+    cancellation: calendlyCancellationSchema.nullable().optional(),
+    no_show: z.object({ uri: z.string(), created_at: z.string() }).passthrough().nullable().optional(),
+    scheduled_event: calendlyScheduledEventSchema,
+  })
+  .passthrough();
+
+export type CalendlyInvitee = z.infer<typeof calendlyInviteeSchema>;
+
+export const calendlyWebhookSchema = z
+  .object({
+    event: z.enum(CALENDLY_INVITEE_EVENTS),
+    created_at: z.string(),
+    created_by: z.string().optional(),
+    payload: calendlyInviteeSchema,
+  })
+  .passthrough();
+
+export type CalendlyWebhookPayload = z.infer<typeof calendlyWebhookSchema>;
 
 // ---------------------------------------------------------------------------
 // Telegram Bot API update (doc 03 §5)

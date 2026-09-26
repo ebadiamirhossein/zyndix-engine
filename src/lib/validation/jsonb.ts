@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { evidenceSourceTypeSchema, REPLY_CLASSIFICATIONS, replyPolicyActionSchema } from "@/types/enums";
+
 // ---------------------------------------------------------------------------
 // Qualification jsonb (doc 02 §2.3, doc 04 qualifier output)
 // Field names follow doc 04: { source, observation } — not fact/source_url.
@@ -20,6 +22,30 @@ export const evidenceItemSchema = z
   .strict();
 
 export const evidenceArraySchema = z.array(evidenceItemSchema).min(1);
+
+/**
+ * One item of `qualification.evidence` as STORED (09 §UR, Wave 1). The
+ * qualifier's own items are `{source, observation}` (evidenceItemSchema); the
+ * qualify stage appends research items deterministically, each carrying its
+ * provenance so the claim guard can check freshness per item and quotes
+ * against the verbatim excerpt. `observation` of a research item IS the
+ * verbatim excerpt (never a paraphrase). Positional E-ids (E1…En) are assigned
+ * over this stored array, so appended items keep stable ids.
+ */
+export const storedEvidenceItemSchema = z
+  .object({
+    source: z.enum([...EVIDENCE_SOURCES, "reviews", "news", "blog"] as const),
+    observation: z.string().min(1),
+    source_type: evidenceSourceTypeSchema.optional(),
+    evidence_item_id: z.string().uuid().optional(),
+    url: z.string().url().optional(),
+    published_at: z.string().datetime({ offset: true }).nullable().optional(),
+    fetched_at: z.string().datetime({ offset: true }).optional(),
+    title: z.string().nullable().optional(),
+  })
+  .strict();
+
+export type StoredEvidenceItem = z.infer<typeof storedEvidenceItemSchema>;
 
 export const triggersSchema = z.array(z.string().min(1));
 
@@ -354,6 +380,14 @@ export const apifyActorTemplatesSchema = z
     site: apifyActorTemplateSchema,
     tech: apifyActorTemplateSchema,
     li_posts: apifyActorTemplateSchema,
+    // 09 §UR (Wave 1): research sources, optional so v1–v3 still parse.
+    // Company posts reuse the li_posts actor with a company URL.
+    li_company_posts: apifyActorTemplateSchema.optional(),
+    li_profile: apifyActorTemplateSchema.optional(),
+    jobs: apifyActorTemplateSchema.optional(),
+    reviews: apifyActorTemplateSchema.optional(),
+    news: apifyActorTemplateSchema.optional(),
+    blog: apifyActorTemplateSchema.optional(),
   })
   .strict();
 
@@ -379,3 +413,116 @@ export const conversionUploadSchema = z
   .strict();
 
 export const conversionUploadsSchema = z.array(conversionUploadSchema);
+
+// ---------------------------------------------------------------------------
+// Wave 1 settings (09 §U9, §UR, §U7). Versioned records, never hardcoded.
+// ---------------------------------------------------------------------------
+
+/**
+ * operations_pause (09 §U9): the global stop plus per-campaign pauses. A
+ * campaign is the sender's Instantly campaign until U14 adds engine campaigns
+ * (operator, Wave 1 plan mode). Account pause stays send_accounts.health.
+ * The global pause halts everything that creates or advances outreach; the
+ * stop-path jobs (SAFETY_JOB_TYPES) keep running. A missing row = not paused.
+ */
+export const operationsPauseSchema = z
+  .object({
+    global: z.boolean(),
+    reason: z.string().nullable(),
+    paused_campaign_ids: z.array(z.string().min(1)),
+  })
+  .strict();
+
+export type OperationsPause = z.infer<typeof operationsPauseSchema>;
+
+const stageBudgetSchema = z.number().int().min(0).max(500);
+
+/**
+ * orchestrator_budgets (09 §U9): per-run limits. `limit` is the stage's batch
+ * size for one orchestrate tick; 0 disables that stage. run_budget_ms bounds
+ * one worker drain inside a cron invocation.
+ */
+export const orchestratorBudgetsSchema = z
+  .object({
+    run_budget_ms: z.number().int().min(5_000).max(800_000),
+    stages: z
+      .object({
+        source: stageBudgetSchema,
+        enrich: stageBudgetSchema,
+        qualify: stageBudgetSchema,
+        verify: stageBudgetSchema,
+        draft: stageBudgetSchema,
+        send_enqueue: stageBudgetSchema,
+        classify: stageBudgetSchema,
+      })
+      .strict(),
+    safety_budget_ms: z.number().int().min(5_000).max(800_000),
+  })
+  .strict();
+
+export type OrchestratorBudgets = z.infer<typeof orchestratorBudgetsSchema>;
+
+const researchSourceSchema = z
+  .object({
+    enabled: z.boolean(),
+    /** Items requested from the actor (maxPosts / rows / maxReviews / maxArticles / pages). */
+    max_items: z.number().int().min(1).max(50),
+    /** Passed as Apify's maxTotalChargeUsd for the run: the provider-side hard cap. */
+    max_charge_usd: z.number().min(0).max(1),
+  })
+  .strict();
+
+/**
+ * research_policy (09 §UR). Off by default: nothing spends Apify credits until
+ * the operator turns it on. Company-level sources are reused for reuse_days;
+ * items older than max_item_age_days are dropped at parse time.
+ */
+export const researchPolicySchema = z
+  .object({
+    enabled: z.boolean(),
+    max_cost_usd_per_lead: z.number().min(0).max(5),
+    reuse_days: z.number().int().min(1).max(365),
+    max_item_age_days: z.number().int().min(1).max(3650),
+    sources: z
+      .object({
+        li_person_post: researchSourceSchema,
+        li_company_post: researchSourceSchema,
+        li_profile: researchSourceSchema,
+        job_post: researchSourceSchema,
+        google_review: researchSourceSchema,
+        news: researchSourceSchema,
+        blog: researchSourceSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
+export type ResearchPolicy = z.infer<typeof researchPolicySchema>;
+
+/**
+ * reply_policy (09 §U7). The deterministic table that decides what happens
+ * after the model classifies a reply. The action enum has no send action, so
+ * an automatic reply cannot be configured (brief §11).
+ */
+export const replyPolicySchema = z
+  .object({
+    table: z
+      .object(
+        Object.fromEntries(REPLY_CLASSIFICATIONS.map((c) => [c, replyPolicyActionSchema])) as Record<
+          (typeof REPLY_CLASSIFICATIONS)[number],
+          typeof replyPolicyActionSchema
+        >,
+      )
+      .strict(),
+    /** Below this confidence the policy routes to human_review whatever the class. */
+    confidence_floor: z.number().min(0).max(1),
+    /** OOO with no stated return date snoozes this many days. */
+    ooo_default_days: z.number().int().min(1).max(90),
+    /** wrong_person with a named referral → this action; without one → table.wrong_person. */
+    wrong_person_with_referral: replyPolicyActionSchema,
+    /** A reply that negotiates price or commits to delivery → this action. */
+    negotiation: replyPolicyActionSchema,
+  })
+  .strict();
+
+export type ReplyPolicy = z.infer<typeof replyPolicySchema>;

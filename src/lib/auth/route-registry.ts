@@ -16,11 +16,19 @@ import type { AppRole } from "@/types/enums";
  */
 export type RouteAuth =
   | { path: string; method: "POST" | "PATCH" | "PUT" | "DELETE"; auth: "session"; role: AppRole }
-  | { path: string; method: "POST" | "PATCH" | "PUT" | "DELETE"; auth: "machine" };
+  | { path: string; method: "POST" | "PATCH" | "PUT" | "DELETE"; auth: "machine" }
+  // Vercel cron invokes with GET (Bearer CRON_SECRET); these routes mutate.
+  | { path: string; method: "GET"; auth: "machine" };
 
 export const MUTATING_ROUTES: readonly RouteAuth[] = [
   { path: "/api/auth/signout", method: "POST", auth: "session", role: "viewer" },
   { path: "/api/webhooks/telegram", method: "POST", auth: "machine" },
+  { path: "/api/webhooks/instantly", method: "POST", auth: "machine" },
+  // Wave 1 (09 §U8, §U9).
+  { path: "/api/webhooks/calendly", method: "POST", auth: "machine" },
+  { path: "/api/cron/orchestrate", method: "GET", auth: "machine" },
+  { path: "/api/cron/safety", method: "GET", auth: "machine" },
+  { path: "/api/cron/daily", method: "GET", auth: "machine" },
 ] as const;
 
 export function sessionRoutes(): readonly Extract<RouteAuth, { auth: "session" }>[] {

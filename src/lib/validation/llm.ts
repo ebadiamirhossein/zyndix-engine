@@ -217,6 +217,26 @@ export const replyClassifierOutputSchema = z
     route_to_human: z.boolean(),
     confidence: z.number().min(0).max(1),
     reason: z.string().min(1),
+    // reply_classifier_prompt v2 (09 §U7, Wave 1). Optional so a v1 answer
+    // still parses; the policy treats a missing value as null / false.
+    /** OOO: the stated return date (YYYY-MM-DD), else null. */
+    return_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .nullable()
+      .optional(),
+    /** wrong_person: the person they named instead, if any. Never contacted automatically. */
+    referral: z
+      .object({
+        name: z.string().min(1).nullable(),
+        email: z.string().email().nullable(),
+        title: z.string().min(1).nullable(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
+    /** The reply negotiates price, terms or delivery commitments (a plain price question is not negotiation). */
+    negotiation: z.boolean().optional(),
   })
   .strict()
   .superRefine((data, ctx) => {

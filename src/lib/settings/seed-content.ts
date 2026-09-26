@@ -324,6 +324,77 @@ export const cta_variants = {
   ],
 } as const;
 
+// ---------------------------------------------------------------------------
+// Wave 1 (09 §U9, §UR, §U7) — seeded by scripts/seed-wave1-settings.ts
+// (dry run by default; --apply is an operator decision).
+// ---------------------------------------------------------------------------
+
+/** Not paused. The operator pauses via Telegram /pause or the dashboard switch. */
+export const operations_pause = {
+  global: false,
+  reason: null,
+  paused_campaign_ids: [] as string[],
+};
+
+/** Per-tick batch sizes. Small on purpose: the approval gate is the bottleneck. */
+export const orchestrator_budgets = {
+  run_budget_ms: 240_000,
+  safety_budget_ms: 270_000, // sweeps time out at 120 s; must stay below maxDuration 300 s
+  stages: {
+    source: 0, // sourcing spends Apollo credits: off until the operator raises it
+    enrich: 5,
+    qualify: 5,
+    verify: 5,
+    draft: 3,
+    send_enqueue: 5,
+    classify: 10,
+  },
+};
+
+/**
+ * Research (UR): OFF. Prices are Apify free-tier pay-per-event (09 §UR,
+ * Wave 1 actor table). max_charge_usd is passed as maxTotalChargeUsd per run.
+ */
+export const research_policy = {
+  enabled: false,
+  max_cost_usd_per_lead: 0.1,
+  reuse_days: 14,
+  max_item_age_days: 365,
+  sources: {
+    li_person_post: { enabled: true, max_items: 5, max_charge_usd: 0.012 },
+    li_company_post: { enabled: true, max_items: 5, max_charge_usd: 0.012 },
+    li_profile: { enabled: true, max_items: 1, max_charge_usd: 0.005 },
+    job_post: { enabled: true, max_items: 5, max_charge_usd: 0.01 },
+    // Off (operator, Wave 1): compass/crawler-google-places needs maxTotalChargeUsd >= 0.5
+    // (actor minimalMaxTotalChargeUsd). Wave 2 evaluates compass/Google-Maps-Reviews-Scraper instead.
+    google_review: { enabled: false, max_items: 10, max_charge_usd: 0.01 },
+    news: { enabled: true, max_items: 5, max_charge_usd: 0.021 },
+    blog: { enabled: true, max_items: 4, max_charge_usd: 0.02 },
+  },
+};
+
+/**
+ * Reply policy (U7). Interested / question / objection always go to a human
+ * with a draft to review; nothing is ever sent automatically. not_now holds
+ * for review rather than recontacting after 60 days (brief §11).
+ */
+export const reply_policy = {
+  table: {
+    interested: "human_draft_review",
+    question: "human_draft_review",
+    objection: "human_draft_review",
+    not_now: "human_review",
+    negative: "close",
+    ooo: "snooze",
+    wrong_person: "close",
+    unsubscribe: "stop_and_suppress",
+  },
+  confidence_floor: 0.7,
+  ooo_default_days: 14,
+  wrong_person_with_referral: "redirect_new_contact",
+  negotiation: "human_review",
+};
+
 export const SEED_SETTINGS: Record<string, unknown> = {
   icp_rubric,
   segments,
@@ -339,4 +410,8 @@ export const SEED_SETTINGS: Record<string, unknown> = {
   send_windows,
   send_policy,
   evidence_policy,
+  operations_pause,
+  orchestrator_budgets,
+  research_policy,
+  reply_policy,
 };

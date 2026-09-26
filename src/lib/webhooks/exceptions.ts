@@ -9,7 +9,16 @@ import type { DatabaseWithWebhooks } from "@/types/database-extensions";
 // sequence stop path (lib/sending/stop.ts). Its own module so that stop.ts and
 // webhooks/instantly.ts can both use it without importing each other.
 
-const PROVIDER = "instantly";
+/** The provider an exception is attributed to (Wave 1: Calendly, research, classify join Instantly). */
+export type ExceptionProvider = "instantly" | "calendly" | "apify" | "anthropic" | "engine";
+
+const PROVIDER_LABEL: Record<ExceptionProvider, string> = {
+  instantly: "Instantly",
+  calendly: "Calendly",
+  apify: "Apify",
+  anthropic: "Classifier",
+  engine: "Engine",
+};
 
 export type ExceptionKind =
   | "unmatched_recipient"
@@ -29,7 +38,13 @@ export type ExceptionKind =
   | "recipient_misaddressed"
   | "recipient_check_unreadable"
   | "stopped_lead_active"
-  | "unknown_active_lead";
+  | "unknown_active_lead"
+  // Wave 1 — U8 (Calendly), U7 (classifier), UR (research).
+  | "calendly_unmatched_invitee"
+  | "booking_unexpected_state"
+  | "meeting_reschedule_unlinked"
+  | "classify_failed"
+  | "research_run_failed";
 
 export class WebhookProcessingError extends Error {
   constructor(message: string) {
@@ -54,12 +69,15 @@ export async function raiseException(
     escalate?: boolean;
     /** Send the escalation alert. Defaults to `escalate`; false when the caller alerts itself. */
     notify?: boolean;
+    /** Defaults to "instantly" (every pre-Wave-1 caller). */
+    provider?: ExceptionProvider;
   },
 ): Promise<void> {
   const now = (deps.now ?? (() => new Date()))().toISOString();
+  const provider = input.provider ?? "instantly";
   const { error } = await deps.db.from("exceptions").insert({
     kind: input.kind,
-    provider: PROVIDER,
+    provider,
     webhook_event_id: input.eventId,
     lead_id: input.leadId ?? null,
     detail: input.detail as Json,
@@ -68,6 +86,6 @@ export async function raiseException(
   });
   if (error) throw new WebhookProcessingError(`exception insert: ${error.message}`);
   if (input.notify ?? input.escalate) {
-    await deps.alert(`⚠️ Instantly ${input.kind}${input.leadId ? ` · lead ${input.leadId}` : ""}\n${JSON.stringify(input.detail).slice(0, 400)}`);
+    await deps.alert(`⚠️ ${PROVIDER_LABEL[provider]} ${input.kind}${input.leadId ? ` · lead ${input.leadId}` : ""}\n${JSON.stringify(input.detail).slice(0, 400)}`);
   }
 }

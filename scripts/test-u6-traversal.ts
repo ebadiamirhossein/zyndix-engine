@@ -1080,6 +1080,8 @@ async function cleanup(): Promise<void> {
   if (touchIds.length) await del("jobs(send)", () => db.from("jobs").delete().in("payload->>touch_id", touchIds));
   if (fixture.jobIds.length) await del("jobs(ids)", () => db.from("jobs").delete().in("id", fixture.jobIds));
   await del("jobs(type)", () => db.from("jobs").delete().like("type", `${TAG}.%`));
+  // Wave 1: a reply now enqueues classify.reply for the fixture lead (payload.lead_id).
+  if (fixture.leadIds.length) await del("jobs(lead)", () => db.from("jobs").delete().in("payload->>lead_id", fixture.leadIds));
 
   for (const email of fixture.suppressionEmails) {
     await del("suppression", () => db.from("suppression_list").delete().ilike("email", email));

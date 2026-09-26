@@ -15,6 +15,10 @@ import {
   emailSequenceSchema,
   followupTemplatesSchema,
   sendWindowsSchema,
+  operationsPauseSchema,
+  orchestratorBudgetsSchema,
+  researchPolicySchema,
+  replyPolicySchema,
 } from "@/lib/validation/jsonb";
 import type { Database, Json } from "@/types/database";
 
@@ -36,6 +40,11 @@ export const SETTING_KEYS = [
   "evidence_policy",
   "email_sequence",
   "followup_templates",
+  // Wave 1 (09 §U9, §UR, §U7). Seeded by scripts/seed-wave1-settings.ts.
+  "operations_pause",
+  "orchestrator_budgets",
+  "research_policy",
+  "reply_policy",
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -88,6 +97,14 @@ function schemaForKey(key: string): z.ZodType {
       return followupTemplatesSchema;
     case "apify_actor_templates":
       return apifyActorTemplatesSchema;
+    case "operations_pause":
+      return operationsPauseSchema;
+    case "orchestrator_budgets":
+      return orchestratorBudgetsSchema;
+    case "research_policy":
+      return researchPolicySchema;
+    case "reply_policy":
+      return replyPolicySchema;
     default:
       return z.string().min(1);
   }

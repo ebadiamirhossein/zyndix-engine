@@ -137,6 +137,62 @@ export const REPLY_CLASSIFICATIONS = [
 export type ReplyClassification = (typeof REPLY_CLASSIFICATIONS)[number];
 export const replyClassificationSchema = z.enum(REPLY_CLASSIFICATIONS);
 
+/**
+ * Reply policy actions (09 §U7). The model proposes a classification; the
+ * versioned `reply_policy` table maps it to one of these. There is deliberately
+ * no send action: an automatic reply is unrepresentable (brief §11).
+ */
+export const REPLY_POLICY_ACTIONS = [
+  "human_draft_review",
+  "human_review",
+  "snooze",
+  "redirect_new_contact",
+  "close",
+  "stop_and_suppress",
+  "hold",
+  "excluded_drill",
+] as const;
+
+export type ReplyPolicyAction = (typeof REPLY_POLICY_ACTIONS)[number];
+export const replyPolicyActionSchema = z.enum(REPLY_POLICY_ACTIONS);
+
+// ---------------------------------------------------------------------------
+// Research evidence (09 §UR; check constraint in 0010b_research_evidence.sql)
+// ---------------------------------------------------------------------------
+
+export const EVIDENCE_SOURCE_TYPES = [
+  "li_person_post",
+  "li_company_post",
+  "li_profile",
+  "job_post",
+  "google_review",
+  "news",
+  "blog",
+] as const;
+
+export type EvidenceSourceType = (typeof EVIDENCE_SOURCE_TYPES)[number];
+export const evidenceSourceTypeSchema = z.enum(EVIDENCE_SOURCE_TYPES);
+
+/** Sources researched once per company and reused across its contacts. */
+export const COMPANY_EVIDENCE_SOURCES: readonly EvidenceSourceType[] = [
+  "li_company_post",
+  "job_post",
+  "google_review",
+  "news",
+  "blog",
+];
+
+export const RESEARCH_RUN_STATUSES = ["running", "succeeded", "empty", "failed", "skipped_cap", "reused"] as const;
+export type ResearchRunStatus = (typeof RESEARCH_RUN_STATUSES)[number];
+
+// ---------------------------------------------------------------------------
+// Meetings (09 §U8; check constraint in 0010_meetings.sql)
+// ---------------------------------------------------------------------------
+
+export const MEETING_STATUSES = ["scheduled", "canceled", "rescheduled", "held", "no_show"] as const;
+export type MeetingStatus = (typeof MEETING_STATUSES)[number];
+export const meetingStatusSchema = z.enum(MEETING_STATUSES);
+
 // ---------------------------------------------------------------------------
 // Dashboard roles (brief §3 "authenticated roles: admin, operator, viewer")
 // Ordered least- to most-privileged; ROLE_RANK in lib/auth/core.ts depends on
@@ -161,11 +217,13 @@ export const LEAD_STATE_TRANSITIONS: Record<LeadState, LeadState[]> = {
   drafting: ["pending_approval", "parked", "suppressed", "manual_hold"],
   // → drafting is a redraft (operator decision, Session 13): the old touch is
   // killed first, never deleted, and the event is `redraft_requested`.
-  pending_approval: ["approved", "drafting", "parked", "suppressed", "manual_hold"],
-  approved: ["queued", "drafting", "suppressed", "manual_hold"],
-  queued: ["sent", "suppressed", "manual_hold"],
-  sent: ["replied", "bounced", "no_reply", "suppressed", "manual_hold"],
-  replied: ["classifying", "suppressed", "manual_hold"],
+  // → meeting_booked (09 §U8, Wave 1): a Calendly booking stops outreach from
+  // any state in which outreach is pending, in flight or finished.
+  pending_approval: ["approved", "drafting", "parked", "meeting_booked", "suppressed", "manual_hold"],
+  approved: ["queued", "drafting", "meeting_booked", "suppressed", "manual_hold"],
+  queued: ["sent", "meeting_booked", "suppressed", "manual_hold"],
+  sent: ["replied", "bounced", "no_reply", "meeting_booked", "suppressed", "manual_hold"],
+  replied: ["classifying", "meeting_booked", "suppressed", "manual_hold"],
   classifying: [
     "human_review",
     "sent",
@@ -182,8 +240,8 @@ export const LEAD_STATE_TRANSITIONS: Record<LeadState, LeadState[]> = {
     "manual_hold",
   ],
   bounced: ["parked", "suppressed", "manual_hold"],
-  no_reply: ["drafting", "sequence_done", "suppressed", "manual_hold"],
-  sequence_done: ["suppressed", "manual_hold"],
+  no_reply: ["drafting", "sequence_done", "meeting_booked", "suppressed", "manual_hold"],
+  sequence_done: ["meeting_booked", "suppressed", "manual_hold"],
   meeting_booked: ["handed_off", "suppressed", "manual_hold"],
   handed_off: ["suppressed", "manual_hold"],
   parked: ["enriching", "suppressed", "manual_hold"],
@@ -288,6 +346,10 @@ export type OutboxOperation = (typeof OUTBOX_OPERATIONS)[number];
 export const PREFLIGHT_REFUSALS = [
   // 09 §U6c S20: steps >= 2 are Instantly campaign steps; the engine never sends them.
   "followup_engine_send_disabled",
+  // 09 §U9 (Wave 1): operations_pause — global, then the sender's Instantly campaign.
+  // Deferrable: a pause is lifted by the operator, and the send goes then.
+  "operations_paused",
+  "campaign_paused",
   "blocked_sender_domain",
   "sender_not_allowed",
   "sender_mismatch",
