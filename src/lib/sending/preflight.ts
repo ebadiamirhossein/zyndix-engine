@@ -2,6 +2,7 @@ import type { z } from "zod";
 
 import { nextSendWindow, type SendWindow } from "@/lib/scheduler/windows";
 import { approvalHash, buildApprovalSnapshot, normalizeSignature, threadedSubject } from "@/lib/sending/approval";
+import { diffCampaignSequence, engineTimings, type LiveCampaignStep } from "@/lib/sending/campaign-sequence";
 import { checkSenderDomain } from "@/lib/sending/guard";
 import {
   isSequenceSnapshot,
@@ -47,6 +48,18 @@ export type PreflightContext = {
    * stale. Null/absent for a sequence-approved touch → stale (fail closed).
    */
   sequence?: { touches: SequenceTouch[]; setting: { version: number; value: EmailSequence } } | null;
+  /**
+   * 09 §U6c S20, step 1 only: the steps of the sender's live Instantly
+   * campaign (GET /api/v2/campaigns/{id}). Null = unreadable → drift (hold).
+   */
+  campaignSteps?: LiveCampaignStep[] | null;
+  /**
+   * 09 §U6c S20, step 1 only: Instantly's own daily budget for the sender.
+   * Follow-ups count against daily_limit, so the enroll needs room for itself
+   * plus every follow-up Instantly will send today. Null/unknown values fail
+   * closed (sender_unhealthy provider_daily_unread).
+   */
+  providerDaily?: { dailyLimit: number | null; sentToday: number | null; followupsDueToday: number } | null;
   lead: {
     id: string;
     state: LeadState;
@@ -77,8 +90,6 @@ export type PreflightContext = {
   companyConflicts: number;
   /** Remaining capacity on the sender's ledger day; null = quota unknown (ramp not started is set at reserve). */
   capacityRemaining: number | null;
-  /** For step >= 2: the step-1 email this follow-up replies to. */
-  threadAnchor: { emailId: string; subject: string } | null;
   policy: SendPolicy;
   windows: SendWindowsConfig;
 };
@@ -101,6 +112,11 @@ export function preflight(ctx: PreflightContext): PreflightResult {
   const verdicts: PreflightVerdict[] = [];
   const add = (reason: PreflightRefusal, detail?: Record<string, unknown>) => verdicts.push({ reason, detail });
   const step = ctx.touch.step_no ?? 1;
+
+  // 09 §U6c S20: steps >= 2 are Instantly campaign steps. The engine's
+  // emails/reply path kept our own mailbox in To (Sessions 14, 16), so it is
+  // hard-disabled; runSendJob refuses before this, this is defence in depth.
+  if (step > 1) add("followup_engine_send_disabled", { step });
 
   // Sender: domain guard, then pinning.
   const domain = checkSenderDomain(ctx.sender.identifier);
@@ -143,6 +159,31 @@ export function preflight(ctx: PreflightContext): PreflightResult {
       has_approval: Boolean(ctx.touch.approval_hash),
       hash_matches: ctx.touch.approval_hash === recomputedHash,
     });
+  }
+
+  // 09 §U6c S20: the enroll starts the whole approved sequence, so every step
+  // must be there, approved and non-blank (the blank-email guard: Instantly
+  // sends an empty variable as an empty email), and the live campaign must
+  // send exactly that shape through the delay mapping.
+  if (step === 1) {
+    if (!isSequenceSnapshot(ctx.touch.approval_snapshot)) {
+      add("sequence_incomplete", { reason: "not_sequence_approved" });
+    } else if (ctx.sequence) {
+      const issues = sequenceIncompleteness(ctx.touch.id, ctx.sequence);
+      if (issues.length > 0) add("sequence_incomplete", { issues });
+      if (ctx.campaignSteps === null || ctx.campaignSteps === undefined) {
+        add("campaign_sequence_drift", { reason: "campaign_unreadable", campaign_id: ctx.sender.instantly_campaign_id });
+      } else {
+        const problems = diffCampaignSequence(ctx.campaignSteps, engineTimings(ctx.sequence.setting.value));
+        if (problems.length > 0) {
+          add("campaign_sequence_drift", {
+            campaign_id: ctx.sender.instantly_campaign_id,
+            sequence_setting_version: ctx.sequence.setting.version,
+            problems,
+          });
+        }
+      }
+    }
   }
 
   // Suppression, person-level then company-wide.
@@ -188,17 +229,14 @@ export function preflight(ctx: PreflightContext): PreflightResult {
     }
   }
   if (step === 1 && !ctx.sender.instantly_campaign_id) reasons.push("no_instantly_campaign");
+  const daily = ctx.providerDaily;
+  if (step === 1 && (!daily || daily.dailyLimit === null || daily.sentToday === null)) {
+    reasons.push("provider_daily_unread");
+  }
   if (reasons.length > 0) add("sender_unhealthy", { reasons });
   if (!normalizeSignature(ctx.sender.signature_text)) add("sender_signature_missing", { sender: ctx.sender.identifier });
 
   if (ctx.companyConflicts > 0) add("duplicate_company_active", { other_leads: ctx.companyConflicts });
-
-  if (step > 1) {
-    if (!ctx.threadAnchor) add("thread_anchor_missing", { step });
-    else if ((ctx.touch.subject ?? "").trim() !== threadedSubject(ctx.threadAnchor.subject)) {
-      add("stale_approval", { thread_subject: "follow-up subject must be Re: <step-1 subject>" });
-    }
-  }
 
   // Timezone: unknown is a HOLD (timezone_unknown), never outside_window.
   const timezone = resolveRecipientTimezone({
@@ -221,6 +259,18 @@ export function preflight(ctx: PreflightContext): PreflightResult {
     add("quota_exhausted", { remaining: ctx.capacityRemaining });
   }
 
+  // 09 §U6c S20: this enroll + today's follow-ups must fit Instantly's
+  // daily_limit, or the enroll would wait in the campaign past the window.
+  if (step === 1 && daily && daily.dailyLimit !== null && daily.sentToday !== null) {
+    if (daily.sentToday + daily.followupsDueToday + 1 > daily.dailyLimit) {
+      add("provider_daily_limit", {
+        daily_limit: daily.dailyLimit,
+        sent_today: daily.sentToday,
+        followups_due_today: daily.followupsDueToday,
+      });
+    }
+  }
+
   // De-duplicate a reason reported twice (e.g. reply_freeze from state and touches).
   // Then report in the fixed PREFLIGHT_REFUSALS order.
   const seen = new Set<PreflightRefusal>();
@@ -231,4 +281,32 @@ export function preflight(ctx: PreflightContext): PreflightResult {
 }
 
 /** Refusals the send stage defers to the next window rather than holding. */
-export const DEFERRABLE_REFUSALS: readonly PreflightRefusal[] = ["outside_window", "quota_exhausted"];
+export const DEFERRABLE_REFUSALS: readonly PreflightRefusal[] = ["outside_window", "quota_exhausted", "provider_daily_limit"];
+
+export type SequenceIssue = { step: number; issue: "missing" | "killed" | "not_approved" | "blank"; status?: string | null };
+
+/**
+ * What is wrong with an approved sequence at enroll (09 §U6c S20). Every step
+ * of the active email_sequence needs its touch under the approval hash; the
+ * follow-ups must still be `approved` (killed → the sequence is incomplete);
+ * no step body may be empty or whitespace. Step 1's own status is judged by
+ * stale_approval.
+ */
+export function sequenceIncompleteness(
+  stepOneTouchId: string,
+  sequence: NonNullable<PreflightContext["sequence"]>,
+): SequenceIssue[] {
+  const issues: SequenceIssue[] = [];
+  for (const spec of sequence.setting.value.steps) {
+    const touch = sequence.touches.find((t) => t.step_no === spec.step_no);
+    if (!touch) {
+      issues.push({ step: spec.step_no, issue: "missing" });
+      continue;
+    }
+    if (touch.id !== stepOneTouchId && touch.status !== "approved") {
+      issues.push({ step: spec.step_no, issue: touch.status === "killed" ? "killed" : "not_approved", status: touch.status ?? null });
+    }
+    if (!(touch.body ?? "").trim()) issues.push({ step: spec.step_no, issue: "blank" });
+  }
+  return issues;
+}

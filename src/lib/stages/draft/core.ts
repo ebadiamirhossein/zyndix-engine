@@ -32,11 +32,14 @@ import { loadClaimContext, toClaimEvidence, type ClaimContext } from "./claims-c
 import { checkGenericDraft, wordCount } from "./guard";
 import {
   checkSequenceClaims,
+  formatRepeatIssues,
   formatStepViolations,
   renderFollowupTemplate,
   sequenceConfigIssues,
+  stepsRepeatingStepOne,
   writerStepNos,
   type FollowupTemplates,
+  type RepeatIssue,
   type SequenceStepDraft,
   type StepViolations,
 } from "./sequence";
@@ -210,7 +213,7 @@ function wordCountIssueSteps(error: unknown): number[] {
   return [...steps];
 }
 
-type HoldReason = "claim_guard" | "sequence_shape_invalid" | "template_variable_missing";
+type HoldReason = "claim_guard" | "sequence_shape_invalid" | "template_variable_missing" | "step2_repeats_step1";
 
 type SequenceWriteResult =
   | { ok: true; steps: SequenceStepDraft[]; tokens: number; cost: number }
@@ -221,6 +224,7 @@ type SequenceWriteResult =
       hold: boolean;
       holdReason?: HoldReason;
       failures?: StepViolations[];
+      repeats?: RepeatIssue[];
       lastDraft?: unknown;
     };
 
@@ -245,7 +249,8 @@ async function writeSequenceWithGuard(
   let signOffRetryHint: string | null = null;
   let claimRetryHint: string | null = null;
   let shapeRetryHint: string | null = null;
-  let lastFailure: "nonjson" | "shape" | "signoff" | "generic" | "claims" | null = null;
+  let repeatRetryHint: string | null = null;
+  let lastFailure: "nonjson" | "shape" | "signoff" | "generic" | "claims" | "repeat" | null = null;
   let lastFailures: StepViolations[] | undefined;
   let lastDraft: unknown;
   const evidence = asEvidence(lead.qualification.evidence);
@@ -270,7 +275,7 @@ async function writeSequenceWithGuard(
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     const userParts: string[] = [];
-    for (const hint of [shapeRetryHint, guardRetryHint, wordCountRetryHint, signOffRetryHint, claimRetryHint]) {
+    for (const hint of [shapeRetryHint, guardRetryHint, wordCountRetryHint, signOffRetryHint, claimRetryHint, repeatRetryHint]) {
       if (hint) userParts.push(hint);
     }
     userParts.push(JSON.stringify(writerInput, null, 2));
@@ -428,7 +433,27 @@ async function writeSequenceWithGuard(
     // Claim guard (09 §U6b, per step 09 §U6c): deterministic, on the pre-footer text.
     const claimCheck = checkSequenceClaims(claimContext, steps, sequence);
     if (claimCheck.ok) {
-      return { ok: true, steps, tokens: totalTokens, cost: totalCost };
+      // 09 §U6c S20: a follow-up must cite evidence step 1 does not (a new
+      // angle, not step 1's observation again). One revision retry, then hold.
+      const repeats = stepsRepeatingStepOne(steps);
+      if (repeats.length === 0) {
+        return { ok: true, steps, tokens: totalTokens, cost: totalCost };
+      }
+      const repeatLines = formatRepeatIssues(repeats);
+      rejections.push(`attempt ${attempt}: ${repeatLines.join(" | ")}`);
+      lastFailure = "repeat";
+      console.warn(`[draft] step2_repeats_step1 for lead ${lead.id} — ${repeatRetryHint ? "holding" : "retrying"}`);
+      if (repeatRetryHint) {
+        return { ok: false, rejections, hold: true, holdReason: "step2_repeats_step1", repeats, lastDraft: raw };
+      }
+      repeatRetryHint = [
+        "REVISION REQUIRED (step2_repeats_step1): a follow-up repeated step 1's evidence:",
+        ...repeatLines.map((line) => `- ${line}`),
+        "Step 2 must take a new angle: cite at least one evidence item that step 1 does not cite.",
+        RETURN_SHAPE,
+      ].join("\n");
+      attempt -= 1;
+      continue;
     }
 
     const lines = formatStepViolations(claimCheck.failures);
@@ -454,6 +479,9 @@ async function writeSequenceWithGuard(
 
   if (lastFailure === "claims") {
     return { ok: false, rejections, hold: true, holdReason: "claim_guard", failures: lastFailures, lastDraft };
+  }
+  if (lastFailure === "repeat") {
+    return { ok: false, rejections, hold: true, holdReason: "step2_repeats_step1", lastDraft };
   }
   if (lastFailure === "shape" || lastFailure === "nonjson") {
     return { ok: false, rejections, hold: true, holdReason: "sequence_shape_invalid", lastDraft };
@@ -628,6 +656,7 @@ export async function runDraftStage(
             reasons: [...new Set(f.violations.map((v) => v.reason))],
             violations: f.violations,
           })),
+          ...(result.repeats ? { repeats: result.repeats } : {}),
           draft: result.lastDraft ?? null,
           prompt_version: promptVersion,
           sequence_setting_version: sequenceSetting.version,
@@ -636,6 +665,7 @@ export async function runDraftStage(
         summary.claim_held += 1;
         const reasons =
           failures.map((f) => `step ${f.step}: ${[...new Set(f.violations.map((v) => v.reason))].join(", ")}`).join("; ") ||
+          (result.repeats ? formatRepeatIssues(result.repeats).join("; ") : "") ||
           (holdReason === "claim_guard" ? "malformed writer output" : holdReason);
         try {
           await deps.telegram.sendAlert(

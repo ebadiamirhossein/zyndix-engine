@@ -166,6 +166,8 @@ const createdAccounts: string[] = [];
 const EVIDENCE: Evidence[] = [
   { source: "website", observation: "Contact page lists a shared team inbox and one office phone number." },
   { source: "website", observation: "'Serving Houston and Katy since 2004' appears in the homepage header." },
+  // S20: step 2 must cite an item step 1 does not (step2_repeats_step1).
+  { source: "website", observation: "The contact page offers two ways in: the office phone and the shared team inbox." },
 ];
 const SITE = "Home\nServing Houston and Katy since 2004\nContact: team inbox, office phone";
 
@@ -256,13 +258,16 @@ function stepOne() {
   };
 }
 
-function stepTwo(middle = MIDDLE_2, extra: Claim[] = [], closing = "") {
+function stepTwo(middle = MIDDLE_2, extra: Claim[] = [], closing = "", ids: string[] = ["E2", "E3"]) {
   return {
     step_no: 2,
     body: `Hi Pat,\n\nOne more thought: ${S2_SPAN}. ${middle}${closing ? `\n\n${closing}` : ""}`,
-    claims: [{ span: S2_SPAN, kind: "inference", evidence_ids: ["E1", "E2"] }, ...extra] as Claim[],
+    claims: [{ span: S2_SPAN, kind: "inference", evidence_ids: ids }, ...extra] as Claim[],
   };
 }
+
+/** S20 (a): a step 2 citing only evidence step 1 already cites (E1, E2). */
+const repeating = () => ({ steps: [stepOne(), stepTwo(MIDDLE_2, [], "", ["E1", "E2"])] });
 
 const clean = () => ({ steps: [stepOne(), stepTwo()] });
 
@@ -545,6 +550,60 @@ async function main(): Promise<void> {
     assert("A3: sequence approved with the edited step 2", touches.every((t) => t.status === "approved") && touches[1]?.body === cleanEdit.trim(), tg.messages.slice(-3).join(" / ").slice(0, 200));
     assert("A3: a new hash, ≠ the unedited sequence's hash (the old one is stale)", new Set(touches.map((t) => t.approval_hash)).size === 1 && touches[0]?.approval_hash !== uneditedHash);
     assert("A3: steps 1 and 3 keep their drafted bodies", touches[0]?.body === touches[0]?.draft_body && touches[2]?.body === touches[2]?.draft_body);
+
+    assert("A3: the kept footer is not doubled", ((touches[1]?.body ?? "").match(/Reply STOP/g) ?? []).length === 1);
+
+    // ---------------------------------------------------------------- S20 (c): footer
+    console.log("\n--- S20 (c): an edit that drops the compliance footer gets it re-appended ---");
+    const footer = String((await getActiveSetting("compliance_footer")).value).trim();
+    f = await fixture("footer");
+    scripts.set(f.name, [clean()]);
+    touches = await expectPending("footer setup", f);
+    const noFooter = (touches[1]!.draft_body ?? "").replace(`\n\n${footer}`, "").replace(` ${MIDDLE_2}`, "");
+    assert("footer: the edit text really has no footer", !noFooter.includes(footer) && !/Reply STOP/.test(noFooter));
+    await callback(`edit:${touches[1]!.id}`);
+    await reply(noFooter);
+    touches = await touchesFor(f.leadId);
+    const fsnap = touches[0]?.approval_snapshot as unknown as SequenceApprovalSnapshot;
+    assert(
+      "footer: approved; step 2 body = the edit + the compliance footer, once",
+      touches.every((t) => t.status === "approved") &&
+        touches[1]?.body === `${noFooter.trim()}\n\n${footer}` &&
+        ((touches[1]?.body ?? "").match(/Reply STOP/g) ?? []).length === 1,
+      (touches[1]?.body ?? "").slice(-120),
+    );
+    assert("footer: the hash binds it (snapshot step 2 composed body carries the footer)", (fsnap?.steps[1]?.body ?? "").includes(footer));
+    assert("footer: the APPROVED text shows it", tg.messages.slice(-3).join("\n").includes("Reply STOP"));
+
+    // ---------------------------------------------------------------- S20 (a): step2_repeats_step1
+    console.log("\n--- S20 (a): step 2 cites only step 1's evidence → retry → hold ---");
+    f = await fixture("repeat-hold");
+    scripts.set(f.name, [repeating(), repeating()]);
+    hold = await expectHeld("repeat", f, "step2_repeats_step1", 2);
+    assert(
+      "repeat: both attempts named step2_repeats_step1 with the ids",
+      (hold?.rejections ?? []).filter((r) => r.includes("step 2: step2_repeats_step1 — cites only E1, E2 (step 1 cites E1, E2)")).length === 2,
+      (hold?.rejections ?? []).join(" | "),
+    );
+    f = await fixture("repeat-retry");
+    scripts.set(f.name, [repeating(), clean()]);
+    await expectPending("repeat, then a new id (E3) on the retry", f, 2);
+
+    console.log("\n--- S20 (a): re-checked at approval ---");
+    f = await fixture("repeat-approval");
+    scripts.set(f.name, [clean()]);
+    touches = await expectPending("repeat-approval setup", f);
+    const ledger2 = (touches[1]!.claim_ledger as unknown as Claim[]).map((c) => ({ ...c, evidence_ids: c.evidence_ids.length ? ["E2"] : [] }));
+    await sendDb.from("touches").update({ claim_ledger: ledger2 as unknown as Json }).eq("id", touches[1]!.id);
+    await callback(`approve:${touches[0]!.id}`);
+    const repeatMsg = tg.messages.at(-1) ?? "";
+    assert(
+      "repeat: approval refused with step2_repeats_step1, nothing approved",
+      repeatMsg.includes("Not approved: step2_repeats_step1") &&
+        repeatMsg.includes("step 2: step2_repeats_step1 — cites only E2") &&
+        (await touchesFor(f.leadId)).every((t) => t.status === "pending_approval"),
+      repeatMsg.slice(0, 200),
+    );
 
     // ---------------------------------------------------------------- kill
     console.log("\n--- Kill kills the whole sequence ---");

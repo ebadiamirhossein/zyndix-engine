@@ -89,3 +89,36 @@ export function checkSequenceClaims(
 export function formatStepViolations(failures: StepViolations[], max = 12): string[] {
   return failures.flatMap((f) => formatViolations(f.violations, max).map((line) => `step ${f.step}: ${line}`));
 }
+
+/**
+ * `step2_repeats_step1` (09 §U6c S20, operator addition from the live v10
+ * draft): every writer follow-up must cite at least one evidence id that step
+ * 1 does not, so it is a new angle rather than step 1's observation again.
+ * Deterministic, on the claim ledgers; template steps are exempt. Checked at
+ * draft (one revision retry, then hold) and again at approval.
+ */
+export type RepeatIssue = { step: number; step1_ids: string[]; step_ids: string[] };
+
+export const STEP_REPEATS_REASON = "step2_repeats_step1";
+
+export function stepsRepeatingStepOne(steps: Pick<SequenceStepDraft, "step_no" | "source" | "claims">[]): RepeatIssue[] {
+  const citedBy = (step: Pick<SequenceStepDraft, "claims">) =>
+    [...new Set(step.claims.flatMap((c) => c.evidence_ids))].sort();
+  const first = steps.find((s) => s.step_no === 1);
+  const firstIds = first ? citedBy(first) : [];
+  const issues: RepeatIssue[] = [];
+  for (const step of steps) {
+    if (step.step_no < 2 || step.source !== "writer") continue;
+    const ids = citedBy(step);
+    if (!ids.some((id) => !firstIds.includes(id))) issues.push({ step: step.step_no, step1_ids: firstIds, step_ids: ids });
+  }
+  return issues;
+}
+
+/** One line per issue, e.g. "step 2: step2_repeats_step1 — cites only E1 (step 1 cites E1, E2)". */
+export function formatRepeatIssues(issues: RepeatIssue[]): string[] {
+  return issues.map(
+    (i) =>
+      `step ${i.step}: ${STEP_REPEATS_REASON} — cites ${i.step_ids.length ? `only ${i.step_ids.join(", ")}` : "no evidence"} (step 1 cites ${i.step1_ids.join(", ") || "none"})`,
+  );
+}

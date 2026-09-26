@@ -1,0 +1,24 @@
+{
+  "id": "00000000-0000-4000-8000-00000000c002",
+  "name": "zx-sender-amir@sender.example.invalid",
+  "status": 2,
+  "sequences": [
+    {
+      "steps": [
+        { "type": "email", "delay": 7, "delay_unit": "days", "pre_delay_unit": "days", "variants": [{ "subject": "{{zx_subject}}", "body": "{{zx_body}}" }] },
+        { "type": "email", "delay": 7, "delay_unit": "days", "pre_delay_unit": "days", "variants": [{ "subject": "", "body": "{{zx_body_2}}" }] },
+        { "type": "email", "delay": 7, "delay_unit": "days", "pre_delay_unit": "days", "variants": [{ "subject": "", "body": "{{zx_body_3}}" }] }
+      ]
+    }
+  ],
+  "email_list": ["amir@sender.example.invalid"],
+  "daily_limit": 15,
+  "open_tracking": false,
+  "text_only": true,
+  "first_email_text_only": true,
+  "stop_on_reply": true,
+  "stop_for_company": true,
+  "insert_unsubscribe_header": true,
+  "timestamp_created": "2026-09-25T10:00:00.000Z",
+  "timestamp_updated": "2026-09-26T10:00:00.000Z"
+}

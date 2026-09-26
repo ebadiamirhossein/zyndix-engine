@@ -11,26 +11,46 @@ import {
   type CreateCampaignInput,
 } from "../src/lib/integrations/instantly";
 import { CAMPAIGN_STATUS_LABELS, label, type InstantlyCampaignDetail } from "../src/lib/integrations/instantly-types";
+import {
+  diffCampaignSequence,
+  engineTimings,
+  instantlySequencePayload,
+  planCampaignUpdate,
+} from "../src/lib/sending/campaign-sequence";
 import { checkSenderDomain } from "../src/lib/sending/guard";
+import type { EmailSequence } from "../src/lib/sending/sequence-approval";
+import { createSettingsStore } from "../src/lib/settings/core";
 import { capacity_defaults } from "../src/lib/settings/seed-content";
+import { emailSequenceSchema } from "../src/lib/validation/jsonb";
+import type { Database } from "../src/types/database";
 import type { DatabaseWithSending } from "../src/types/database-extensions";
 
-// Sender pinning, provider side (09 §U5): ONE single-step Instantly campaign
-// per send_account, whose email_list is exactly that mailbox. Step 1 is
-// enrolled into it with the approved subject/body as lead variables; steps
-// >= 2 go out with POST /api/v2/emails/reply from the same mailbox.
+// Sender pinning, provider side (09 §U5): ONE Instantly campaign per
+// send_account, whose email_list is exactly that mailbox. Step 1 is enrolled
+// into it with every approved step's text as lead variables; steps >= 2 are
+// the campaign's own sequence steps (09 §U6c), built from the ACTIVE
+// email_sequence through the delay mapping (lib/sending/campaign-sequence.ts).
 //
-//   pnpm tsx scripts/instantly-sender-campaigns.ts            dry run: payloads + current state (reads only)
-//   pnpm tsx scripts/instantly-sender-campaigns.ts --verify   read-only diff of live config vs desired
-//   pnpm tsx scripts/instantly-sender-campaigns.ts --apply    CREATES missing campaigns — operator approval first
+//   pnpm tsx scripts/instantly-sender-campaigns.ts                     dry run: payloads + current state (reads only)
+//   pnpm tsx scripts/instantly-sender-campaigns.ts --verify            read-only diff of live config vs desired
+//   pnpm tsx scripts/instantly-sender-campaigns.ts --apply             CREATES missing campaigns — operator approval first
+//   pnpm tsx scripts/instantly-sender-campaigns.ts --update            dry run of the sequence PATCH (reads only)
+//   pnpm tsx scripts/instantly-sender-campaigns.ts --update --apply --only <mailbox>
+//                                                                      PATCHES one campaign's sequence — operator approval first
 //
 // --apply writes to Instantly (POST /api/v2/campaigns) and records the id in
-// send_accounts.instantly_campaign_id. Campaigns are created, never activated:
-// nothing sends until U6 activates one for the live drill. No lead is added.
+// send_accounts.instantly_campaign_id. Campaigns are created, never activated.
+// --update refuses unless the campaign is paused (or a never-run draft) AND
+// holds 0 leads (campaign_not_paused / campaign_has_leads): adding steps
+// reactivates previously completed leads. With --apply it PATCHes one
+// campaign (--only is required), then re-reads and diffs it. No lead is added.
 
-const args = new Set(process.argv.slice(2));
+const argv = process.argv.slice(2);
+const args = new Set(argv);
 const apply = args.has("--apply");
 const verify = args.has("--verify");
+const update = args.has("--update");
+const only = argv.includes("--only") ? (argv[argv.indexOf("--only") + 1] ?? "").toLowerCase() : null;
 
 export function campaignName(identifier: string): string {
   return `zx-sender-${identifier.toLowerCase()}`;
@@ -38,11 +58,12 @@ export function campaignName(identifier: string): string {
 
 /**
  * The desired campaign. Tracking off (operator decision 2026-09-25: no custom
- * tracking domain, opens are not a signal); first email text-only; stop on
- * reply and for the whole company; engine-owned timing, so the schedule is
- * open all week — the engine only enrolls inside the recipient's window.
+ * tracking domain, opens are not a signal); text-only; stop on reply and for
+ * the whole company; engine-owned timing, so the schedule is open all week —
+ * the engine only enrolls inside the recipient's window, and 7-day follow-up
+ * delays keep each step on step 1's weekday and local time (Session 17).
  */
-export function desiredCampaign(identifier: string): CreateCampaignInput {
+export function desiredCampaign(identifier: string, sequence: EmailSequence): CreateCampaignInput {
   const quota = capacity_defaults.email_inbox.start_quota;
   return {
     name: campaignName(identifier),
@@ -56,9 +77,7 @@ export function desiredCampaign(identifier: string): CreateCampaignInput {
         },
       ],
     },
-    sequences: [
-      { steps: [{ type: "email", delay: 0, variants: [{ subject: "{{zx_subject}}", body: "{{zx_body}}" }] }] },
-    ],
+    sequences: instantlySequencePayload(engineTimings(sequence)),
     email_list: [identifier],
     daily_limit: quota,
     daily_max_leads: quota,
@@ -76,8 +95,8 @@ export function desiredCampaign(identifier: string): CreateCampaignInput {
 }
 
 /** Differences between a live campaign and the desired config. Empty = compliant. */
-export function diffCampaign(live: InstantlyCampaignDetail, identifier: string): string[] {
-  const want = desiredCampaign(identifier);
+export function diffCampaign(live: InstantlyCampaignDetail, identifier: string, sequence: EmailSequence): string[] {
+  const want = desiredCampaign(identifier, sequence);
   const problems: string[] = [];
   const list = (live.email_list ?? []).map((e) => e.toLowerCase());
   if (list.length !== 1 || list[0] !== identifier.toLowerCase()) {
@@ -99,11 +118,8 @@ export function diffCampaign(live: InstantlyCampaignDetail, identifier: string):
   ] as const) {
     if (live[field] !== want[field]) problems.push(`${field}=${String(live[field])} (want ${String(want[field])})`);
   }
-  const steps = live.sequences?.[0]?.steps ?? [];
-  const variant = steps[0]?.variants?.[0];
-  if (steps.length !== 1 || variant?.subject !== "{{zx_subject}}" || variant?.body !== "{{zx_body}}") {
-    problems.push(`sequence is not the single {{zx_subject}}/{{zx_body}} step (${steps.length} steps)`);
-  }
+  // 09 §U6c: the steps, delays (through the mapping) and templates.
+  problems.push(...diffCampaignSequence(live.sequences?.[0]?.steps, engineTimings(sequence)).map((p) => `sequence: ${p}`));
   return problems;
 }
 
@@ -111,10 +127,15 @@ async function main(): Promise<void> {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY in .env.local");
-  const db = createServiceClient(url, key) as unknown as SupabaseClient<DatabaseWithSending>;
+  const raw = createServiceClient(url, key);
+  const db = raw as unknown as SupabaseClient<DatabaseWithSending>;
   const instantly = createInstantlyClient();
+  const mode = update ? (apply ? "UPDATE APPLY" : "update dry run, read-only") : apply ? "APPLY" : verify ? "verify, read-only" : "dry run, read-only";
+  if (update && apply && !only) throw new Error("--update --apply needs --only <mailbox>: campaigns are PATCHed one at a time");
 
-  console.log(`=== instantly-sender-campaigns (${apply ? "APPLY" : verify ? "verify, read-only" : "dry run, read-only"}) ===`);
+  const sequenceSetting = await createSettingsStore(raw as SupabaseClient<Database>).getActiveSetting("email_sequence" as never);
+  const sequence = emailSequenceSchema.parse(sequenceSetting.value);
+  console.log(`=== instantly-sender-campaigns (${mode}) · email_sequence v${sequenceSetting.version} ===`);
 
   const { data: accounts, error } = await db
     .from("send_accounts")
@@ -135,6 +156,7 @@ async function main(): Promise<void> {
   let failures = 0;
   for (const account of accounts) {
     const identifier = account.identifier ?? "";
+    if (only && identifier.toLowerCase() !== only) continue;
     const guard = checkSenderDomain(identifier);
     if (!guard.ok) {
       console.log(`REFUSE ${identifier}: ${guard.reason}`);
@@ -144,9 +166,14 @@ async function main(): Promise<void> {
     const name = campaignName(identifier);
     const linkedId = account.instantly_campaign_id ?? byName.get(name)?.id ?? null;
 
+    if (linkedId && update) {
+      failures += await updateOne(instantly, identifier, linkedId, sequence);
+      continue;
+    }
+
     if (linkedId) {
       const live = await instantly.getCampaign(linkedId);
-      const problems = diffCampaign(live, identifier);
+      const problems = diffCampaign(live, identifier, sequence);
       console.log(
         `${problems.length ? "DRIFT " : "OK    "} ${identifier} → ${live.id} "${live.name}" status=${label(CAMPAIGN_STATUS_LABELS, live.status)}` +
           ` email_list=${JSON.stringify(live.email_list)} open_tracking=${live.open_tracking} link_tracking=${live.link_tracking ?? "not echoed (sent false)"}` +
@@ -168,7 +195,11 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const payload = desiredCampaign(identifier);
+    if (update) {
+      console.log(`SKIP   ${identifier}: no campaign to update`);
+      continue;
+    }
+    const payload = desiredCampaign(identifier, sequence);
     if (!apply) {
       console.log(`PLAN   create campaign for ${identifier}:\n${JSON.stringify(payload, null, 2)}`);
       continue;
@@ -181,7 +212,7 @@ async function main(): Promise<void> {
       .eq("id", account.id)
       .is("instantly_campaign_id", null);
     if (writeError) throw new Error(`record ${identifier}: ${writeError.message}`);
-    const problems = diffCampaign(created, identifier);
+    const problems = diffCampaign(created, identifier, sequence);
     if (problems.length) {
       console.log(`DRIFT  on create: ${problems.join("; ")}`);
       failures += 1;
@@ -192,11 +223,49 @@ async function main(): Promise<void> {
     }
   }
 
+  if (only && !accounts.some((a) => (a.identifier ?? "").toLowerCase() === only)) {
+    throw new Error(`--only ${only}: no such send_account`);
+  }
   if (failures > 0) {
     console.log(`\nRESULT: ${failures} problem(s)`);
     process.exit(1);
   }
   console.log(apply ? "\nRESULT: applied" : "\nRESULT: pass (nothing written)");
+}
+
+/**
+ * --update for one campaign: refuse unless paused/draft with 0 leads; print
+ * the plan; with --apply, PATCH the sequence and re-verify. Returns the
+ * number of problems (a refusal counts as one).
+ */
+async function updateOne(
+  instantly: ReturnType<typeof createInstantlyClient>,
+  identifier: string,
+  campaignId: string,
+  sequence: EmailSequence,
+): Promise<number> {
+  const live = await instantly.getCampaign(campaignId);
+  const leads = await instantly.listCampaignLeads(campaignId, { limit: 1 });
+  const status = label(CAMPAIGN_STATUS_LABELS, live.status);
+  const plan = planCampaignUpdate(live, leads.items.length, engineTimings(sequence));
+  if (!plan.ok) {
+    console.log(`REFUSE ${identifier} → ${campaignId} status=${status} leads=${leads.items.length}${leads.items.length ? "+" : ""}: ${plan.reason}`);
+    return 1;
+  }
+  if (plan.problems.length === 0) {
+    console.log(`OK     ${identifier} → ${campaignId} status=${status} leads=0: sequence already matches, nothing to PATCH`);
+    return 0;
+  }
+  console.log(
+    `PLAN   PATCH ${campaignId} (${identifier}) status=${status} leads=0 — changes:\n         ${plan.problems.join("\n         ")}\n` +
+      `       body: ${JSON.stringify(plan.payload)}`,
+  );
+  if (!apply) return 0;
+  await instantly.updateCampaign(campaignId, plan.payload);
+  const after = await instantly.getCampaign(campaignId);
+  const problems = diffCampaign(after, identifier, sequence);
+  console.log(problems.length ? `DRIFT  after PATCH: ${problems.join("; ")}` : `UPDATED ${campaignId}: --verify clean`);
+  return problems.length;
 }
 
 main().catch((error: unknown) => {

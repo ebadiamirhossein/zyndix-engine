@@ -12,9 +12,15 @@ import {
 } from "@/lib/integrations/instantly";
 import type { CapacityLedger } from "@/lib/scheduler/ledger";
 import { jitteredSendAt, ledgerDate, nextSendWindow, rampQuota } from "@/lib/scheduler/windows";
-import { composeOutboundBody, sendIdempotencyKey } from "@/lib/sending/approval";
+import { sendIdempotencyKey } from "@/lib/sending/approval";
+import { bodyVariable, SUBJECT_VARIABLE } from "@/lib/sending/campaign-sequence";
 import { checkSenderDomain } from "@/lib/sending/guard";
-import { isSequenceSnapshot } from "@/lib/sending/sequence-approval";
+import {
+  buildSequenceApprovalSnapshot,
+  isSequenceSnapshot,
+  SequenceShapeError,
+  type SequenceApprovalSnapshot,
+} from "@/lib/sending/sequence-approval";
 import {
   DEFERRABLE_REFUSALS,
   preflight,
@@ -26,10 +32,9 @@ import {
 } from "@/lib/sending/preflight";
 import { checkSuppression, normalizeEmail } from "@/lib/sending/suppression";
 import type { createStateStore } from "@/lib/state/core";
-import { raiseException } from "@/lib/webhooks/instantly";
 import { emailSequenceSchema, type capacityDefaultsSchema } from "@/lib/validation/jsonb";
 import type { Database, Json } from "@/types/database";
-import type { DatabaseWithSending, DatabaseWithWebhooks, OutboxRowShape } from "@/types/database-extensions";
+import type { DatabaseWithEnrollments, DatabaseWithSending, OutboxRowShape } from "@/types/database-extensions";
 import type { LeadState } from "@/types/enums";
 
 // Send stage (09 §U5, brief §10). Runs as the U2 job `send.email`, one touch
@@ -46,9 +51,12 @@ import type { LeadState } from "@/types/enums";
 // to send.reconcile. An uncertain outcome is never resent.
 //
 // Timing is engine-owned (operator decision, Session 11): step 1 is enrolled
-// into the bound sender's single-step Instantly campaign only inside the
-// recipient's window; step >= 2 goes out with POST /api/v2/emails/reply from
-// the same mailbox into step 1's thread.
+// into the bound sender's Instantly campaign only inside the recipient's
+// window. Steps >= 2 are that campaign's own sequence steps (09 §U6c): the
+// enroll carries every approved step's composed body as a lead variable, and
+// Instantly sends them in step 1's thread. The engine never sends a step >= 2
+// itself: emails/reply kept our own mailbox in To (Sessions 14, 16), so that
+// path is removed and runSendJob refuses followup_engine_send_disabled.
 
 export const SEND_JOB_TYPE = "send.email";
 export const RECONCILE_JOB_TYPE = "send.reconcile";
@@ -60,7 +68,13 @@ export type SendDeps = {
   db: SendDb;
   instantly: Pick<
     InstantlyClient,
-    "enrollLead" | "replyToEmail" | "getAccount" | "getWarmupAnalytics" | "findLeadInCampaign" | "listEmails"
+    | "enrollLead"
+    | "getAccount"
+    | "getWarmupAnalytics"
+    | "getCampaign"
+    | "getAccountDailyAnalytics"
+    | "findLeadInCampaign"
+    | "listEmails"
   >;
   ledger: Pick<CapacityLedger, "reserve" | "release" | "accept" | "fail" | "markUncertain" | "reconcile" | "getDay">;
   queue: Pick<JobQueue, "enqueue">;
@@ -205,30 +219,111 @@ async function remainingCapacity(
   account: SendAccountRow,
   ramp: CapacityDefaults["email_inbox"],
   today: string,
+  providerDailyLimit: number | null = null,
 ): Promise<number | null> {
   // Ramp not started yet counts from today: the first reservation starts it.
-  const quota = rampQuota(ramp, account.ramp_started_on ?? today, today);
+  const quota = engineQuota(rampQuota(ramp, account.ramp_started_on ?? today, today), providerDailyLimit);
   if (quota === null) return null;
   const day = await deps.ledger.getDay(account.id, today);
   const dayQuota = day?.quota ?? quota;
   return Math.min(quota, dayQuota) - (day?.used ?? 0) - (day?.reserved ?? 0);
 }
 
+/** 09 §U6c S20: the engine quota is min(ramp, Instantly daily_limit) when the limit is known. */
+function engineQuota(ramp: number | null, providerDailyLimit: number | null): number | null {
+  if (ramp === null) return null;
+  return providerDailyLimit === null ? ramp : Math.min(ramp, providerDailyLimit);
+}
+
 async function providerHealth(
   deps: SendDeps,
   identifier: string,
   policy: SendPolicy,
-): Promise<PreflightContext["providerHealth"]> {
+): Promise<{ health: PreflightContext["providerHealth"]; dailyLimit: number | null }> {
   try {
     const account = await deps.instantly.getAccount(identifier);
     const warmup = await deps.instantly.getWarmupAnalytics([identifier]);
     const aggregate = warmup.aggregate_data[identifier] ?? warmup.aggregate_data[identifier.toLowerCase()] ?? null;
     const health = accountHealth(account, aggregate, { minWarmupScore: policy.min_warmup_score });
-    return { verdict: health.verdict, warmupScore: health.warmupScore };
+    const limit = account.daily_limit;
+    return {
+      health: { verdict: health.verdict, warmupScore: health.warmupScore },
+      dailyLimit: typeof limit === "number" && Number.isFinite(limit) && limit >= 0 ? limit : null,
+    };
   } catch {
     // Unreadable health is not healthy: preflight refuses with sender_unhealthy.
+    return { health: null, dailyLimit: null };
+  }
+}
+
+/** The live campaign's steps (09 §U6c S20). Null when unreadable → campaign_sequence_drift. */
+async function campaignSteps(deps: SendDeps, campaignId: string | null): Promise<PreflightContext["campaignSteps"]> {
+  if (!campaignId) return null;
+  try {
+    const campaign = await deps.instantly.getCampaign(campaignId);
+    return campaign.sequences?.[0]?.steps ?? [];
+  } catch {
     return null;
   }
+}
+
+/**
+ * Campaign emails Instantly has sent today for this mailbox (UTC date; the
+ * spec does not state the analytics timezone). No row for the date = 0.
+ * Null when unreadable → sender_unhealthy provider_daily_unread.
+ */
+async function providerSentToday(deps: SendDeps, identifier: string, today: string): Promise<number | null> {
+  try {
+    const rows = await deps.instantly.getAccountDailyAnalytics({ emails: [identifier], startDate: today, endDate: today });
+    const mine = rows.filter((r) => normalizeEmail(r.email_account) === normalizeEmail(identifier) && r.date.slice(0, 10) === today);
+    return mine.reduce((sum, r) => sum + r.sent, 0);
+  } catch {
+    return null;
+  }
+}
+
+const UNIT_MS: Record<string, number> = { minutes: 60_000, hours: 3_600_000, days: DAY_MS };
+
+/**
+ * Follow-ups Instantly will send today from this mailbox (09 §U6c S20): every
+ * still-`approved` step >= 2 whose step 1 went out from this sender, due at
+ * or before the end of today (UTC). Due = step 1's sent_at + the cumulative
+ * delays bound in the step's own sequence snapshot. Overdue ones count too:
+ * Instantly sends them as soon as it can.
+ */
+async function followupsDueToday(deps: SendDeps, senderId: string, now: Date): Promise<number> {
+  const endOfDay = Date.parse(`${ledgerDate(now)}T23:59:59.999Z`);
+  const { data: stepOnes, error } = await deps.db
+    .from("touches")
+    .select("lead_id, sent_at")
+    .eq("send_account_id", senderId)
+    .eq("step_no", 1)
+    .eq("direction", "outbound")
+    .eq("status", "sent")
+    .not("sent_at", "is", null);
+  if (error) throw new SendStageError(`follow-ups due: ${error.message}`);
+  const sentAt = new Map((stepOnes ?? []).filter((t) => t.lead_id).map((t) => [t.lead_id!, Date.parse(t.sent_at!)]));
+  if (sentAt.size === 0) return 0;
+
+  const { data: followups, error: followError } = await deps.db
+    .from("touches")
+    .select("lead_id, step_no, approval_snapshot")
+    .in("lead_id", [...sentAt.keys()])
+    .gte("step_no", 2)
+    .eq("direction", "outbound")
+    .eq("status", "approved");
+  if (followError) throw new SendStageError(`follow-ups due: ${followError.message}`);
+
+  let due = 0;
+  for (const touch of followups ?? []) {
+    if (!touch.lead_id || !isSequenceSnapshot(touch.approval_snapshot)) continue;
+    const steps = (touch.approval_snapshot as unknown as SequenceApprovalSnapshot).steps;
+    const offset = steps
+      .filter((s) => s.step_no <= (touch.step_no ?? 0))
+      .reduce((ms, s) => ms + s.delay * (UNIT_MS[s.delay_unit] ?? DAY_MS), 0);
+    if (sentAt.get(touch.lead_id)! + offset <= endOfDay) due += 1;
+  }
+  return due;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +336,7 @@ async function buildContext(
   sender: SendAccountRow,
   settings: { policy: SendPolicy; windows: SendWindowsConfig; ramp: CapacityDefaults["email_inbox"] },
   now: Date,
-): Promise<{ ctx: PreflightContext; anchor: StepOneAnchor | null }> {
+): Promise<{ ctx: PreflightContext }> {
   const { touch, lead, company } = loaded;
   const step = touch.step_no ?? 1;
   const today = ledgerDate(now);
@@ -276,9 +371,16 @@ async function buildContext(
 
   // A sender the engine has paused (bounce auto-pause, stop_processing_stale)
   // is refused by preflight on `health` alone, so no provider call is made
-  // for it at all: no health/warmup read, no anchor lookup (U6 DoD).
+  // for it at all (U6 DoD).
   const senderPaused = sender.health !== "ok";
-  const anchor = step > 1 ? await findStepOneAnchor(deps, lead, { providerLookup: !senderPaused }) : null;
+  const provider = senderPaused
+    ? { health: null, dailyLimit: null }
+    : await providerHealth(deps, sender.identifier ?? "", settings.policy);
+  const sequence = isSequenceSnapshot(touch.approval_snapshot) ? await loadApprovedSequence(deps, touch) : undefined;
+  // 09 §U6c S20: the enroll-only reads, skipped for a paused sender. The
+  // campaign is compared only against an approved sequence.
+  const enrollReads = step === 1 && !senderPaused;
+  const sentToday = enrollReads ? await providerSentToday(deps, sender.identifier ?? "", today) : null;
 
   const ctx: PreflightContext = {
     now,
@@ -295,7 +397,11 @@ async function buildContext(
       claim_ledger: touch.claim_ledger,
       approval_snapshot: touch.approval_snapshot,
     },
-    sequence: isSequenceSnapshot(touch.approval_snapshot) ? await loadApprovedSequence(deps, touch) : undefined,
+    sequence,
+    campaignSteps: enrollReads && sequence ? await campaignSteps(deps, sender.instantly_campaign_id) : null,
+    providerDaily: enrollReads
+      ? { dailyLimit: provider.dailyLimit, sentToday, followupsDueToday: await followupsDueToday(deps, sender.id, now) }
+      : null,
     lead: {
       id: lead.id,
       state: lead.state as LeadState,
@@ -314,16 +420,15 @@ async function buildContext(
       instantly_campaign_id: sender.instantly_campaign_id,
       signature_text: sender.signature_text,
     },
-    providerHealth: senderPaused ? null : await providerHealth(deps, sender.identifier ?? "", settings.policy),
+    providerHealth: provider.health,
     suppression: { email: suppression.email, domain: suppression.domain },
     hasReply: (replyCount ?? 0) > 0,
     companyConflicts,
-    capacityRemaining: await remainingCapacity(deps, sender, settings.ramp, today),
-    threadAnchor: anchor ? { emailId: anchor.emailId, subject: anchor.subject } : null,
+    capacityRemaining: await remainingCapacity(deps, sender, settings.ramp, today, provider.dailyLimit),
     policy: settings.policy,
     windows: settings.windows,
   };
-  return { ctx, anchor };
+  return { ctx };
 }
 
 /**
@@ -338,7 +443,7 @@ async function loadApprovedSequence(
   if (!touch.lead_id || !touch.approval_hash) return null;
   const { data, error } = await deps.db
     .from("touches")
-    .select("id, step_no, channel, subject, body, prompt_version, claim_ledger")
+    .select("id, step_no, channel, subject, body, prompt_version, claim_ledger, status")
     .eq("lead_id", touch.lead_id)
     .eq("approval_hash", touch.approval_hash);
   if (error) throw new SendStageError(`load sequence touches: ${error.message}`);
@@ -351,70 +456,6 @@ async function loadApprovedSequence(
   const parsed = emailSequenceSchema.safeParse(setting.value);
   if (!parsed.success) return null;
   return { touches: data ?? [], setting: { version: setting.version, value: parsed.data } };
-}
-
-type StepOneAnchor = { emailId: string; threadId: string | null; subject: string; outboxId: string };
-
-/**
- * The Instantly email a follow-up replies to: step 1's sent email, looked up
- * against step 1's OWN mailbox (a property of the lead, not of whichever
- * sender this attempt carries — pinning is preflight's job). Taken from the
- * step-1 outbox row when known, else looked up with GET /api/v2/emails and
- * persisted. Null → thread_anchor_missing.
- */
-async function findStepOneAnchor(
-  deps: SendDeps,
-  lead: LeadRow,
-  options: { providerLookup: boolean },
-): Promise<StepOneAnchor | null> {
-  const { data: rows, error } = await deps.db
-    .from("outbox")
-    .select("*")
-    .eq("lead_id", lead.id)
-    .eq("operation", "enroll")
-    .in("state", ["accepted", "reconciled_sent"])
-    .order("created_at", { ascending: true })
-    .limit(1);
-  if (error) throw new SendStageError(`anchor outbox: ${error.message}`);
-  const first = rows?.[0];
-  if (!first) return null;
-
-  const { data: stepOne, error: touchError } = await deps.db
-    .from("touches")
-    .select("id, subject")
-    .eq("id", first.touch_id)
-    .maybeSingle();
-  if (touchError) throw new SendStageError(`anchor touch: ${touchError.message}`);
-  if (!stepOne?.subject) return null;
-
-  if (first.provider_email_id) {
-    return { emailId: first.provider_email_id, threadId: first.provider_thread_id, subject: stepOne.subject, outboxId: first.id };
-  }
-  if (!options.providerLookup) return null;
-  const stepOneSender = await loadAccount(deps.db, first.send_account_id);
-  if (!lead.email || !stepOneSender?.identifier) return null;
-  let page;
-  try {
-    page = await deps.instantly.listEmails({
-      lead: lead.email,
-      campaignId: first.provider_campaign_id ?? undefined,
-      eaccount: stepOneSender.identifier,
-      emailType: "sent",
-      sortOrder: "asc",
-      limit: 10,
-    });
-  } catch {
-    return null;
-  }
-  const sent = page.items.find((e) => e.ue_type === 1 || e.ue_type === 3) ?? null;
-  if (!sent) return null;
-  await updateOutbox(deps.db, first.id, { provider_email_id: sent.id, provider_thread_id: sent.thread_id ?? null });
-  const { error: touchUpdateError } = await deps.db
-    .from("touches")
-    .update({ provider_message_id: sent.id })
-    .eq("id", first.touch_id);
-  if (touchUpdateError) throw new SendStageError(`anchor touch update: ${touchUpdateError.message}`);
-  return { emailId: sent.id, threadId: sent.thread_id ?? null, subject: stepOne.subject, outboxId: first.id };
 }
 
 async function loadSettings(deps: SendDeps) {
@@ -454,9 +495,10 @@ async function refuse(
     // The window or the day's quota will come round again: defer to the next
     // window (jittered). Deferral requires a resolved timezone — see below.
     // Quota is counted per UTC day, so an exhausted day defers to the first
-    // window that opens after the next UTC midnight.
+    // window that opens after the next UTC midnight. Instantly's daily_limit
+    // (provider_daily_limit) is judged per UTC date too.
     let window = result.window!;
-    if (reasons.includes("quota_exhausted")) {
+    if (reasons.includes("quota_exhausted") || reasons.includes("provider_daily_limit")) {
       const nextUtcDay = new Date(`${ledgerDate(new Date(now.getTime() + DAY_MS))}T00:00:00.000Z`);
       window = nextSendWindow(nextUtcDay, result.timezone!.timeZone, settings.windows);
     }
@@ -506,6 +548,20 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
   const step = loaded.touch.step_no ?? 1;
   const key = sendIdempotencyKey(loaded.touch.id, loaded.touch.approval_hash ?? "none");
 
+  // 0. 09 §U6c S20: a step >= 2 is an Instantly campaign step. The engine
+  //    never sends it — refused before any sender pick, provider call or
+  //    reservation (a hold: there is no window in which it becomes sendable).
+  if (step > 1) {
+    const disabled: PreflightResult = {
+      verdicts: [{ reason: "followup_engine_send_disabled", detail: { step } }],
+      ok: false,
+      timezone: null,
+      window: null,
+      recomputedHash: "",
+    };
+    return refuse(deps, loaded, disabled, null, settings, now, "preflight");
+  }
+
   // 1. Replay protection. Anything past `retry_wait` means a dispatch may have
   //    left: never call the provider again for this key.
   const existing = await getOutboxByKey(deps.db, key);
@@ -546,7 +602,10 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
       .is("ramp_started_on", null);
     if (error) throw new SendStageError(`start ramp: ${error.message}`);
   }
-  const quota = rampQuota(settings.ramp, sender.ramp_started_on ?? today, today);
+  const quota = engineQuota(
+    rampQuota(settings.ramp, sender.ramp_started_on ?? today, today),
+    built.ctx.providerDaily?.dailyLimit ?? null,
+  );
   if (quota === null) throw new SendStageError(`ramp quota unknown for ${sender.id}`);
   const reservation = await deps.ledger.reserve({
     sendAccountId: sender.id,
@@ -616,8 +675,21 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
     });
   }
 
-  // 8. Outbox BEFORE the provider call.
-  const operation = step === 1 ? "enroll" : "reply";
+  // 8. The lead variables: every step's text exactly as the approval hash
+  //    binds it (approved body + mailbox signature, footer included). Rebuilt
+  //    from the same touches and setting preflight has just verified.
+  const variables = enrollVariables(built.ctx, loaded.touch.id);
+  if (!variables.ok) {
+    const incomplete: PreflightResult = {
+      ...result,
+      ok: false,
+      verdicts: [{ reason: "sequence_incomplete", detail: { reason: variables.reason } }],
+    };
+    return refuse(deps, loaded, incomplete, reservationId, settings, now, "final_preflight");
+  }
+
+  // 9. Outbox BEFORE the provider call.
+  const operation = "enroll";
   const outbox = await writeDispatching(deps, existing, {
     touch_id: loaded.touch.id,
     lead_id: loaded.lead.id,
@@ -626,8 +698,8 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
     idempotency_key: key,
     approval_hash: loaded.touch.approval_hash ?? "",
     reservation_id: reservationId,
-    provider_campaign_id: step === 1 ? sender.instantly_campaign_id : null,
-    reply_to_email_id: built.anchor?.emailId ?? null,
+    provider_campaign_id: sender.instantly_campaign_id,
+    reply_to_email_id: null,
   });
   const { error: keyError } = await deps.db
     .from("touches")
@@ -635,58 +707,32 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
     .eq("id", loaded.touch.id);
   if (keyError) throw new SendStageError(`touch idempotency key: ${keyError.message}`);
 
-  // 9. The provider call — the only line that can put mail in an inbox.
-  // The text is the approved body plus the sender's signature, exactly as
-  // hashed at approval (preflight has just re-verified the hash).
-  const outboundText = composeOutboundBody(loaded.touch.body ?? "", sender.signature_text);
+  // 10. The provider call — the only line that can put mail in an inbox.
+  // Instantly sends step 1 now (inside the window) and every later step on
+  // the campaign's own delays, from these variables alone.
   try {
-    if (operation === "enroll") {
-      const enrolled = await deps.instantly.enrollLead({
-        campaignId: sender.instantly_campaign_id!,
-        lead: {
-          email: loaded.lead.email!,
-          first_name: loaded.lead.first_name ?? undefined,
-          last_name: loaded.lead.last_name ?? undefined,
-          company_name: loaded.company?.name ?? undefined,
-          custom_variables: {
-            zx_subject: loaded.touch.subject ?? "",
-            zx_body: toHtmlBody(outboundText),
-            zx_touch_id: loaded.touch.id,
-          },
-        },
-        dedupe: "workspace",
-      });
-      await deps.hooks?.afterDispatch?.();
-      if (enrolled.outcome === "created") {
-        return accept(deps, loaded, outbox, reservationId, sender, { provider_lead_id: enrolled.leadId }, now);
-      }
-      if (enrolled.reason === "already_enrolled") {
-        // Possibly our own earlier dispatch: reconcile, never resend.
-        await markUncertain(deps, outbox, "skipped_already_enrolled", reservationId);
-        return { kind: "uncertain", outboxId: outbox.id, reason: "skipped_already_enrolled" };
-      }
-      return fail(deps, loaded, outbox, reservationId, `enroll_skipped_${enrolled.reason}`);
-    }
-
-    // emails/reply addresses "the sender of the email being replied to" by
-    // default — for our own step 1 that is our own mailbox (U6 drill, Session
-    // 14). The lead goes in additional_recipients; there is no `to` field.
-    const sent = await deps.instantly.replyToEmail({
-      eaccount: sender.identifier!,
-      replyToUuid: built.anchor!.emailId,
-      subject: loaded.touch.subject ?? "",
-      body: { html: toHtmlBody(outboundText), text: outboundText },
-      additionalRecipients: [loaded.lead.email!],
+    const enrolled = await deps.instantly.enrollLead({
+      campaignId: sender.instantly_campaign_id!,
+      lead: {
+        email: loaded.lead.email!,
+        first_name: loaded.lead.first_name ?? undefined,
+        last_name: loaded.lead.last_name ?? undefined,
+        company_name: loaded.company?.name ?? undefined,
+        custom_variables: variables.values,
+      },
+      dedupe: "workspace",
     });
     await deps.hooks?.afterDispatch?.();
-    const provider = { provider_email_id: sent.id, provider_thread_id: sent.thread_id ?? null };
-    // Fail closed: an accepted follow-up that does not list the lead as a
-    // recipient went somewhere else. It is never resent and never counted as
-    // reaching the lead.
-    if (!addressList(sent.to_address_email_list).includes(normalizeEmail(loaded.lead.email))) {
-      return misaddressed(deps, loaded, outbox, reservationId, sender, provider, sent.to_address_email_list, now);
+    if (enrolled.outcome === "created") {
+      await recordEnrollment(deps, loaded, sender.id, sender.instantly_campaign_id!, enrolled.leadId);
+      return accept(deps, loaded, outbox, reservationId, sender, { provider_lead_id: enrolled.leadId }, now);
     }
-    return accept(deps, loaded, outbox, reservationId, sender, provider, now);
+    if (enrolled.reason === "already_enrolled") {
+      // Possibly our own earlier dispatch: reconcile, never resend.
+      await markUncertain(deps, outbox, "skipped_already_enrolled", reservationId);
+      return { kind: "uncertain", outboxId: outbox.id, reason: "skipped_already_enrolled" };
+    }
+    return fail(deps, loaded, outbox, reservationId, `enroll_skipped_${enrolled.reason}`);
   } catch (error) {
     if (error instanceof InstantlyUncertainOutcomeError) {
       await markUncertain(deps, outbox, error.reason, reservationId, error.fingerprint);
@@ -704,6 +750,64 @@ export async function runSendJob(deps: SendDeps, job: JobContext<SendJobPayload>
     // row `dispatching`; the re-claimed job turns it uncertain. Rethrow.
     throw error;
   }
+}
+
+/**
+ * The enroll's custom_variables (09 §U6c): zx_subject, zx_body (step 1),
+ * zx_body_N (each follow-up), zx_touch_id — every body composed exactly as
+ * buildSequenceApprovalSnapshot hashes it, then rendered as HTML line breaks.
+ * Not ok if the sequence cannot be rebuilt or any variable is blank: Instantly
+ * would send a blank email (the blank-email guard, again at the last moment).
+ */
+export function enrollVariables(
+  ctx: PreflightContext,
+  touchId: string,
+): { ok: true; values: Record<string, string>; snapshot: SequenceApprovalSnapshot } | { ok: false; reason: string } {
+  if (!ctx.sequence) return { ok: false, reason: "sequence_not_loaded" };
+  let snapshot: SequenceApprovalSnapshot;
+  try {
+    snapshot = buildSequenceApprovalSnapshot({
+      lead: ctx.lead,
+      sender: ctx.sender,
+      sequence: ctx.sequence.setting,
+      touches: ctx.sequence.touches,
+    });
+  } catch (error) {
+    if (error instanceof SequenceShapeError) return { ok: false, reason: `sequence_not_rebuildable: ${error.message}` };
+    throw error;
+  }
+  const values: Record<string, string> = { [SUBJECT_VARIABLE]: snapshot.steps[0]!.subject, zx_touch_id: touchId };
+  for (const step of snapshot.steps) values[bodyVariable(step.step_no)] = toHtmlBody(step.body);
+  const blank = Object.entries(values).filter(([, v]) => !v.replace(/<br\/>/g, "").trim());
+  if (blank.length > 0) return { ok: false, reason: `blank_variable: ${blank.map(([k]) => k).join(",")}` };
+  return { ok: true, values, snapshot };
+}
+
+/**
+ * The engine's record of the enrollment (09 §U6c, 0009d). Written once the
+ * provider accepted (or reconcile found) the lead. The live-lead unique index
+ * turns a second active row into an error, never a second sequence.
+ */
+async function recordEnrollment(
+  deps: SendDeps,
+  loaded: Loaded,
+  sendAccountId: string,
+  campaignId: string,
+  providerLeadId: string | null,
+): Promise<void> {
+  const snapshot = loaded.touch.approval_snapshot;
+  if (!isSequenceSnapshot(snapshot) || !loaded.touch.approval_hash) return;
+  const db = deps.db as unknown as SupabaseClient<DatabaseWithEnrollments>;
+  const { error } = await db.from("instantly_enrollments").insert({
+    lead_id: loaded.lead.id,
+    send_account_id: sendAccountId,
+    campaign_id: campaignId,
+    provider_lead_id: providerLeadId,
+    sequence_hash: loaded.touch.approval_hash,
+    steps_total: (snapshot as unknown as SequenceApprovalSnapshot).steps.length,
+    state: "active",
+  });
+  if (error) throw new SendStageError(`record enrollment for lead ${loaded.lead.id}: ${error.message}`);
 }
 
 function toHtmlBody(text: string): string {
@@ -771,52 +875,6 @@ async function accept(
 /** Normalized addresses from a comma-separated list ("a@x.com, Name <b@y.com>"). */
 export function addressList(value: string | null | undefined): string[] {
   return (value ?? "").match(/[^\s<>,;"]+@[^\s<>,;"]+/g)?.map((e) => normalizeEmail(e)) ?? [];
-}
-
-/**
- * The provider accepted a follow-up whose recipients do not include the lead.
- * Mail left, so the outbox is settled `accepted` (never resent) and capacity
- * is spent; the touch is `failed` because it did not reach the lead; an
- * escalated `reply_misaddressed` exception alerts the operator and the lead
- * goes to manual_hold.
- */
-async function misaddressed(
-  deps: SendDeps,
-  loaded: Loaded,
-  outbox: OutboxRowShape,
-  reservationId: string,
-  sender: SendAccountRow,
-  provider: Partial<OutboxRowShape>,
-  toAddresses: string | null | undefined,
-  now: Date,
-): Promise<SendOutcome> {
-  const message = `reply_misaddressed: to=${toAddresses ?? "(none)"} expected=${normalizeEmail(loaded.lead.email)}`;
-  await updateOutbox(deps.db, outbox.id, { ...provider, state: "accepted", settled_at: now.toISOString(), last_error: message.slice(0, 2000) });
-  await deps.ledger.accept(reservationId);
-  const { error } = await deps.db
-    .from("touches")
-    .update({
-      status: "failed",
-      sent_at: now.toISOString(),
-      send_account_id: sender.id,
-      ...(provider.provider_email_id ? { provider_message_id: provider.provider_email_id } : {}),
-    })
-    .eq("id", loaded.touch.id);
-  if (error) throw new SendStageError(`touch misaddressed: ${error.message}`);
-  const detail = {
-    touch_id: loaded.touch.id,
-    outbox_id: outbox.id,
-    provider_email_id: provider.provider_email_id ?? null,
-    to_address_email_list: toAddresses ?? null,
-    expected: normalizeEmail(loaded.lead.email),
-    sender: sender.identifier,
-  };
-  await raiseException(
-    { db: deps.db as unknown as SupabaseClient<DatabaseWithWebhooks>, alert: deps.alert, now: deps.now },
-    { kind: "reply_misaddressed", eventId: null, leadId: loaded.lead.id, escalate: true, detail },
-  );
-  await holdLead(deps, loaded.lead.id, "reply_misaddressed", detail);
-  return { kind: "failed", outboxId: outbox.id, error: message };
 }
 
 async function markTouchSent(deps: SendDeps, touchId: string, senderId: string, emailId: string | null, now: Date) {
@@ -977,6 +1035,9 @@ export async function runReconcileJob(
 
   if (found) {
     if (!(await fenced("reconciled_sent", found))) return { kind: "already", outboxId: outbox.id, state: outbox.state };
+    if (outbox.operation === "enroll") {
+      await recordEnrollment(deps, loaded, outbox.send_account_id, outbox.provider_campaign_id!, found.provider_lead_id ?? null);
+    }
     if (outbox.reservation_id) await deps.ledger.reconcile(outbox.reservation_id, "sent");
     await markTouchSent(deps, outbox.touch_id, outbox.send_account_id, found.provider_email_id ?? null, now);
     await leadSent(deps, loaded, outbox, "send_reconciled_sent");

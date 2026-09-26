@@ -1,0 +1,18 @@
+[
+  {
+    "date": "2026-09-26",
+    "email_account": "amir@sender.example.invalid",
+    "sent": 2,
+    "bounced": 0,
+    "contacted": 2,
+    "new_leads_contacted": 1,
+    "opened": 0,
+    "unique_opened": 0,
+    "replies": 0,
+    "unique_replies": 0,
+    "replies_automatic": 0,
+    "unique_replies_automatic": 0,
+    "clicks": 0,
+    "unique_clicks": 0
+  }
+]

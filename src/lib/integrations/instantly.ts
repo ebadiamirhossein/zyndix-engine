@@ -1,6 +1,7 @@
 import type { z } from "zod";
 
 import {
+  instantlyAccountDailyAnalyticsSchema,
   instantlyAccountPageSchema,
   instantlyAccountSchema,
   instantlyBlockListEntrySchema,
@@ -20,6 +21,7 @@ import {
   instantlyWebhookTestResultSchema,
   instantlyWorkspaceSchema,
   type InstantlyAccount,
+  type InstantlyAccountDailyAnalytics,
   type InstantlyBlockListEntry,
   type InstantlyCampaign,
   type InstantlyCampaignDetail,
@@ -74,7 +76,7 @@ const CONNECT_PHASE_CODES = new Set([
 // Errors
 // ---------------------------------------------------------------------------
 
-type HttpMethod = "GET" | "POST" | "DELETE";
+type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
 type ErrorContext = {
   op: string;
@@ -247,7 +249,8 @@ type RequestSpec = {
   op: string;
   method: HttpMethod;
   path: string;
-  query?: Record<string, string | number | undefined>;
+  /** An array value is sent as a repeated parameter (?emails=a&emails=b). */
+  query?: Record<string, string | number | string[] | undefined>;
   body?: unknown;
   mutating: boolean;
   fingerprint?: Record<string, string>;
@@ -296,7 +299,13 @@ export type CreateCampaignInput = {
     end_date?: string | null;
   };
   sequences: Array<{
-    steps: Array<{ type: "email"; delay: number; variants: Array<{ subject: string; body: string }> }>;
+    steps: Array<{
+      type: "email";
+      delay: number;
+      /** Spec default "days". */
+      delay_unit?: "minutes" | "hours" | "days";
+      variants: Array<{ subject: string; body: string }>;
+    }>;
   }>;
   email_list: string[];
   daily_limit?: number | null;
@@ -380,7 +389,8 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
 
     const url = new URL(spec.path, baseUrl);
     for (const [name, value] of Object.entries(spec.query ?? {})) {
-      if (value !== undefined) url.searchParams.set(name, String(value));
+      if (Array.isArray(value)) for (const item of value) url.searchParams.append(name, item);
+      else if (value !== undefined) url.searchParams.set(name, String(value));
     }
 
     const headers: Record<string, string> = {
@@ -629,6 +639,23 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
     );
   }
 
+  /**
+   * One page of a campaign's leads (POST /api/v2/leads/list, a read). The
+   * campaign --update guard (09 §U6c) only needs to know whether any exist.
+   */
+  function listCampaignLeads(campaignId: string, params: { limit?: number } = {}) {
+    return request(
+      {
+        op: "listCampaignLeads",
+        method: "POST",
+        path: "/api/v2/leads/list",
+        body: { campaign: campaignId, limit: params.limit ?? PAGE_LIMIT },
+        mutating: false,
+      },
+      instantlyLeadPageSchema,
+    );
+  }
+
   async function listEmails(params: ListEmailsParams = {}) {
     await emailsLimiter.take();
     return request(
@@ -650,6 +677,63 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
         mutating: false,
       },
       instantlyEmailPageSchema,
+    );
+  }
+
+  /**
+   * GET /api/v2/emails/{id} (09 §U6c): one email with its To/Cc/Bcc, for the
+   * post-send recipient check. The spec states the 20 req/min limit only for
+   * the list endpoint; this read shares its limiter anyway (conservative).
+   */
+  async function getEmail(id: string): Promise<InstantlyEmail> {
+    await emailsLimiter.take();
+    return request(
+      { op: "getEmail", method: "GET", path: `/api/v2/emails/${encodeURIComponent(id)}`, mutating: false },
+      instantlyEmailSchema,
+    );
+  }
+
+  /** GET /api/v2/leads/{id}. Null on 404 — the stop confirmation (09 §U6c) reads absence as removed. */
+  async function getLead(id: string): Promise<InstantlyLead | null> {
+    try {
+      return await request(
+        { op: "getLead", method: "GET", path: `/api/v2/leads/${encodeURIComponent(id)}`, mutating: false },
+        instantlyLeadSchema,
+      );
+    } catch (error) {
+      if (error instanceof InstantlyPermanentError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * GET /api/v2/accounts/analytics/daily: campaign emails sent per account per
+   * date (09 §U6c S20, provider_daily_limit). The spec caps the range at 31
+   * days and 200 accounts.
+   */
+  async function getAccountDailyAnalytics(params: {
+    emails: string[];
+    startDate: string;
+    endDate: string;
+  }): Promise<InstantlyAccountDailyAnalytics> {
+    const path = "/api/v2/accounts/analytics/daily";
+    const emails = [...new Set(params.emails.map((e) => e.trim()).filter(Boolean))];
+    if (emails.length < 1 || emails.length > 200) {
+      throw new InstantlyPermanentError(
+        `Instantly getAccountDailyAnalytics: emails must be 1..200, got ${emails.length}`,
+        { op: "getAccountDailyAnalytics", method: "GET", path, status: null },
+        "validation",
+      );
+    }
+    return request(
+      {
+        op: "getAccountDailyAnalytics",
+        method: "GET",
+        path,
+        query: { start_date: params.startDate, end_date: params.endDate, emails },
+        mutating: false,
+      },
+      instantlyAccountDailyAnalyticsSchema,
     );
   }
 
@@ -849,6 +933,37 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
   }
 
   /**
+   * PATCH /api/v2/campaigns/{id} with a new `sequences` value (09 §U6c). The
+   * caller (instantly-sender-campaigns.ts --update) refuses unless the
+   * campaign is paused and holds 0 leads: adding steps reactivates completed
+   * leads. A mutation — never retried here; a 5xx/timeout is uncertain.
+   */
+  function updateCampaign(
+    id: string,
+    patch: { sequences: CreateCampaignInput["sequences"] },
+  ): Promise<InstantlyCampaignDetail> {
+    const path = `/api/v2/campaigns/${encodeURIComponent(id)}`;
+    if (!id?.trim() || patch.sequences.length !== 1 || patch.sequences[0]!.steps.length === 0) {
+      throw new InstantlyPermanentError(
+        "Instantly updateCampaign: an id and exactly one sequence with steps are required",
+        { op: "updateCampaign", method: "PATCH", path, status: null },
+        "validation",
+      );
+    }
+    return request(
+      {
+        op: "updateCampaign",
+        method: "PATCH",
+        path,
+        body: { sequences: patch.sequences },
+        mutating: true,
+        fingerprint: { campaignId: id },
+      },
+      instantlyCampaignDetailSchema,
+    );
+  }
+
+  /**
    * Sends a follow-up as a reply to an existing email, so it lands in the same
    * thread (U5). This SENDS mail — it is the engine-owned step >= 2.
    */
@@ -923,11 +1038,16 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
     listAllCampaigns,
     getCampaign,
     findLeadInCampaign,
+    listCampaignLeads,
     listEmails,
+    getEmail,
+    getLead,
+    getAccountDailyAnalytics,
     listWebhookEventTypes,
     listWebhooks,
     enrollLead,
     createCampaign,
+    updateCampaign,
     replyToEmail,
     pauseCampaign,
     activateCampaign,
@@ -951,7 +1071,11 @@ export const INSTANTLY_READ_OPERATIONS = [
   "listAllCampaigns",
   "getCampaign",
   "findLeadInCampaign",
+  "listCampaignLeads",
   "listEmails",
+  "getEmail",
+  "getLead",
+  "getAccountDailyAnalytics",
   "listWebhookEventTypes",
   "listWebhooks",
 ] as const satisfies readonly (keyof InstantlyClient)[];
@@ -959,6 +1083,7 @@ export const INSTANTLY_READ_OPERATIONS = [
 export const INSTANTLY_MUTATING_OPERATIONS = [
   "enrollLead",
   "createCampaign",
+  "updateCampaign",
   "replyToEmail",
   "pauseCampaign",
   "activateCampaign",

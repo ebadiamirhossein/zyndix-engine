@@ -11,6 +11,7 @@ import {
 } from "@/lib/integrations/telegram-approval";
 import { sequenceApprovalButtons } from "@/lib/integrations/telegram";
 import { canonicalJson, composeOutboundBody } from "@/lib/sending/approval";
+import { engineTimings, instantlySequencePayload } from "@/lib/sending/campaign-sequence";
 import { preflight, type PreflightContext } from "@/lib/sending/preflight";
 import {
   buildSequenceApprovalSnapshot,
@@ -28,8 +29,10 @@ import type { ClaimEvidence } from "./claims";
 import type { ClaimContext } from "./claims-context";
 import {
   checkSequenceClaims,
+  formatRepeatIssues,
   renderFollowupTemplate,
   sequenceConfigIssues,
+  stepsRepeatingStepOne,
   writerStepNos,
   type SequenceStepDraft,
 } from "./sequence";
@@ -280,7 +283,7 @@ describe("SequenceApprovalSnapshot / hash (A1, A4)", () => {
 function preflightCtx(step: 1 | 2, mutate?: (c: PreflightContext) => void): PreflightContext {
   const s = snapshot();
   const hash = sequenceApprovalHash(s);
-  const stored = touches().map((t) => ({ ...t }));
+  const stored = touches().map((t) => ({ ...t, status: "approved" }));
   const touch = stored.find((t) => t.step_no === step)!;
   const c: PreflightContext = {
     now: NOW,
@@ -314,7 +317,8 @@ function preflightCtx(step: 1 | 2, mutate?: (c: PreflightContext) => void): Pref
     hasReply: false,
     companyConflicts: 0,
     capacityRemaining: 15,
-    threadAnchor: step === 1 ? null : { emailId: "e-1", subject: SUBJECT },
+    campaignSteps: instantlySequencePayload(engineTimings(SEQUENCE))[0]!.steps,
+    providerDaily: { dailyLimit: 15, sentToday: 0, followupsDueToday: 0 },
     policy: { verification_max_age_days: 90, allow_catch_all: false, min_warmup_score: 80, duplicate_company_window_days: 30 },
     windows: {
       priority_days: ["tue", "wed", "thu"],
@@ -353,9 +357,9 @@ describe("preflight: sequence hash bridge", () => {
     assert.ok(refusals(preflightCtx(1, (c) => (c.sequence = null))).includes("stale_approval"));
     assert.ok(refusals(preflightCtx(1, (c) => (c.sequence!.touches = c.sequence!.touches.slice(0, 2)))).includes("stale_approval"));
   });
-  test("a sequence-approved step 2 is never sendable by the engine (null subject ≠ Re: …)", () => {
+  test("a sequence-approved step 2 is never sendable by the engine (S20: followup_engine_send_disabled)", () => {
     const r = refusals(preflightCtx(2));
-    assert.ok(r.includes("stale_approval"), r.join(","));
+    assert.deepEqual(r, ["followup_engine_send_disabled"]);
   });
 });
 
@@ -425,5 +429,33 @@ describe("sequence card (09 §U6c scope 2)", () => {
     assert.equal(b[0]![0]!.callback_data, "approve:touch-1");
     assert.deepEqual(b[1]!.map((x) => x.callback_data), ["edit:touch-1", "edit:touch-2", "edit:touch-3"]);
     assert.deepEqual(b[2]!.map((x) => x.callback_data), ["kill:touch-1", "snooze:touch-1"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 09 §U6c S20 (a): step2_repeats_step1
+// ---------------------------------------------------------------------------
+
+describe("step2_repeats_step1 (pure)", () => {
+  const claim = (ids: string[]): Claim => ({ span: "x", kind: ids.length ? "inference" : "offer", evidence_ids: ids });
+  const seq = (one: string[][], two: string[][]) => [
+    { step_no: 1, source: "writer" as const, claims: one.map(claim) },
+    { step_no: 2, source: "writer" as const, claims: two.map(claim) },
+    { step_no: 3, source: "template" as const, claims: [] },
+  ];
+
+  test("step 2 citing only step 1's ids → one issue, named", () => {
+    const issues = stepsRepeatingStepOne(seq([["E1"], ["E1", "E2"]], [["E2"], []]));
+    assert.deepEqual(issues, [{ step: 2, step1_ids: ["E1", "E2"], step_ids: ["E2"] }]);
+    assert.deepEqual(formatRepeatIssues(issues), ["step 2: step2_repeats_step1 — cites only E2 (step 1 cites E1, E2)"]);
+  });
+  test("step 2 citing a new id (alongside an old one) → passes", () => {
+    assert.deepEqual(stepsRepeatingStepOne(seq([["E1"]], [["E1", "E3"]])), []);
+  });
+  test("step 2 citing nothing (offer only) → refused: no new angle", () => {
+    assert.equal(stepsRepeatingStepOne(seq([["E1"]], [[]])).length, 1);
+  });
+  test("template steps are exempt", () => {
+    assert.deepEqual(stepsRepeatingStepOne(seq([["E1"]], [["E2"]])), []);
   });
 });

@@ -703,6 +703,135 @@ describe("U6 session 2: received emails and the 20 req/min spacing", () => {
   });
 });
 
+describe("U6c S20 additions: updateCampaign, getLead, getEmail, daily analytics", () => {
+  const SEQUENCES = [
+    {
+      steps: [
+        { type: "email" as const, delay: 7, delay_unit: "days" as const, variants: [{ subject: "{{zx_subject}}", body: "{{zx_body}}" }] },
+        { type: "email" as const, delay: 7, delay_unit: "days" as const, variants: [{ subject: "", body: "{{zx_body_2}}" }] },
+        { type: "email" as const, delay: 7, delay_unit: "days" as const, variants: [{ subject: "", body: "{{zx_body_3}}" }] },
+      ],
+    },
+  ];
+
+  test("updateCampaign PATCHes only { sequences } and parses the 3-step detail (delay_unit echoed)", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("campaign-updated-3-step")));
+    const updated = await client(impl).updateCampaign(CAMPAIGN, { sequences: SEQUENCES });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "PATCH");
+    assert.equal(new URL(calls[0].url).pathname, `/api/v2/campaigns/${CAMPAIGN}`);
+    assert.deepEqual(calls[0].body, { sequences: SEQUENCES });
+    const steps = updated.sequences?.[0]?.steps ?? [];
+    assert.deepEqual(steps.map((s) => [s.delay, s.delay_unit, s.variants[0]?.subject]), [
+      [7, "days", "{{zx_subject}}"],
+      [7, "days", ""],
+      [7, "days", ""],
+    ]);
+  });
+
+  test("updateCampaign 500 → uncertain with the campaign fingerprint, fetch called once", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(500, fixture("error-500")));
+    const error = await capture(() => client(impl).updateCampaign(CAMPAIGN, { sequences: SEQUENCES }));
+    assert.ok(error instanceof InstantlyUncertainOutcomeError);
+    assert.equal(error.reason, "server_error");
+    assert.deepEqual(error.fingerprint, { campaignId: CAMPAIGN });
+    assert.equal(calls.length, 1);
+  });
+
+  test("updateCampaign timeout after dispatch → uncertain, never retried", async () => {
+    const { impl, calls } = mockFetch(() => {
+      throw timeoutError();
+    });
+    const error = await capture(() => client(impl).updateCampaign(CAMPAIGN, { sequences: SEQUENCES }));
+    assert.ok(error instanceof InstantlyUncertainOutcomeError);
+    assert.equal(calls.length, 1);
+  });
+
+  test("updateCampaign with no steps → permanent validation, no network", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("campaign-updated-3-step")));
+    const error = await capture(() => client(impl).updateCampaign(CAMPAIGN, { sequences: [{ steps: [] }] }));
+    assert.ok(error instanceof InstantlyPermanentError);
+    assert.equal(calls.length, 0);
+  });
+
+  test("listCampaignLeads posts the campaign filter (a read) and parses the page", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("leads-list-found")));
+    const page = await client(impl).listCampaignLeads(CAMPAIGN, { limit: 1 });
+    assert.equal(calls[0].method, "POST");
+    assert.equal(new URL(calls[0].url).pathname, "/api/v2/leads/list");
+    assert.deepEqual(calls[0].body, { campaign: CAMPAIGN, limit: 1 });
+    assert.ok(page.items.length >= 1);
+  });
+
+  test("getLead returns the lead, and null on 404 (removed)", async () => {
+    const found = mockFetch(() => jsonResponse(200, fixture("lead-deleted")));
+    const lead = await client(found.impl).getLead("00000000-0000-4000-8000-00000000d001");
+    assert.equal(lead?.email, EMAIL);
+    assert.equal(found.calls[0].method, "GET");
+    assert.equal(new URL(found.calls[0].url).pathname, "/api/v2/leads/00000000-0000-4000-8000-00000000d001");
+    const gone = mockFetch(() => jsonResponse(404, fixture("error-404")));
+    assert.equal(await client(gone.impl).getLead("00000000-0000-4000-8000-00000000d001"), null);
+    assert.equal(gone.calls.length, 1, "a 404 is an answer, not retried");
+  });
+
+  test("getLead 500 twice → retryable (never read as removed)", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(500, fixture("error-500")));
+    const error = await capture(() => client(impl).getLead("00000000-0000-4000-8000-00000000d001"));
+    assert.ok(error instanceof InstantlyRetryableError);
+    assert.equal(calls.length, 2);
+  });
+
+  test("getEmail takes a limiter slot, then parses To, Cc and Bcc", async () => {
+    const order: string[] = [];
+    const { impl, calls } = mockFetch(() => {
+      order.push("fetch");
+      return jsonResponse(200, fixture("email-get-step2"));
+    });
+    const limited = createInstantlyClient({
+      apiKey: SENTINEL_KEY,
+      fetch: impl,
+      emailsLimiter: { take: async () => void order.push("take") },
+    });
+    const email = await limited.getEmail("00000000-0000-4000-8000-0000000e0201");
+    assert.deepEqual(order, ["take", "fetch"]);
+    assert.equal(new URL(calls[0].url).pathname, "/api/v2/emails/00000000-0000-4000-8000-0000000e0201");
+    assert.equal(email.to_address_email_list, EMAIL);
+    assert.equal(email.cc_address_email_list, null);
+    assert.equal(email.bcc_address_email_list, "");
+    assert.equal(email.step, "0_1_0");
+  });
+
+  test("getAccountDailyAnalytics sends repeated emails params + the date range and parses sent", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("accounts-analytics-daily")));
+    const rows = await client(impl).getAccountDailyAnalytics({
+      emails: ["amir@sender.example.invalid", "ingrida@sender.example.invalid", "amir@sender.example.invalid"],
+      startDate: "2026-09-26",
+      endDate: "2026-09-26",
+    });
+    const url = new URL(calls[0].url);
+    assert.equal(url.pathname, "/api/v2/accounts/analytics/daily");
+    assert.deepEqual(url.searchParams.getAll("emails"), ["amir@sender.example.invalid", "ingrida@sender.example.invalid"]);
+    assert.equal(url.searchParams.get("start_date"), "2026-09-26");
+    assert.equal(url.searchParams.get("end_date"), "2026-09-26");
+    assert.equal(rows[0]?.sent, 2);
+  });
+
+  test("getAccountDailyAnalytics: a row without `sent` fails Zod (a contract error, never 0)", async () => {
+    const { impl } = mockFetch(() => jsonResponse(200, [{ date: "2026-09-26", email_account: "a@b.example.invalid" }]));
+    const error = await capture(() =>
+      client(impl).getAccountDailyAnalytics({ emails: ["a@b.example.invalid"], startDate: "2026-09-26", endDate: "2026-09-26" }),
+    );
+    assert.ok(error instanceof InstantlyContractError);
+  });
+
+  test("getAccountDailyAnalytics with no account → permanent validation, no network", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, []));
+    const error = await capture(() => client(impl).getAccountDailyAnalytics({ emails: [], startDate: "2026-09-26", endDate: "2026-09-26" }));
+    assert.ok(error instanceof InstantlyPermanentError);
+    assert.equal(calls.length, 0);
+  });
+});
+
 describe("U6 additions: webhooks", () => {
   const HOOK_SECRET = "WEBHOOK_SECRET_SENTINEL_0123456789abcdef0123456789";
   const TARGET = "https://synthetic-tunnel.example.invalid/api/webhooks/instantly";

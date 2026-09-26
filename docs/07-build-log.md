@@ -58,6 +58,158 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-26 — Session 20 — U6c S20: enroll carries every step, new enroll refusals, engine follow-up send disabled, delay mapping
+
+**Step:** U6c, build part 2 (`09` §U6c, S20), on `main`. Plan mode first. The plan said this fits one session, with a cut line after the send path; no cut was needed.
+- **Operator decision in plan mode:** a Telegram edit that drops the compliance footer gets it **re-appended**, not refused.
+
+**Status at end:** 🟨 **S20 done — tested locally.**
+- Writer v11: **dry run only**; `--apply` awaits the operator's OK.
+- Tracking, recipient check, `stopSequence` and the reconcile sweep are S21.
+- The ⛔ row in `06` §6 stays open until S22. 🚩 not reached.
+
+**Safety and spend:**
+- No Instantly write, no email, no Anthropic call, no prospect read or touched.
+- Live Instantly **reads** only: the campaign script's `--verify` and `--update` dry runs (GET campaigns, `leads/list` with limit 1), and the OpenAPI spec download.
+- Supabase: reads (the active writer prompt and `email_sequence`). Every DB test used synthetic `*.example.com` / `*.example.invalid` fixtures with scoped cleanup; before/after counts were identical.
+
+**Did**
+- **Step 0: spec re-read** (`https://api.instantly.ai/openapi/api_v2.json`, 2026-09-26):
+  - `PATCH /api/v2/campaigns/{id}`: `sequences` "only the first element is used"; step `delay` = "The delay value before sending the NEXT email"; `delay_unit` ∈ minutes/hours/days, "Defaults to days"; variant `v_disabled`.
+  - `GET /api/v2/leads/{id}`: 404 `{statusCode, error:"Not Found", message}`.
+  - `GET /api/v2/emails/{id}`: `to_address_email_list`, `cc_address_email_list`, `bcc_address_email_list`, `step`. The 20/min limit is stated only for `GET /api/v2/emails` ("unlike other API endpoints").
+  - `GET /api/v2/accounts/analytics/daily`: `emails` (required, ≤ 200), `start_date`/`end_date` (≤ 31 days); rows `{date "YYYY-MM-DD", email_account, sent ("campaign emails sent on this date … including emails for subsequences"), …}`; **no timezone stated**.
+- **7d:** `test-validation` fixture now has one claim → 16/16.
+- **7c:** `bindSequenceApproval` re-appends the active footer to an edited body that lacks it, before the guard, snapshot and hash.
+- **7a `step2_repeats_step1`:**
+  - Pure `stepsRepeatingStepOne` / `formatRepeatIssues` (`stages/draft/sequence.ts`).
+  - Draft: runs after the claim guard passes; one revision retry with its own hint, then hold (`manual_hold`, event `step2_repeats_step1`, `repeats` in the detail, alert).
+  - Approval: re-checked on the post-edit claims.
+- **7b:** `scripts/update-writer-prompt-v11.ts` (guard: active = v10). v11:
+  - replaces v10's own example "they fill out the form and wait until someone checks email" (the pattern behind the S19 defect);
+  - adds a "NO BEHAVIOUR OR GENERIC CLAIMS" block (behaviour only if evidenced, no usually/most/often/typically/many/tend to, no detail the evidence lacks, never the opposite of the evidence);
+  - step 2 MUST cite an evidence id step 1 does not.
+  - Dry run below; **not applied**.
+- **M1:** new `src/lib/sending/campaign-sequence.ts`, pure:
+  - `toInstantlySteps` shifts engine delays one step earlier; the last step repeats the last delay;
+  - `instantlySequencePayload`, `diffCampaignSequence` and `planCampaignUpdate` (C1).
+- **Adapter:**
+  - new operations: `updateCampaign` (PATCH, mutating), `getLead` (404 → null), `getEmail` (shares the `/emails` limiter), `getAccountDailyAnalytics` (repeated `emails` params), `listCampaignLeads`;
+  - `HttpMethod` gains PATCH; query arrays are sent as repeated params;
+  - the campaign step schema gains `delay_unit` and `v_disabled`; the email schema gains cc/bcc.
+- **Preflight + send stage:**
+  - new refusals `followup_engine_send_disabled`, `sequence_incomplete`, `campaign_sequence_drift` and `provider_daily_limit` (deferrable); `thread_anchor_missing` and the `Re:` check are retired; `provider_daily_unread` holds;
+  - `runSendJob` refuses step > 1 before anything else;
+  - `replyToEmail` has left `SendDeps`;
+  - the enroll sends `zx_subject`, `zx_body`, `zx_body_2`, `zx_body_3` and `zx_touch_id` from the rebuilt snapshot;
+  - quota = min(ramp, `daily_limit`);
+  - an `instantly_enrollments` row is written on accept and on reconcile-found.
+- **Campaign script:** the 3-step desired shape comes from the active `email_sequence`; `--update` is a dry run by default; `--update --apply --only <mailbox>` PATCHes one campaign then re-verifies (not run).
+
+**Files touched**
+- **New:**
+  - `src/lib/sending/campaign-sequence.ts`
+  - `src/lib/sending/campaign-sequence.test.ts`
+  - `scripts/update-writer-prompt-v11.ts`
+  - fixtures `src/lib/integrations/__fixtures__/instantly/{campaign-updated-3-step,email-get-step2,error-404,accounts-analytics-daily}.json`
+- **Changed:**
+  - `src/lib/stages/send/core.ts`
+  - `src/lib/sending/{preflight,sequence-approval,sending.test}.ts`
+  - `src/lib/integrations/{instantly,instantly-types,instantly.test}.ts`
+  - `src/lib/stages/draft/{core,sequence,sequence.test}.ts`
+  - `src/lib/telegram/handler.ts`
+  - `src/types/enums.ts`
+  - `scripts/instantly-sender-campaigns.ts`
+  - `package.json` (`test:campaign-sequence`)
+- **Test scripts:** `scripts/test-u5-send.ts` (sequence fixtures, E1–E6), `scripts/test-u6c-sequence.ts` (E3 evidence, footer + repeat cases), `scripts/test-u6b-claims.ts` and `scripts/test-u6-traversal.ts` (a new evidence item for step 2, new mocks), `scripts/test-validation.ts`.
+- **Docs:** `docs/06-build-progress.md` (U6c row; §5 +8 rows; §6: 3 resolved, 4 updated, +2 new; §7 writer note), `docs/09-build-plan-v2.md` (§U6c "S20 as built", unit table), `docs/07-build-log.md` (this entry).
+
+**Verification**
+```
+$ pnpm exec tsc --noEmit ; pnpm build ; eslint (changed files)     → clean
+$ pnpm test:campaign-sequence   # tests 10 · pass 10 · fail 0   (M1: 0/7/7 → 7,7,7; 0/7/14 → 7,14,14; unshifted/doubly shifted refused; minutes; C1)
+$ pnpm test:sending 76/76 · test:instantly 92/92 · test:sequence-rules 38/38 · test:claims 45/45 · test:webhook-rules 10/10 · test:source-filters 9/9 · test:apollo 6/6
+$ pnpm exec tsx scripts/test-validation.ts     All 16 checks passed.
+$ pnpm test:send
+PASS: E1: variables are exactly zx_subject, zx_body, zx_body_2, zx_body_3, zx_touch_id
+PASS: E1: each zx_body_N = that step's body exactly as the approval hash binds it (body + signature), as HTML
+PASS: E1: one instantly_enrollments row, active, bound to the sequence hash, 3 steps, provider lead id
+PASS: E2 killed step 2: refused sequence_incomplete — [{"reason":"sequence_incomplete","detail":{"issues":[{"step":2,"issue":"killed","status":"killed"}]}}]
+PASS: E2 missing step 3: refused stale_approval + sequence_incomplete
+PASS: E3 whitespace step 2 (approved that way): refused sequence_incomplete — …{"step":2,"issue":"blank"}
+PASS: legacy single-touch approval: refused sequence_incomplete — {"reason":"not_sequence_approved"}
+PASS: E4 single-step campaign / unshifted delays (0/7/7 on Instantly) / campaign unreadable: refused campaign_sequence_drift; 0 enroll calls, 0 reservations, no outbox
+PASS: E5: deferred with provider_daily_limit only — {"daily_limit":3,"sent_today":2,"followups_due_today":1} → 2026-09-30T05:47:00.000Z
+PASS: E5: sent 1 + 1 due + 1 = 3 fits daily_limit 3 → sent · the engine quota is min(ramp, daily_limit) = 3 on the ledger day
+PASS: E6: step 2 refused followup_engine_send_disabled (hold) · zero provider calls of any kind — 9 → 9 · zero reservations, zero outbox rows
+PASS: pinning: amir@getzyndix while bound to amir@zyndixhq → refused sender_mismatch
+PASS: reconcile: found → one active instantly_enrollments row
+BEFORE = AFTER (leads 36, touches 13, lead_events 263, jobs 4, …, instantly_enrollments 0)
+All 97 checks passed.
+$ pnpm test:sending   ok — E6 (source): nothing under src/lib/stages/send/** references replyToEmail
+$ pnpm test:sequence
+PASS: footer: approved; step 2 body = the edit + the compliance footer, once · the hash binds it · the APPROVED text shows it
+PASS: A3: the kept footer is not doubled
+PASS: repeat: lead manual_hold via step2_repeats_step1 · writer calls = 2 · zero touches written
+PASS: repeat: both attempts named step2_repeats_step1 — "step 2: step2_repeats_step1 — cites only E1, E2 (step 1 cites E1, E2)"
+PASS: repeat, then a new id (E3) on the retry: pending_approval, writer calls = 2
+PASS: repeat: approval refused with step2_repeats_step1, nothing approved
+113/113 passed · BEFORE = AFTER
+$ pnpm test:claim-guard 91/91 · test:traversal 62/62 · test:webhooks 58/58 · test:jobs 63/63 · test:scheduler 80/80   (all BEFORE = AFTER)
+
+$ pnpm exec tsx scripts/update-writer-prompt-v11.ts        (dry run, reads only)
+- urgency, describe the mechanism ("they fill out the form and wait until someone
+- checks email"), never a fabricated metric. A number you invented is a lie to a
+-   like any claim (ideally a different evidence item than step 1's opener).
++ urgency, describe the mechanism their own evidence shows, never a fabricated metric. …
++ NO BEHAVIOUR OR GENERIC CLAIMS
++ - Never describe what their visitors, buyers, sellers, leads or clients do, think or feel … unless an evidence item states it.
++ - Never write a general statement about businesses or their industry: no "usually", "most", "often", "typically", "many", "tend to", "in this business".
++ - Never add a detail the evidence does not contain … never describe it as being there.
++   like any claim. Step 2 MUST cite at least one evidence item (E-id) that step 1 does not cite;
++   a step 2 citing only step 1's items is refused.
+length 5915 → 6600 chars · (dry-run) Add --apply to write writer_prompt_email v11.
+
+$ pnpm exec tsx scripts/instantly-sender-campaigns.ts --verify    (read-only)
+DRIFT amir@getzyndix.com → 27c28218 status=draft · amir@zyndixhq.com → 5392fcac status=paused · ingrida@getzyndix.com → 69a90ad5 draft · ingrida@zyndixhq.com → 3aace2a8 draft
+  each: sequence: campaign has 1 step(s), the sequence has 3 · step 1: delay 0 days (want 7 days)
+$ pnpm exec tsx scripts/instantly-sender-campaigns.ts --update    (dry run, read-only)
+PLAN   PATCH 27c28218 (amir@getzyndix.com) status=draft leads=0 — body {"sequences":[{"steps":[{"type":"email","delay":7,"delay_unit":"days",…"{{zx_subject}}"/"{{zx_body}}"},{…7 days, ""/"{{zx_body_2}}"},{…7 days, ""/"{{zx_body_3}}"}]}]}
+REFUSE amir@zyndixhq.com → 5392fcac status=paused leads=1+: campaign_has_leads
+PLAN   PATCH 69a90ad5 (ingrida@getzyndix.com) · PLAN PATCH 3aace2a8 (ingrida@zyndixhq.com)
+```
+Result: **pass**.
+
+**Decisions** (full rows in `06` §5)
+- **Footer edit → re-append** (operator). Reason: a mechanical fix; the APPROVED texts show the result.
+- **The last Instantly step repeats the last engine delay.** Reason: help discourages 0, the value gates nothing, one unit.
+- **A single-touch-approved step 1 → `sequence_incomplete` (`not_sequence_approved`).** Reason: it would enroll blank follow-ups.
+- **`provider_daily_limit` is deferrable; an unreadable budget holds (`provider_daily_unread`); quota = min(ramp, `daily_limit`).**
+- **The `instantly_enrollments` row is written by the send stage on accept and on reconcile-found.** Reason: S21's stops read it.
+- **`--update` accepts draft or paused; `--apply` needs `--only`.** Reason: drafts cannot send; one PATCH at a time.
+- **`getEmail` shares the `/emails` limiter.** Reason: conservative; the spec states the limit only for the list.
+- **E1–E6 live in `test:send`.** Reason: reuses the send stage's DB harness (a deviation from the plan's `test:enroll`).
+
+**Problems hit**
+- **`step2_repeats_step1` broke four existing suites' mocked drafts.** Their step 2 cited only step 1's evidence, and some fixtures had a single item. Each fixture got a second or third evidence item for step 2, so the check did its job. No engine change was needed.
+- **A pre-U6c step 1 also got `provider_daily_unread`.** Cause: the daily read was skipped for non-sequence touches. Fixed: the budget is read for every step-1 attempt, and only the campaign read needs a sequence.
+- **Two of my own test expectations were wrong at first:**
+  - M1: the unshifted 0/7/14 differs on 2 steps, not 3 (step 3's 14 equals the repeated last delay);
+  - E5: sent 1 + due 1 + 1 = 3 fits a limit of 3; the refusal case is sent 2.
+- **Found, not fixed:** the analytics `date` has no stated timezone (`06` §6, low).
+
+**Next action**
+- **Operator:** OK or change `writer_prompt_email` v11 (dry run above), then `pnpm exec tsx scripts/update-writer-prompt-v11.ts --apply`. Optional: one live `test-draft --limit 1` on a synthetic fixture (≈ $0.02) to see v11 output.
+- **S21 — U6c build, part 3** (`09` §U6c):
+  - `email_sent` step N → touch N `sent` + `record_provider_send`;
+  - `sent_step_unknown`;
+  - the recipient check via `getEmail` (`recipient_misaddressed`);
+  - `stopSequence` (DELETE → `getLead` 404 → enrollment `removed`; `stop_failed`);
+  - the reconcile sweep.
+  - All mocked.
+
+---
+
 ### 2026-09-26 — Session 19 — U6c S19: migration 0009d, sequence settings, a 3-step draft, one sequence approval
 
 **Step:** U6c, build part 1 (`09` §U6c, S19), on `main`. Plan mode first. Operator decisions in plan mode:

@@ -7,10 +7,17 @@ import { escapeTelegramHtml } from "@/lib/integrations/telegram-format";
 import { TELEGRAM_TEXT_LIMIT, telegramVisibleLength } from "@/lib/integrations/telegram-approval";
 import { findSignOff } from "@/lib/sending/approval";
 import { chooseSenderForApproval } from "@/lib/sending/sender";
+import { appendComplianceFooter } from "@/lib/settings/compliance";
 import { buildSequenceApprovalSnapshot, sequenceApprovalHash } from "@/lib/sending/sequence-approval";
 import { claimsStillPresent } from "@/lib/stages/draft/claims";
 import { loadClaimContext } from "@/lib/stages/draft/claims-context";
-import { checkSequenceClaims, formatStepViolations, type SequenceStepDraft } from "@/lib/stages/draft/sequence";
+import {
+  checkSequenceClaims,
+  formatRepeatIssues,
+  formatStepViolations,
+  stepsRepeatingStepOne,
+  type SequenceStepDraft,
+} from "@/lib/stages/draft/sequence";
 import { createStateStore } from "@/lib/state/core";
 import { emailSequenceSchema, sendPolicySchema } from "@/lib/validation/jsonb";
 import { claimLedgerSchema } from "@/lib/validation/llm";
@@ -291,11 +298,23 @@ async function bindSequenceApproval(
     return { ok: false, message: "Not approved: the step you are editing is no longer pending_approval." };
   }
 
+  // 09 §U6c S20 (operator decision): an edit replaces the whole body, footer
+  // included. Every step is its own email and must carry the compliance
+  // footer, so an edit that dropped it gets it re-appended before the guard
+  // and the hash; the APPROVED texts then show it.
+  let editedBody = edit?.body;
+  if (edit) {
+    const footer = String((await getSetting("compliance_footer")).value).trim();
+    if (footer && !edit.body.replace(/\r\n/g, "\n").trimEnd().endsWith(footer)) {
+      editedBody = appendComplianceFooter(edit.body, footer);
+    }
+  }
+
   const firstSubject = touches[0]!.subject ?? "";
   const drafts: SequenceStepDraft[] = [];
   for (const [i, touch] of touches.entries()) {
     const spec = sequence.steps[i]!;
-    const body = edit && edit.touchId === touch.id ? edit.body : (touch.draft_body ?? "");
+    const body = edit && edit.touchId === touch.id ? editedBody! : (touch.draft_body ?? "");
     const signOff = findSignOff(body);
     if (signOff) {
       return {
@@ -332,6 +351,17 @@ async function bindSequenceApproval(
     return {
       ok: false,
       message: ["Not approved — the claim guard refused this sequence:", ...formatStepViolations(claimCheck.failures).map((line) => `• ${line}`)].join("\n"),
+    };
+  }
+  // 09 §U6c S20: re-checked here, on the claims that survive an edit.
+  const repeats = stepsRepeatingStepOne(drafts);
+  if (repeats.length > 0) {
+    return {
+      ok: false,
+      message: [
+        "Not approved: step2_repeats_step1 — a follow-up cites only evidence step 1 already cites. Kill and redraft, or edit that step.",
+        ...formatRepeatIssues(repeats).map((line) => `• ${line}`),
+      ].join("\n"),
     };
   }
 

@@ -10,15 +10,20 @@ import {
   InstantlyUncertainOutcomeError,
   type EnrollLeadInput,
   type ListEmailsParams,
-  type ReplyToEmailInput,
 } from "../src/lib/integrations/instantly";
-import type { InstantlyAccount, InstantlyEmail } from "../src/lib/integrations/instantly-types";
+import type { InstantlyAccount, InstantlyCampaignDetail, InstantlyEmail } from "../src/lib/integrations/instantly-types";
 import { createJobQueue } from "../src/lib/jobs/queue";
 import type { JobContext } from "../src/lib/jobs/registry";
 import { createCapacityLedger } from "../src/lib/scheduler/ledger";
 import { ledgerDate } from "../src/lib/scheduler/windows";
-import { approvalHash, buildApprovalSnapshot } from "../src/lib/sending/approval";
-import { threadedSubject } from "../src/lib/sending/preflight";
+import { approvalHash, buildApprovalSnapshot, composeOutboundBody } from "../src/lib/sending/approval";
+import { engineTimings, instantlySequencePayload, type LiveCampaignStep } from "../src/lib/sending/campaign-sequence";
+import {
+  buildSequenceApprovalSnapshot,
+  sequenceApprovalHash,
+  type EmailSequence,
+  type SequenceApprovalSnapshot,
+} from "../src/lib/sending/sequence-approval";
 import { capacity_defaults, send_policy, send_windows } from "../src/lib/settings/seed-content";
 import {
   runReconcileJob,
@@ -30,6 +35,7 @@ import { createStateStore } from "../src/lib/state/core";
 import type { Database } from "../src/types/database";
 import type {
   DatabaseWithCapacity,
+  DatabaseWithEnrollments,
   DatabaseWithJobs,
   DatabaseWithSending,
   DatabaseWithWebhooks,
@@ -40,6 +46,10 @@ import type { LeadState } from "../src/types/enums";
 // fixture tagged with TAG; the Instantly adapter is a counting mock, so no
 // provider is called and nothing is sent. Lead states move only through
 // lib/state (transition), never by writing leads.state.
+//
+// 09 §U6c S20: step 1 is enrolled as one approved 3-step sequence (the
+// follow-ups are Instantly campaign steps), so every fixture is a sequence
+// approval, and the U6c enroll DoD rows E1–E6 run here too.
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -51,6 +61,7 @@ if (!url || !key) {
 const raw = createServiceClient(url, key);
 const db = raw as unknown as SupabaseClient<DatabaseWithSending>;
 const exceptionsDb = raw as unknown as SupabaseClient<DatabaseWithWebhooks>;
+const enrollDb = raw as unknown as SupabaseClient<DatabaseWithEnrollments>;
 const ledger = createCapacityLedger(raw as unknown as SupabaseClient<DatabaseWithCapacity>);
 const queue = createJobQueue(raw as unknown as SupabaseClient<DatabaseWithJobs>);
 const state = createStateStore(raw as SupabaseClient<Database>);
@@ -86,6 +97,21 @@ const INSIDE = new Date("2026-09-29T06:00:00.000Z");
 const WEEKEND = new Date("2026-10-03T09:00:00.000Z");
 const TODAY = ledgerDate(INSIDE);
 
+/** email_sequence v1 (0/7/7 days), served by the mocked settings as version 1. */
+const EMAIL_SEQUENCE: EmailSequence = {
+  steps: [
+    { step_no: 1, delay: 0, delay_unit: "days", source: "writer" },
+    { step_no: 2, delay: 7, delay_unit: "days", source: "writer" },
+    { step_no: 3, delay: 7, delay_unit: "days", source: "template" },
+  ],
+};
+const MATCHING_CAMPAIGN_STEPS = (): LiveCampaignStep[] => instantlySequencePayload(engineTimings(EMAIL_SEQUENCE))[0]!.steps;
+const STEP_BODIES = {
+  1: "Hi Test,\n\nA specific observation.\n\nWant the three?",
+  2: "A different observation, from another evidence item.",
+  3: "Hi Test,\n\nI haven't heard back, so I'll leave it here.",
+} as const;
+
 const fixture = {
   accountIds: [] as string[],
   companyIds: [] as string[],
@@ -101,30 +127,31 @@ const fixture = {
 
 type Mock = {
   enroll: EnrollLeadInput[];
-  reply: ReplyToEmailInput[];
   listEmails: ListEmailsParams[];
   findLead: Array<{ campaignId: string; email: string }>;
   /** getAccount + getWarmupAnalytics reads (Session 13: a paused sender makes none). */
   health: string[];
   enrollBehaviour: "created" | "uncertain" | "already";
-  anchorEmail: InstantlyEmail | null;
   findLeadResult: boolean;
-  /** What the reply's to_address_email_list carries: the default recipient (our own mailbox) plus
-   *  additional_recipients, or — the Session 14 drill failure — only the default. */
-  replyRecipients: "with_additional" | "sender_only";
+  /** 09 §U6c S20: the live campaign's steps (null = unreadable), and Instantly's daily budget. */
+  campaignSteps: LiveCampaignStep[] | null;
+  dailyLimit: number;
+  sentToday: number;
+  lastLeadId: string | null;
   alerts: string[];
 };
 
 const mock: Mock = {
   enroll: [],
-  reply: [],
   listEmails: [],
   findLead: [],
   health: [],
   enrollBehaviour: "created",
-  anchorEmail: null,
   findLeadResult: true,
-  replyRecipients: "with_additional",
+  campaignSteps: MATCHING_CAMPAIGN_STEPS(),
+  dailyLimit: 50,
+  sentToday: 0,
+  lastLeadId: null,
   alerts: [],
 };
 
@@ -137,6 +164,7 @@ function healthyAccount(email: string): InstantlyAccount {
     provider_code: 2,
     setup_pending: false,
     stat_warmup_score: 100,
+    daily_limit: mock.dailyLimit,
   } as InstantlyAccount;
 }
 
@@ -144,6 +172,7 @@ const settings: Record<string, unknown> = {
   send_policy,
   send_windows,
   capacity_defaults,
+  email_sequence: EMAIL_SEQUENCE,
 };
 
 function deps(now: Date, hooks?: SendDeps["hooks"]): SendDeps {
@@ -163,22 +192,23 @@ function deps(now: Date, hooks?: SendDeps["hooks"]): SendDeps {
         if (mock.enrollBehaviour === "already") {
           return { outcome: "skipped", reason: "already_enrolled", raw: {} as never };
         }
-        return { outcome: "created", leadId: randomUUID(), raw: {} as never };
+        mock.lastLeadId = randomUUID();
+        return { outcome: "created", leadId: mock.lastLeadId, raw: {} as never };
       },
-      async replyToEmail(input) {
-        mock.reply.push(input);
+      async getCampaign(id) {
+        mock.health.push(`getCampaign:${id}`);
+        if (mock.campaignSteps === null) throw new Error("mock: campaign unreadable");
         return {
-          id: randomUUID(),
+          id,
+          name: "mock",
+          status: 1,
           timestamp_created: now.toISOString(),
-          message_id: `<${randomUUID()}@example.invalid>`,
-          subject: input.subject,
-          eaccount: input.eaccount,
-          to_address_email_list:
-            mock.replyRecipients === "sender_only"
-              ? input.eaccount
-              : [input.eaccount, ...(input.additionalRecipients ?? [])].join(", "),
-          thread_id: mock.anchorEmail?.thread_id ?? null,
-        } as InstantlyEmail;
+          sequences: [{ steps: mock.campaignSteps }],
+        } as InstantlyCampaignDetail;
+      },
+      async getAccountDailyAnalytics(params) {
+        mock.health.push(`getAccountDailyAnalytics:${params.emails.join(",")}`);
+        return params.emails.map((email) => ({ date: params.startDate, email_account: email, sent: mock.sentToday }));
       },
       async getAccount(email) {
         mock.health.push(`getAccount:${email}`);
@@ -196,7 +226,7 @@ function deps(now: Date, hooks?: SendDeps["hooks"]): SendDeps {
       },
       async listEmails(params) {
         mock.listEmails.push(params ?? {});
-        return { items: mock.anchorEmail ? [mock.anchorEmail] : [] };
+        return { items: [] as InstantlyEmail[], truncated: false };
       },
     },
     ledger,
@@ -299,56 +329,99 @@ async function createLead(
   return { leadId: lead.id, companyId: company.id, email };
 }
 
-/** A touch approved with a real approval binding (what the Telegram handler writes). */
+type SequenceFixture = { stepOne: string; stepTwo: string; stepThree: string; hash: string; snapshot: SequenceApprovalSnapshot };
+const sequences = new Map<string, SequenceFixture>();
+
+/**
+ * A lead's whole 3-step sequence, approved with a real sequence binding (what
+ * the Telegram handler writes through approve_email_sequence, 09 §U6c): one
+ * hash over every step on every touch. Returns step 1's touch id; the other
+ * ids are in `sequences`. `legacySingle` approves step 1 alone with the
+ * pre-U6c single-touch snapshot; `bodies` overrides step texts as approved.
+ */
 async function createApprovedTouch(
   f: LeadFixture,
-  opts: { step?: number; subject?: string; sendAccountId?: string | null; transitionLead?: boolean } = {},
+  opts: {
+    sendAccountId?: string | null;
+    transitionLead?: boolean;
+    legacySingle?: boolean;
+    bodies?: Partial<Record<1 | 2 | 3, string>>;
+  } = {},
 ): Promise<string> {
-  const step = opts.step ?? 1;
-  const { data: touch, error } = await db
+  const { data: rows, error } = await db
     .from("touches")
-    .insert({
-      lead_id: f.leadId,
-      step_no: step,
-      channel: "email",
-      direction: "outbound",
-      status: "pending_approval",
-      subject: opts.subject ?? "Your listing pages",
-      draft_body: "Hi Test,\n\nA specific observation.\n\nWant the three?",
-      body: null,
-      prompt_version: 7,
-      send_account_id: opts.sendAccountId ?? null,
-    })
-    .select("id, step_no, channel, subject, draft_body, prompt_version")
-    .single();
-  if (error || !touch) throw new Error(`fixture touch: ${error?.message}`);
-  fixture.touchIds.push(touch.id);
+    .insert(
+      ([1, 2, 3] as const).map((step) => ({
+        lead_id: f.leadId,
+        step_no: step,
+        channel: "email",
+        direction: "outbound",
+        status: "pending_approval",
+        subject: step === 1 ? "Your listing pages" : null,
+        draft_body: opts.bodies?.[step] ?? STEP_BODIES[step],
+        body: null,
+        prompt_version: 10,
+        send_account_id: opts.sendAccountId ?? null,
+      })),
+    )
+    .select("id, step_no, channel, subject, draft_body, prompt_version");
+  if (error || !rows || rows.length !== 3) throw new Error(`fixture touches: ${error?.message}`);
+  fixture.touchIds.push(...rows.map((r) => r.id));
+  const touches = [...rows].sort((a, b) => (a.step_no ?? 0) - (b.step_no ?? 0)).map((t) => ({ ...t, body: t.draft_body }));
 
   // The sender is fixed at approval (Session 12): the given account, else the
   // lead's binding — what the Telegram handler does.
-  const body = touch.draft_body!;
   const senderId = opts.sendAccountId ?? (await leadRow(f.leadId)).send_account_id;
   const { data: sender } = senderId
-    ? await db.from("send_accounts").select("id, signature_text").eq("id", senderId).single()
+    ? await db.from("send_accounts").select("id, signature_text, instantly_campaign_id").eq("id", senderId).single()
     : { data: null };
-  const snapshot = buildApprovalSnapshot({ ...touch, body }, { id: f.leadId, email: f.email }, sender);
-  const { error: approveError } = await db
-    .from("touches")
-    .update({
-      body,
-      send_account_id: senderId,
-      status: "approved",
-      approval_hash: approvalHash(snapshot),
-      approval_snapshot: snapshot as never,
-      approved_at: new Date().toISOString(),
-      approved_by: "test:u5",
-    })
-    .eq("id", touch.id);
-  if (approveError) throw new Error(`fixture approve: ${approveError.message}`);
-  if (opts.transitionLead !== false) {
-    await state.transition(f.leadId, "pending_approval", "approved", "approved", { touch_id: touch.id, source: "test" });
+
+  if (opts.legacySingle) {
+    const single = buildApprovalSnapshot(touches[0]!, { id: f.leadId, email: f.email }, sender);
+    await approveRows([touches[0]!.id], touches, senderId, approvalHash(single), single);
+    if (opts.transitionLead !== false) {
+      await state.transition(f.leadId, "pending_approval", "approved", "approved", { touch_id: touches[0]!.id, source: "test" });
+    }
+    return touches[0]!.id;
   }
-  return touch.id;
+
+  const snapshot = buildSequenceApprovalSnapshot({
+    lead: { id: f.leadId, email: f.email },
+    sender: sender ?? { id: "", signature_text: null, instantly_campaign_id: null },
+    sequence: { version: 1, value: EMAIL_SEQUENCE },
+    touches,
+  });
+  const hash = sequenceApprovalHash(snapshot);
+  await approveRows(touches.map((t) => t.id), touches, senderId, hash, snapshot);
+  if (opts.transitionLead !== false) {
+    await state.transition(f.leadId, "pending_approval", "approved", "approved", { touch_id: touches[0]!.id, source: "test" });
+  }
+  sequences.set(touches[0]!.id, { stepOne: touches[0]!.id, stepTwo: touches[1]!.id, stepThree: touches[2]!.id, hash, snapshot });
+  return touches[0]!.id;
+}
+
+async function approveRows(
+  ids: string[],
+  touches: Array<{ id: string; body: string | null }>,
+  senderId: string | null,
+  hash: string,
+  snapshot: unknown,
+): Promise<void> {
+  for (const id of ids) {
+    const { error } = await db
+      .from("touches")
+      .update({
+        body: touches.find((t) => t.id === id)!.body,
+        send_account_id: senderId,
+        status: "approved",
+        approval_hash: hash,
+        approval_snapshot: snapshot as never,
+        approved_at: new Date().toISOString(),
+        approved_by: "test:u5",
+      })
+      .eq("id", id);
+    if (error) throw new Error(`fixture approve: ${error.message}`);
+  }
 }
 
 async function leadRow(leadId: string) {
@@ -429,106 +502,185 @@ async function happyPathAndPinning(accountA: string, accountB: string): Promise<
   const rerun = await runSendJob(deps(INSIDE), job);
   assert("happy: re-running the job → already, zero further adapter calls", rerun.kind === "already" && mock.enroll.length - enrollBefore === 1, rerun.kind);
 
-  console.log("\n--- threaded follow-up (emails/reply into step 1's thread) ---");
-  mock.anchorEmail = null;
-  const noAnchor = await createApprovedTouch(f, { step: 2, subject: threadedSubject("Your listing pages"), transitionLead: false });
-  const missing = await runSendJob(deps(INSIDE), jobCtx(noAnchor));
+  console.log("\n--- E6: a step-2 send job → followup_engine_send_disabled (09 §U6c S20) ---");
+  const seq = sequences.get(touch)!;
+  const callsBefore = providerCalls();
+  const resBeforeE6 = await reservationCount(accountA);
+  const stepTwo = await runSendJob(deps(INSIDE), jobCtx(seq.stepTwo));
   assert(
-    "thread: step-1 email not found → thread_anchor_missing (hold)",
-    missing.kind === "refused" && missing.verdicts.map((v) => v.reason).join() === "thread_anchor_missing",
-    JSON.stringify(missing.kind === "refused" ? missing.verdicts : missing),
+    "E6: step 2 refused followup_engine_send_disabled (hold)",
+    stepTwo.kind === "refused" && stepTwo.hold && stepTwo.verdicts.map((v) => v.reason).join() === "followup_engine_send_disabled",
+    JSON.stringify(stepTwo.kind === "refused" ? stepTwo.verdicts : stepTwo),
   );
+  assert("E6: zero provider calls of any kind", providerCalls() === callsBefore, `${callsBefore} → ${providerCalls()}`);
+  assert("E6: zero reservations, zero outbox rows", (await reservationCount(accountA)) === resBeforeE6 && (await outboxFor(seq.stepTwo)).length === 0);
+  const { data: stepTwoRow } = await db.from("touches").select("status").eq("id", seq.stepTwo).single();
+  assert("E6: step 2 stays approved (Instantly owns it), lead stays sent", stepTwoRow?.status === "approved" && (await leadRow(f.leadId)).state === "sent");
 
-  const anchorId = randomUUID();
-  mock.anchorEmail = {
-    id: anchorId,
-    timestamp_created: INSIDE.toISOString(),
-    message_id: "<step1@example.invalid>",
-    subject: "Your listing pages",
-    eaccount: SENDER_A,
-    to_address_email_list: f.email,
-    thread_id: `${TAG}.thread`,
-    ue_type: 1,
-  } as InstantlyEmail;
-  console.log("\n--- DoD: sender pinning (follow-up routed to the other domain) ---");
+  console.log("\n--- DoD: sender pinning (step 1 routed away from the bound mailbox) ---");
+  const p = await createLead("pinning");
+  const bind = await db.from("leads").update({ send_account_id: accountA }).eq("id", p.leadId);
+  if (bind.error) throw new Error(`bind: ${bind.error.message}`);
   const resBefore = await reservationCount(accountB);
-  const followUp = await createApprovedTouch(f, {
-    step: 2,
-    subject: threadedSubject("Your listing pages"),
-    sendAccountId: accountB,
-    transitionLead: false,
-  });
-  const replyBefore = mock.reply.length;
-  const pinned = await runSendJob(deps(INSIDE), jobCtx(followUp));
+  const routed = await createApprovedTouch(p, { sendAccountId: accountB });
+  const pinned = await runSendJob(deps(INSIDE), jobCtx(routed));
   assert(
-    "pinning: amir@getzyndix after amir@zyndixhq → refused sender_mismatch",
+    "pinning: amir@getzyndix while bound to amir@zyndixhq → refused sender_mismatch",
     pinned.kind === "refused" && pinned.verdicts.map((v) => v.reason).join() === "sender_mismatch",
     JSON.stringify(pinned.kind === "refused" ? pinned.verdicts : pinned),
   );
   assert("pinning: no capacity reserved on the other account", (await reservationCount(accountB)) === resBefore);
-  assert("pinning: no provider call", mock.reply.length === replyBefore && mock.enroll.length - enrollBefore === 1);
-  assert("pinning: binding unchanged", (await leadRow(f.leadId)).send_account_id === accountA);
+  assert("pinning: no enroll call", mock.enroll.length - enrollBefore === 1);
+  assert("pinning: binding unchanged", (await leadRow(p.leadId)).send_account_id === accountA);
+}
 
-  console.log("\n--- threaded follow-up sent ---");
-  const threaded = await createApprovedTouch(f, { step: 2, subject: threadedSubject("Your listing pages"), transitionLead: false });
-  const sent = await runSendJob(deps(INSIDE), jobCtx(threaded));
-  const lastReply = mock.reply[mock.reply.length - 1];
-  assert("thread: follow-up sent via reply", sent.kind === "sent" && sent.operation === "reply", JSON.stringify(sent));
-  assert(
-    "thread: reply goes from the BOUND mailbox to step 1's email id",
-    lastReply?.eaccount === SENDER_A && lastReply.replyToUuid === anchorId && lastReply.subject === "Re: Your listing pages",
-  );
-  assert(
-    "thread: the lead is passed as additional_recipients (default recipient is the replied-to sender — Session 14)",
-    JSON.stringify(lastReply?.additionalRecipients) === JSON.stringify([f.email]),
-    JSON.stringify(lastReply?.additionalRecipients),
-  );
-  const [stepOneOutbox] = await outboxFor(touch);
-  assert(
-    "thread: follow-up text ends with the same mailbox's signature (Session 12)",
-    lastReply?.body.text === `Hi Test,\n\nA specific observation.\n\nWant the three?\n\n${fixtureSignature(SENDER_A)}`,
-    lastReply?.body.text?.slice(-60),
-  );
-  assert("thread: anchor persisted on the step-1 outbox row", stepOneOutbox?.provider_email_id === anchorId && stepOneOutbox.provider_thread_id === `${TAG}.thread`);
-  assert("thread: lead stays sent", (await leadRow(f.leadId)).state === "sent");
-  assert("thread: ledger accepted = 2 on the bound account", (await ledgerDay(accountA))?.accepted === 2);
+/** The body Instantly receives for a step: composed (body + signature), line breaks as <br/>. */
+const htmlOf = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r?\n/g, "<br/>");
 
-  console.log("\n--- follow-up accepted but NOT addressed to the lead (Session 14 drill) ---");
-  mock.replyRecipients = "sender_only";
-  const stray = await createApprovedTouch(f, { step: 3, subject: threadedSubject("Your listing pages"), transitionLead: false });
-  const alertsBefore = mock.alerts.length;
-  const strayJob = jobCtx(stray);
-  const strayOutcome = await runSendJob(deps(INSIDE), strayJob);
-  mock.replyRecipients = "with_additional";
-  const strayOutbox = (await outboxFor(stray))[0];
-  const { data: strayTouch } = await db.from("touches").select("status, provider_message_id").eq("id", stray).single();
-  const { data: strayExceptions } = await exceptionsDb
-    .from("exceptions")
-    .select("kind, status, detail")
-    .eq("lead_id", f.leadId)
-    .eq("kind", "reply_misaddressed");
+async function enrollmentRows(leadId: string) {
+  const { data, error } = await enrollDb.from("instantly_enrollments").select("*").eq("lead_id", leadId);
+  if (error) throw new Error(`enrollments: ${error.message}`);
+  return data ?? [];
+}
+
+async function u6cEnroll(accountD: string, identifierD: string): Promise<void> {
+  console.log("\n--- E1: enroll carries every approved step (09 §U6c S20) ---");
+  const f = await createLead("e1");
+  const touch = await createApprovedTouch(f, { sendAccountId: accountD });
+  const seq = sequences.get(touch)!;
+  const before = mock.enroll.length;
+  const outcome = await runSendJob(deps(INSIDE), jobCtx(touch));
+  const enrolled = mock.enroll[mock.enroll.length - 1]!;
+  const vars = enrolled.lead.custom_variables ?? {};
+  assert("E1: sent (enroll), leads/add ×1", outcome.kind === "sent" && mock.enroll.length - before === 1, JSON.stringify(outcome));
+  assert("E1: into the bound account's campaign", enrolled.campaignId === `${TAG}.camp-D`);
   assert(
-    "misaddressed: outcome failed with reply_misaddressed",
-    strayOutcome.kind === "failed" && strayOutcome.error.startsWith("reply_misaddressed"),
-    JSON.stringify(strayOutcome),
+    "E1: variables are exactly zx_subject, zx_body, zx_body_2, zx_body_3, zx_touch_id",
+    JSON.stringify(Object.keys(vars).sort()) === JSON.stringify(["zx_body", "zx_body_2", "zx_body_3", "zx_subject", "zx_touch_id"]),
+    JSON.stringify(Object.keys(vars)),
+  );
+  const expected = seq.snapshot.steps.map((st) => htmlOf(st.body));
+  assert(
+    "E1: each zx_body_N = that step's body exactly as the approval hash binds it (body + signature), as HTML",
+    vars.zx_body === expected[0] && vars.zx_body_2 === expected[1] && vars.zx_body_3 === expected[2],
+    String(vars.zx_body_2).slice(0, 120),
   );
   assert(
-    "misaddressed: outbox settled accepted (mail left — never resent) with the error recorded",
-    strayOutbox?.state === "accepted" && (strayOutbox.last_error ?? "").startsWith("reply_misaddressed"),
-    `${strayOutbox?.state} ${strayOutbox?.last_error}`,
+    "E1: every body is non-empty and ends with the bound mailbox's signature",
+    [vars.zx_body, vars.zx_body_2, vars.zx_body_3].every(
+      (v) => typeof v === "string" && v.trim() !== "" && v.endsWith(htmlOf(fixtureSignature(identifierD))),
+    ),
   );
-  assert("misaddressed: touch failed (did not reach the lead), provider id kept", strayTouch?.status === "failed" && Boolean(strayTouch.provider_message_id));
   assert(
-    "misaddressed: one escalated reply_misaddressed exception",
-    strayExceptions?.length === 1 && strayExceptions[0]!.status === "escalated",
-    JSON.stringify(strayExceptions),
+    "E1: the composed body is composeOutboundBody(approved body, signature)",
+    vars.zx_body_2 === htmlOf(composeOutboundBody(STEP_BODIES[2], fixtureSignature(identifierD))),
   );
-  assert("misaddressed: operator alerted once", mock.alerts.length - alertsBefore === 1, `${mock.alerts.length - alertsBefore}`);
-  assert("misaddressed: lead → manual_hold", (await leadRow(f.leadId)).state === "manual_hold");
-  assert("misaddressed: capacity counted (ledger accepted = 3)", (await ledgerDay(accountA))?.accepted === 3);
-  const replyCalls = mock.reply.length;
-  const strayRerun = await runSendJob(deps(INSIDE), strayJob);
-  assert("misaddressed: re-running the job → already, no second reply call", strayRerun.kind === "already" && mock.reply.length === replyCalls, strayRerun.kind);
+  assert("E1: zx_subject = step 1 subject, zx_touch_id = step 1 touch", vars.zx_subject === "Your listing pages" && vars.zx_touch_id === touch);
+  const rows = await enrollmentRows(f.leadId);
+  assert(
+    "E1: one instantly_enrollments row, active, bound to the sequence hash, 3 steps, provider lead id",
+    rows.length === 1 &&
+      rows[0]!.state === "active" &&
+      rows[0]!.sequence_hash === seq.hash &&
+      rows[0]!.steps_total === 3 &&
+      rows[0]!.provider_lead_id === mock.lastLeadId &&
+      rows[0]!.campaign_id === `${TAG}.camp-D`,
+    JSON.stringify(rows),
+  );
+  const { data: followRows } = await db.from("touches").select("status").in("id", [seq.stepTwo, seq.stepThree]);
+  assert("E1: steps 2–3 stay approved (Instantly sends them)", (followRows ?? []).every((r) => r.status === "approved"));
+
+  const refusedWith = async (
+    label: string,
+    touchId: string,
+    reasons: string[],
+    at: Date = INSIDE,
+  ): Promise<void> => {
+    const enrollBefore = mock.enroll.length;
+    const resBefore = await reservationCount(accountD);
+    const out = await runSendJob(deps(at), jobCtx(touchId));
+    const got = out.kind === "refused" || out.kind === "deferred" ? out.verdicts.map((v) => v.reason) : [];
+    assert(
+      `${label}: refused ${reasons.join(" + ")}`,
+      out.kind === "refused" && JSON.stringify(got) === JSON.stringify(reasons),
+      JSON.stringify(out.kind === "refused" ? out.verdicts : out),
+    );
+    assert(`${label}: 0 enroll calls, 0 reservations, no outbox`, mock.enroll.length === enrollBefore && (await reservationCount(accountD)) === resBefore && (await outboxFor(touchId)).length === 0);
+  };
+
+  console.log("\n--- E2: a follow-up killed or missing → sequence_incomplete ---");
+  const k = await createLead("e2-killed");
+  const killed = await createApprovedTouch(k, { sendAccountId: accountD });
+  await db.from("touches").update({ status: "killed" }).eq("id", sequences.get(killed)!.stepTwo);
+  await refusedWith("E2 killed step 2", killed, ["sequence_incomplete"]);
+  const m = await createLead("e2-missing");
+  const missing = await createApprovedTouch(m, { sendAccountId: accountD });
+  await db.from("touches").delete().eq("id", sequences.get(missing)!.stepThree);
+  await refusedWith("E2 missing step 3", missing, ["stale_approval", "sequence_incomplete"]);
+
+  console.log("\n--- E3: an empty/whitespace step body → sequence_incomplete (blank-email guard) ---");
+  const b = await createLead("e3-blank");
+  const blank = await createApprovedTouch(b, { sendAccountId: accountD, bodies: { 2: "   \n  " } });
+  await refusedWith("E3 whitespace step 2 (approved that way)", blank, ["sequence_incomplete"]);
+  const { data: blankEvent } = await db.from("lead_events").select("detail").eq("lead_id", b.leadId).eq("event", "send_refused");
+  const blankDetail = JSON.stringify(blankEvent?.[0]?.detail ?? null);
+  assert("E3: the refusal names step 2 as blank", blankDetail.includes('"issue":"blank"') && blankDetail.includes('"step":2'), blankDetail);
+
+  console.log("\n--- a step 1 approved alone (pre-U6c snapshot) → sequence_incomplete ---");
+  const l = await createLead("legacy-single");
+  const legacy = await createApprovedTouch(l, { sendAccountId: accountD, legacySingle: true });
+  await refusedWith("legacy single-touch approval", legacy, ["sequence_incomplete"]);
+
+  console.log("\n--- E4: the live campaign's steps differ → campaign_sequence_drift ---");
+  const d = await createLead("e4-drift");
+  const drift = await createApprovedTouch(d, { sendAccountId: accountD });
+  mock.campaignSteps = [{ type: "email", delay: 0, variants: [{ subject: "{{zx_subject}}", body: "{{zx_body}}" }] }];
+  await refusedWith("E4 single-step campaign", drift, ["campaign_sequence_drift"]);
+  mock.campaignSteps = MATCHING_CAMPAIGN_STEPS().map((st, i) => ({ ...st, delay: [0, 7, 7][i]! }));
+  await refusedWith("E4 unshifted delays (0/7/7 on Instantly)", drift, ["campaign_sequence_drift"]);
+  mock.campaignSteps = null;
+  await refusedWith("E4 campaign unreadable", drift, ["campaign_sequence_drift"]);
+  mock.campaignSteps = MATCHING_CAMPAIGN_STEPS();
+
+  console.log("\n--- E5: sent + follow-ups due today + this enroll > daily_limit → provider_daily_limit (deferred) ---");
+  // A lead whose step 1 went out from D exactly 7 days ago: its step 2 is due today.
+  const due = await createLead("e5-due");
+  const dueTouch = await createApprovedTouch(due, { sendAccountId: accountD });
+  const sevenDaysAgo = new Date(INSIDE.getTime() - 7 * 86_400_000).toISOString();
+  await db.from("touches").update({ status: "sent", sent_at: sevenDaysAgo }).eq("id", dueTouch);
+  // E1's step 1 (sent today) has its step 2 due in 7 days: not counted.
+  const q = await createLead("e5-full");
+  const full = await createApprovedTouch(q, { sendAccountId: accountD });
+  mock.dailyLimit = 3;
+  mock.sentToday = 2;
+  const enrollBefore = mock.enroll.length;
+  const deferred = await runSendJob(deps(INSIDE), jobCtx(full));
+  const { data: deferredJobs } = await db.from("jobs").select("id, run_after").like("idempotency_key", `send:${full}:%:at:%`);
+  fixture.jobIds.push(...(deferredJobs ?? []).map((j) => j.id));
+  const verdict = deferred.kind === "deferred" ? deferred.verdicts.find((v) => v.reason === "provider_daily_limit") : null;
+  assert(
+    "E5: deferred with provider_daily_limit only",
+    deferred.kind === "deferred" && deferred.verdicts.map((v) => v.reason).join() === "provider_daily_limit",
+    JSON.stringify(deferred),
+  );
+  assert(
+    "E5: the verdict counts sent 2 + 1 follow-up due today against daily_limit 3",
+    JSON.stringify(verdict?.detail) === JSON.stringify({ daily_limit: 3, sent_today: 2, followups_due_today: 1 }),
+    JSON.stringify(verdict?.detail),
+  );
+  const runAfter = deferred.kind === "deferred" ? new Date(deferred.runAfter) : null;
+  assert(
+    "E5: deferred to a window after the next UTC midnight, one job, no enroll",
+    runAfter !== null && runAfter >= new Date(`${ledgerDate(new Date(INSIDE.getTime() + 86_400_000))}T00:00:00Z`) && (deferredJobs ?? []).length === 1 && mock.enroll.length === enrollBefore,
+    runAfter?.toISOString(),
+  );
+  mock.sentToday = 1;
+  const fits = await runSendJob(deps(INSIDE), jobCtx(full, randomUUID()));
+  assert("E5: sent 1 + 1 due + 1 = 3 fits daily_limit 3 → sent", fits.kind === "sent", JSON.stringify(fits));
+  const dayD = await ledgerDay(accountD);
+  assert("E5: the engine quota is min(ramp, daily_limit) = 3 on the ledger day", dayD?.quota === 3, JSON.stringify(dayD));
+  mock.dailyLimit = 50;
+  mock.sentToday = 0;
 }
 
 async function uncertainOutcomes(accountA: string): Promise<void> {
@@ -571,6 +723,8 @@ async function uncertainOutcomes(accountA: string): Promise<void> {
   assert("reconcile: provider shows the lead → reconciled_sent", reconciled.kind === "reconciled_sent" && after.state === "reconciled_sent");
   assert("reconcile: lead queued → sent, reservation reconciled(sent)", (await leadRow(f.leadId)).state === "sent" && res2?.state === "reconciled" && res2.reconciled_outcome === "sent");
   assert("reconcile: still zero additional enroll calls", mock.enroll.length - before === 1);
+  const reconciledRows = await enrollmentRows(f.leadId);
+  assert("reconcile: found → one active instantly_enrollments row", reconciledRows.length === 1 && reconciledRows[0]!.state === "active", JSON.stringify(reconciledRows));
 
   console.log("\n--- reconcile: proven absent → not sent, manual_hold, no resend ---");
   const g = await createLead("absent");
@@ -684,7 +838,7 @@ async function suppressionBetween(accountC: string): Promise<void> {
 }
 
 function providerCalls(): number {
-  return mock.enroll.length + mock.reply.length + mock.listEmails.length + mock.findLead.length + mock.health.length;
+  return mock.enroll.length + mock.listEmails.length + mock.findLead.length + mock.health.length;
 }
 
 async function pausedSender(accountC: string): Promise<void> {
@@ -703,7 +857,7 @@ async function pausedSender(accountC: string): Promise<void> {
     outcome.kind === "refused" && outcome.verdicts.some((v) => v.reason === "sender_unhealthy") && (await leadRow(f.leadId)).state === "approved",
     JSON.stringify(outcome.kind === "refused" ? outcome.verdicts : outcome),
   );
-  assert("paused: zero provider calls (no enroll, reply, listEmails, findLead, getAccount or warmup read)", after === before, `${before} → ${after}`);
+  assert("paused: zero provider calls (no enroll, listEmails, findLead, getAccount, warmup, campaign or daily read)", after === before, `${before} → ${after}`);
 }
 
 async function signatureEditedAfterApproval(accountC: string): Promise<void> {
@@ -786,10 +940,11 @@ const TABLES = [
   "capacity_reservations",
   "outbox",
   "suppression_list",
+  "instantly_enrollments",
 ] as const;
 
-async function countRows(table: (typeof TABLES)[number]): Promise<number> {
-  const { count, error } = await db.from(table).select("*", { count: "exact", head: true });
+async function countRows(table: (typeof TABLES)[number] | "instantly_enrollments"): Promise<number> {
+  const { count, error } = await enrollDb.from(table).select("*", { count: "exact", head: true });
   if (error) throw new Error(`count ${table}: ${error.message}`);
   return count ?? 0;
 }
@@ -824,6 +979,7 @@ async function cleanup(): Promise<void> {
   await del("jobs(type)", () => db.from("jobs").delete().like("type", `${TAG}.%`));
   if (fixture.leadIds.length) {
     await del("outbox", () => db.from("outbox").delete().in("lead_id", fixture.leadIds));
+    await del("instantly_enrollments", () => enrollDb.from("instantly_enrollments").delete().in("lead_id", fixture.leadIds));
     await del("touches", () => db.from("touches").delete().in("lead_id", fixture.leadIds));
     await del("lead_events", () => db.from("lead_events").delete().in("lead_id", fixture.leadIds));
     await del("exceptions", () => exceptionsDb.from("exceptions").delete().in("lead_id", fixture.leadIds));
@@ -848,7 +1004,10 @@ async function main(): Promise<void> {
       const accountA = await createAccount(SENDER_A, "camp-A");
       const accountB = await createAccount(SENDER_B, "camp-B");
       const accountC = await createAccount(`u5-${STAMP}-ingrida@zyndixhq.com`, "camp-C");
+      const identifierD = `u5-${STAMP}-ingrida@getzyndix.com`;
+      const accountD = await createAccount(identifierD, "camp-D");
       await happyPathAndPinning(accountA, accountB);
+      await u6cEnroll(accountD, identifierD);
       await uncertainOutcomes(accountA);
       await workerCrash(accountA);
       await suppressionBetween(accountC);

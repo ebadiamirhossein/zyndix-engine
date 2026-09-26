@@ -602,6 +602,60 @@ All existing guard, draft and approval tests stay green. A live `test-draft --li
   - step 2 must use a different evidence item than step 1.
 - **(c)** The semantic gap (06 §6, claim guard interim gap (a)) stays covered only by operator review until U15/U17.
 
+**S20 as built (Session 20, 2026-09-26) — ✅ tested locally** (mocked Instantly and writer, synthetic fixtures). No Instantly write, no send, no Anthropic call. Live Instantly **reads** only: the campaign `--verify` and `--update` dry runs. Evidence in `07` Session 20.
+- **Step 0 (spec re-read):**
+  - `PATCH /campaigns/{id}` takes `sequences[0].steps[] {type, delay ("before sending the NEXT email"), delay_unit (default days), variants[{subject, body, v_disabled?}]}`;
+  - `GET /leads/{id}` returns 404 when absent;
+  - `GET /emails/{id}` has `cc_address_email_list`/`bcc_address_email_list` and no stated special limit (the 20/min limit is stated only for the list);
+  - `GET /accounts/analytics/daily` takes repeated `emails`, returns `{date, email_account, sent, …}`, and states no timezone.
+- **Delay mapping (M1)** in the new pure module `lib/sending/campaign-sequence.ts`:
+  - engine step N+1's delay goes on Instantly step N, and the last Instantly step repeats the last delay: v1 → 7/7/7 days;
+  - `instantlySequencePayload` builds step 1 `{{zx_subject}}`/`{{zx_body}}` and steps N `""`/`{{zx_body_N}}`;
+  - `diffCampaignSequence` checks count, delay + unit, one enabled variant and the templates;
+  - `planCampaignUpdate` refuses `campaign_not_paused` (status ∉ draft/paused) and `campaign_has_leads`.
+- **Adapter:** `updateCampaign` (PATCH, mutating), `getLead` (404 → null), `getEmail` (on the `/emails` limiter), `getAccountDailyAnalytics`, `listCampaignLeads` (read).
+- **Preflight (step 1):**
+  - `sequence_incomplete`: `not_sequence_approved`, or per step `missing` / `killed` / `not_approved` / `blank`;
+  - `campaign_sequence_drift`: a live diff, or `campaign_unreadable`;
+  - `provider_daily_limit`: deferrable, defers to after the next UTC midnight; an unreadable limit or count → `sender_unhealthy` `provider_daily_unread`.
+  - Any step > 1 → `followup_engine_send_disabled`. `thread_anchor_missing` and the `Re:` subject check are retired.
+- **Send stage:**
+  - `runSendJob` refuses step > 1 right after load (0 provider calls, 0 reservations).
+  - `replyToEmail` has left `SendDeps`. The reply branch, the anchor lookup and `misaddressed` are removed.
+  - Enroll `custom_variables` are `zx_subject`, `zx_body`, `zx_body_2`…`zx_body_N` and `zx_touch_id`. Each body is `composeOutboundBody` from the rebuilt snapshot, the same text the hash binds, rendered with `<br/>`; any blank value → `sequence_incomplete`.
+  - Quota = min(ramp, `daily_limit`).
+  - An `instantly_enrollments` row is written on accept and on reconcile-found.
+- **Campaign script** `instantly-sender-campaigns.ts`: the desired shape comes from the ACTIVE `email_sequence`; `--verify` diffs the 3-step shape; `--update` is a dry run by default, and `--update --apply --only <mailbox>` PATCHes one campaign and re-verifies it (**not run live**).
+- **Scope additions:**
+  - (a) `step2_repeats_step1`: draft → one revision retry → hold (`manual_hold`, event `step2_repeats_step1`, 0 touches); re-checked at approval.
+  - (b) `scripts/update-writer-prompt-v11.ts`: dry run shown; `--apply` awaits the operator.
+  - Footer: an edit that drops the compliance footer gets it re-appended (operator decision).
+  - `test-validation`: the fixture is fixed.
+- **Tests:**
+
+  | Suite | Result |
+  |---|---|
+  | `test:send` (E1–E6, pinning, reconcile → enrollment) | **97/97** |
+  | `test:sequence` (+ footer, `step2_repeats_step1` hold / retry / approval) | **113/113** |
+  | `test:campaign-sequence` (new, pure; M1, C1) | **10/10** |
+  | `test:sending` (+ S20 refusals, E6 source scan) | **76/76** |
+  | `test:instantly` | **92/92** |
+  | `test:sequence-rules` | **38/38** |
+  | `test:claim-guard` | 91/91 |
+  | `test:traversal` | 62/62 |
+  | `test:webhooks` | 58/58 |
+  | `test:jobs` | 63/63 |
+  | `test:scheduler` | 80/80 |
+  | `test:claims` | 45/45 |
+  | `test-validation` | **16/16** |
+
+  Also clean: `tsc`, `build`, eslint on changed files.
+- **Deviations:**
+  - E1–E6 run in `test:send` rather than a new `test:enroll` suite.
+  - The `test:send`, `test:traversal`, `test:sequence` and `test:claim-guard` fixtures gained an extra evidence item for step 2 (because of `step2_repeats_step1`).
+  - `listCampaignLeads` was added for `campaign_has_leads`.
+  - The last-step delay repeats the last engine delay.
+
 **Tests / DoD** (mocked Instantly and writer, synthetic fixtures, exact reasons):
 
 | # | Case | Expected |
@@ -1161,7 +1215,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U4 | Instantly adapter | 4 | 2 | Instantly | partial | U2 |
 | U5 | Send stage, preflight, guards | 4 | 3 | Instantly | yes | U3, U4 |
 | **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 4 (re-test done Session 16 → STOP; 🚩 moves to U6c) | Instantly | yes | U2, U5 |
-| **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; S18 spike passed (Session 18); **S19 done (Session 19); S20 next** | 4 | 1 plan + 5 (S18 spike ✅ · S19 ✅ · S20–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven live by the S18 spike) | U6, U6b |
+| **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; S18 spike passed (Session 18); S19 done (Session 19); **S20 done (Session 20); S21 next** | 4 | 1 plan + 5 (S18 spike ✅ · S19 ✅ · S20–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven live by the S18 spike) | U6, U6b |
 | **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends — ✅ tested locally (Session 15) | 4 | 1 | Anthropic | yes | U6 |
 | U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
 | **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |

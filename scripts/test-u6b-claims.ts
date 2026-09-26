@@ -169,6 +169,8 @@ const created: Fixture[] = [];
 const BASE_EVIDENCE: Evidence[] = [
   { source: "website", observation: "Contact page lists a shared team inbox and one office phone number." },
   { source: "website", observation: "'Serving Houston and Katy since 2004' appears in the homepage header." },
+  // 09 §U6c S20: step 2 must cite an item step 1 does not (step2_repeats_step1).
+  { source: "website", observation: "The contact page offers two ways in: the office phone and the shared team inbox." },
 ];
 const BASE_SITE = "Home\nServing Houston and Katy since 2004\nContact: team inbox, office phone";
 
@@ -269,12 +271,12 @@ function draft(middle = CLEAN_MIDDLE, extraClaims: Claim[] = [], offer = APPROVE
   };
 }
 
-// A clean step 2 (09 §U6c): a new angle citing E1 + E2, anchored on "Houston".
+// A clean step 2 (09 §U6c): a new angle citing E2 + E3 (E3 is new to step 2, S20), anchored on "Houston".
 const STEP2_SPAN = "for a Houston and Katy team, the office phone and the shared team inbox are the only two ways in";
 const STEP2 = {
   step_no: 2,
   body: `Hi Pat,\n\nOne more thought: ${STEP2_SPAN}. The first person to pick up owns the reply.`,
-  claims: [{ span: STEP2_SPAN, kind: "inference", evidence_ids: ["E1", "E2"] }],
+  claims: [{ span: STEP2_SPAN, kind: "inference", evidence_ids: ["E2", "E3"] }],
 };
 
 /**
@@ -448,16 +450,20 @@ async function main(): Promise<void> {
     // caught earlier by the generic number guard and parked — unit-tested.)
     console.log("\n--- DoD 7: $1.2M in the evidence paraphrase but not on the page ---");
     f = await fixture("money", { evidence: [...BASE_EVIDENCE, { source: "website", observation: "Listings page shows properties from $1.2M to $6.9M." }] });
-    scripts.set(f.name, [draft("I noticed your listings start at $1.2M.", [{ span: "your listings start at $1.2M", kind: "prospect_fact", evidence_ids: ["E3"] }])]);
+    scripts.set(f.name, [draft("I noticed your listings start at $1.2M.", [{ span: "your listings start at $1.2M", kind: "prospect_fact", evidence_ids: ["E4"] }])]);
     await expectHold("DoD 7", f, "unsupported_prospect_fact", /^not in source page: "\$1\.2M"/);
 
     console.log("\n--- DoD 8: failed-crawl evidence cited ---");
     f = await fixture("failed-crawl", { evidence: [...BASE_EVIDENCE, { source: "website", observation: "Tech stack fetch failed — no CRM tooling confirmed." }] });
-    scripts.set(f.name, [draft("Nothing routes an enquiry to the right agent.", [{ span: "Nothing routes an enquiry to the right agent", kind: "inference", evidence_ids: ["E3"] }])]);
+    scripts.set(f.name, [draft("Nothing routes an enquiry to the right agent.", [{ span: "Nothing routes an enquiry to the right agent", kind: "inference", evidence_ids: ["E4"] }])]);
     await expectHold("DoD 8", f, "failed_crawl_evidence");
 
     console.log("\n--- Operator addition: Steffen (quote not on the source page) ---");
-    const steffenEvidence = [{ source: "website", observation: "Auction Gallery page describes consignment intake ('contact us to schedule a preview', flat-rate commission pitch)." }];
+    const steffenEvidence = [
+      { source: "website", observation: "Auction Gallery page describes consignment intake ('contact us to schedule a preview', flat-rate commission pitch)." },
+      // S20: step 2 cites an item step 1 does not.
+      { source: "website", observation: "Auction Gallery page pitches a flat-rate commission to sellers." },
+    ];
     const steffenPage = "Auction Gallery\nFlat-rate commission. Consign with us.";
     const steffenDraft = (span: string): WriterOut => ({
       subject: "consignment intake",
@@ -467,11 +473,11 @@ async function main(): Promise<void> {
         { span: "every consignment starts with a manual back-and-forth", kind: "inference", evidence_ids: ["E1"] },
         { span: APPROVED, kind: "offer", evidence_ids: [] },
       ],
-      // Step 2 grounded in Steffen's own single evidence item.
+      // Step 2 grounded in Steffen's own second evidence item.
       step2: {
         step_no: 2,
         body: "Hi Pat,\n\nOne more thought: the Auction Gallery page pitches a flat-rate commission to sellers.",
-        claims: [{ span: "the Auction Gallery page pitches a flat-rate commission to sellers", kind: "inference", evidence_ids: ["E1"] }],
+        claims: [{ span: "the Auction Gallery page pitches a flat-rate commission to sellers", kind: "inference", evidence_ids: ["E2"] }],
       },
     });
     const quoted = 'your gallery page asks sellers to "contact us to schedule a preview"';

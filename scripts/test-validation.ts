@@ -94,7 +94,12 @@ assert(
 
 assert(
   "writer 90-word body passes",
-  writerOutputSchema.safeParse({ subject: "quick note", body: words90 }).success,
+  // U6b (Session 15): the writer output carries a claim ledger (min 1).
+  writerOutputSchema.safeParse({
+    subject: "quick note",
+    body: words90,
+    claims: [{ span: "word0 word1", kind: "prospect_fact", evidence_ids: ["E1"] }],
+  }).success,
 );
 
 assert(

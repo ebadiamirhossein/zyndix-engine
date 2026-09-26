@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 
 import {
@@ -10,8 +12,10 @@ import {
   normalizeSignature,
   sendIdempotencyKey,
 } from "./approval";
+import { engineTimings, instantlySequencePayload } from "./campaign-sequence";
 import { ALLOWED_SENDER_DOMAINS, checkSenderDomain, normalizeDomain } from "./guard";
-import { preflight, threadedSubject, type PreflightContext } from "./preflight";
+import { DEFERRABLE_REFUSALS, preflight, threadedSubject, type PreflightContext } from "./preflight";
+import { buildSequenceApprovalSnapshot, sequenceApprovalHash, type EmailSequence, type SequenceTouch } from "./sequence-approval";
 import { isEligibleSender, pickLeastLoaded, type SenderCandidate } from "./sender";
 import { resolveRecipientTimezone, singleTimezoneForCountry } from "./timezone";
 import { normalizeUsState, resolveUsTimezone, SINGLE_ZONE_STATES, SPLIT_STATE_CITIES } from "./us-timezones";
@@ -49,6 +53,23 @@ const SENDER = {
   signature_text: SIGNATURE as string | null,
 };
 
+// 09 §U6c: step 1 is enrolled as one approved 3-step sequence (0/7/7 days).
+const SEQUENCE: EmailSequence = {
+  steps: [
+    { step_no: 1, delay: 0, delay_unit: "days", source: "writer" },
+    { step_no: 2, delay: 7, delay_unit: "days", source: "writer" },
+    { step_no: 3, delay: 7, delay_unit: "days", source: "template" },
+  ],
+};
+
+/** Re-binds the sequence hash after a fixture edit (as a fresh approval would). */
+function rehash(ctx: PreflightContext): void {
+  ctx.touch.approval_hash = sequenceApprovalHash(
+    buildSequenceApprovalSnapshot({ lead: ctx.lead, sender: ctx.sender, sequence: ctx.sequence!.setting, touches: ctx.sequence!.touches }),
+  );
+  for (const t of ctx.sequence!.touches) (t as { approval_hash?: string | null }).approval_hash = ctx.touch.approval_hash;
+}
+
 function base(): PreflightContext {
   const touch = {
     id: "touch-1",
@@ -60,7 +81,12 @@ function base(): PreflightContext {
     body: "Hi Test,\n\nA specific observation.\n\nWant the three?",
     prompt_version: 7,
     approval_hash: null as string | null,
+    approval_snapshot: { kind: "email_sequence" } as unknown,
   };
+  const followups: SequenceTouch[] = [
+    { id: "touch-2", step_no: 2, channel: "email", subject: null, body: "A different observation.", prompt_version: 7, status: "approved" },
+    { id: "touch-3", step_no: 3, channel: "email", subject: null, body: "Hi Test, I haven't heard back.", prompt_version: 7, status: "approved" },
+  ];
   const lead = {
     id: "lead-1",
     state: "approved" as const,
@@ -71,10 +97,12 @@ function base(): PreflightContext {
     do_not_contact: false,
     send_account_id: null as string | null,
   };
-  touch.approval_hash = approvalHash(buildApprovalSnapshot(touch, lead, SENDER));
-  return {
+  const ctx: PreflightContext = {
     now: INSIDE,
     touch,
+    sequence: { touches: [touch, ...followups], setting: { version: 1, value: SEQUENCE } },
+    campaignSteps: instantlySequencePayload(engineTimings(SEQUENCE))[0]!.steps,
+    providerDaily: { dailyLimit: 15, sentToday: 0, followupsDueToday: 0 },
     lead,
     company: { domain: "target.example.invalid", timezone: null, country: "LT" },
     sender: { ...SENDER },
@@ -83,10 +111,11 @@ function base(): PreflightContext {
     hasReply: false,
     companyConflicts: 0,
     capacityRemaining: 15,
-    threadAnchor: null,
     policy: { ...POLICY },
     windows: WINDOWS,
   };
+  rehash(ctx);
+  return ctx;
 }
 
 const reasons = (ctx: PreflightContext): PreflightRefusal[] => preflight(ctx).verdicts.map((v) => v.reason);
@@ -173,6 +202,7 @@ describe("preflight extras and policy detail", () => {
     ctx.providerHealth = { verdict: "healthy", warmupScore: 50 };
     ctx.sender.health = "paused";
     ctx.sender.instantly_campaign_id = null;
+    rehash(ctx); // the campaign id is in the sequence snapshot
     const result = preflight(ctx);
     assert.deepEqual(result.verdicts.map((v) => v.reason), ["sender_unhealthy"]);
     assert.deepEqual(result.verdicts[0].detail?.reasons, [
@@ -194,12 +224,9 @@ describe("preflight extras and policy detail", () => {
 });
 
 describe("sender pinning", () => {
-  test("bound to amir@zyndixhq, follow-up routed to amir@getzyndix → sender_mismatch", () => {
+  test("step 1 routed to a mailbox other than the bound one → sender_mismatch", () => {
     const ctx = base();
-    ctx.lead.state = "sent";
     ctx.lead.send_account_id = "acct-zyndixhq-amir";
-    ctx.touch.step_no = 2;
-    ctx.touch.subject = threadedSubject("Your listing pages");
     ctx.sender = {
       id: "acct-getzyndix-amir",
       identifier: "amir@getzyndix.com",
@@ -208,42 +235,102 @@ describe("sender pinning", () => {
       signature_text: SIGNATURE,
     };
     // Approved for the other mailbox, so only the pinning rule fails.
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
-    ctx.threadAnchor = { emailId: "email-1", subject: "Your listing pages" };
+    rehash(ctx);
     assert.deepEqual(reasons(ctx), ["sender_mismatch"]);
-  });
-  test("same bound sender on the follow-up → ok", () => {
-    const ctx = base();
-    ctx.lead.state = "sent";
-    ctx.lead.send_account_id = SENDER.id;
-    ctx.touch.step_no = 2;
-    ctx.touch.subject = threadedSubject("Your listing pages");
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
-    ctx.threadAnchor = { emailId: "email-1", subject: "Your listing pages" };
-    assert.deepEqual(reasons(ctx), []);
-  });
-  test("follow-up with no step-1 email to reply to → thread_anchor_missing", () => {
-    const ctx = base();
-    ctx.lead.state = "sent";
-    ctx.lead.send_account_id = SENDER.id;
-    ctx.touch.step_no = 2;
-    ctx.touch.subject = "Re: Your listing pages";
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
-    assert.deepEqual(reasons(ctx), ["thread_anchor_missing"]);
-  });
-  test("follow-up whose subject is not Re: <step-1 subject> → stale_approval", () => {
-    const ctx = base();
-    ctx.lead.state = "sent";
-    ctx.lead.send_account_id = SENDER.id;
-    ctx.touch.step_no = 2;
-    ctx.touch.subject = "A brand new subject";
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
-    ctx.threadAnchor = { emailId: "email-1", subject: "Your listing pages" };
-    assert.deepEqual(reasons(ctx), ["stale_approval"]);
   });
   test("threadedSubject does not stack prefixes", () => {
     assert.equal(threadedSubject("Hello"), "Re: Hello");
     assert.equal(threadedSubject("RE: Hello"), "RE: Hello");
+  });
+});
+
+describe("09 §U6c S20 — enroll refusals (exact reason strings)", () => {
+  test("E6 (source): nothing under src/lib/stages/send/** references replyToEmail", () => {
+    const root = join(__dirname, "..", "stages", "send");
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) walk(path);
+        else if (/\.tsx?$/.test(name)) files.push(path);
+      }
+    };
+    walk(root);
+    files.push(join(__dirname, "..", "stages", "send.ts"));
+    assert.ok(files.length >= 3, files.join(", "));
+    const offenders = files.filter((f) => readFileSync(f, "utf8").includes("replyToEmail"));
+    assert.deepEqual(offenders, []);
+  });
+
+  test("E6: any step >= 2 → followup_engine_send_disabled (the engine never sends a follow-up)", () => {
+    const ctx = base();
+    ctx.lead.state = "sent";
+    ctx.lead.send_account_id = SENDER.id;
+    ctx.touch = { ...ctx.sequence!.touches[1]!, direction: "outbound", approval_hash: ctx.touch.approval_hash, approval_snapshot: ctx.touch.approval_snapshot } as PreflightContext["touch"];
+    assert.deepEqual(reasons(ctx), ["followup_engine_send_disabled"]);
+  });
+  test("a step 1 approved on its own (pre-U6c snapshot) → sequence_incomplete not_sequence_approved", () => {
+    const ctx = base();
+    ctx.touch.approval_snapshot = null;
+    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
+    const result = preflight(ctx);
+    assert.deepEqual(result.verdicts.map((v) => v.reason), ["sequence_incomplete"]);
+    assert.deepEqual(result.verdicts[0]!.detail, { reason: "not_sequence_approved" });
+  });
+  test("E2: step 2 killed → sequence_incomplete (killed), hash still valid", () => {
+    const ctx = base();
+    ctx.sequence!.touches[1]!.status = "killed";
+    const result = preflight(ctx);
+    assert.deepEqual(result.verdicts.map((v) => v.reason), ["sequence_incomplete"]);
+    assert.deepEqual(result.verdicts[0]!.detail, { issues: [{ step: 2, issue: "killed", status: "killed" }] });
+  });
+  test("E2: step 3 missing → sequence_incomplete (missing) and stale_approval", () => {
+    const ctx = base();
+    ctx.sequence!.touches = ctx.sequence!.touches.slice(0, 2);
+    assert.deepEqual(reasons(ctx), ["stale_approval", "sequence_incomplete"]);
+  });
+  test("E3: a whitespace step-2 body, even if approved that way → sequence_incomplete (blank)", () => {
+    const ctx = base();
+    ctx.sequence!.touches[1]!.body = "  \n ";
+    rehash(ctx);
+    const result = preflight(ctx);
+    assert.deepEqual(result.verdicts.map((v) => v.reason), ["sequence_incomplete"]);
+    assert.deepEqual(result.verdicts[0]!.detail, { issues: [{ step: 2, issue: "blank" }] });
+  });
+  test("E4: live campaign still single-step / delays unshifted → campaign_sequence_drift", () => {
+    const single = base();
+    single.campaignSteps = [{ type: "email", delay: 0, variants: [{ subject: "{{zx_subject}}", body: "{{zx_body}}" }] }];
+    assert.deepEqual(reasons(single), ["campaign_sequence_drift"]);
+    const unshifted = base();
+    unshifted.campaignSteps = unshifted.campaignSteps!.map((st, i) => ({ ...st, delay: [0, 7, 7][i]! }));
+    const result = preflight(unshifted);
+    assert.deepEqual(result.verdicts.map((v) => v.reason), ["campaign_sequence_drift"]);
+    assert.deepEqual((result.verdicts[0]!.detail as { problems: string[] }).problems, ["step 1: delay 0 days (want 7 days)"]);
+  });
+  test("E4: campaign unreadable → campaign_sequence_drift campaign_unreadable (hold, fail closed)", () => {
+    const ctx = base();
+    ctx.campaignSteps = null;
+    const result = preflight(ctx);
+    assert.deepEqual(result.verdicts.map((v) => v.reason), ["campaign_sequence_drift"]);
+    assert.equal((result.verdicts[0]!.detail as { reason: string }).reason, "campaign_unreadable");
+  });
+  test("E5: sent 2 + 1 follow-up due + this enroll > daily_limit 3 → provider_daily_limit (deferrable)", () => {
+    const ctx = base();
+    ctx.providerDaily = { dailyLimit: 3, sentToday: 2, followupsDueToday: 1 };
+    assert.deepEqual(reasons(ctx), ["provider_daily_limit"]);
+    assert.ok(DEFERRABLE_REFUSALS.includes("provider_daily_limit"));
+    const fits = base();
+    fits.providerDaily = { dailyLimit: 3, sentToday: 1, followupsDueToday: 1 };
+    assert.deepEqual(reasons(fits), [], "1 + 1 + 1 = 3 fits a limit of 3");
+  });
+  test("an unreadable daily_limit or sent count → sender_unhealthy provider_daily_unread (never assumed room)", () => {
+    for (const daily of [null, { dailyLimit: null, sentToday: 0, followupsDueToday: 0 }, { dailyLimit: 3, sentToday: null, followupsDueToday: 0 }]) {
+      const ctx = base();
+      ctx.providerDaily = daily;
+      const result = preflight(ctx);
+      assert.deepEqual(result.verdicts.map((v) => v.reason), ["sender_unhealthy"]);
+      assert.deepEqual((result.verdicts[0]!.detail as { reasons: string[] }).reasons, ["provider_daily_unread"]);
+    }
   });
 });
 
@@ -337,7 +424,7 @@ describe("approval binding", () => {
     const ctx = base();
     const ledger = [{ span: "A specific observation", kind: "prospect_fact", evidence_ids: ["E1"] }];
     ctx.touch.claim_ledger = ledger;
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
+    rehash(ctx);
     assert.deepEqual(reasons(ctx), []);
     const snap = buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender);
     assert.deepEqual(snap.claim_ledger, ledger);
@@ -349,7 +436,14 @@ describe("approval binding", () => {
   test("recipient comparison is case-insensitive; canonicalJson sorts keys", () => {
     const ctx = base();
     const a = buildApprovalSnapshot(ctx.touch, { ...ctx.lead, email: "Test.Lead@Target.example.invalid " }, ctx.sender);
-    assert.equal(approvalHash(a), ctx.touch.approval_hash);
+    assert.equal(approvalHash(a), approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender)));
+    const seq = buildSequenceApprovalSnapshot({
+      lead: { ...ctx.lead, email: "Test.Lead@Target.example.invalid " },
+      sender: ctx.sender,
+      sequence: ctx.sequence!.setting,
+      touches: ctx.sequence!.touches,
+    });
+    assert.equal(sequenceApprovalHash(seq), ctx.touch.approval_hash);
     assert.equal(canonicalJson({ b: 1, a: [2, { d: 1, c: 0 }] }), '{"a":[2,{"c":0,"d":1}],"b":1}');
   });
   test("idempotency key names the touch and the approved version", () => {
@@ -377,7 +471,7 @@ describe("signature bound into the approval (Session 12)", () => {
   test("no signature on the sender → sender_signature_missing (and the pre-signature hash is stale)", () => {
     const ctx = base();
     ctx.sender.signature_text = "   ";
-    ctx.touch.approval_hash = approvalHash(buildApprovalSnapshot(ctx.touch, ctx.lead, ctx.sender));
+    rehash(ctx);
     assert.deepEqual(reasons(ctx), ["sender_signature_missing"]);
   });
   test("a touch approved before signatures existed (U5 snapshot) is stale", () => {

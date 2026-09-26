@@ -59,6 +59,8 @@ export type SequenceTouch = {
   body: string | null;
   prompt_version: number | null;
   claim_ledger?: unknown;
+  /** Not hashed. Read by preflight's sequence_incomplete (09 §U6c S20). */
+  status?: string | null;
 };
 
 export class SequenceShapeError extends Error {}

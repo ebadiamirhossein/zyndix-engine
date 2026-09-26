@@ -286,12 +286,18 @@ export type OutboxOperation = (typeof OUTBOX_OPERATIONS)[number];
  * the rest are stated extras. Order here is the order preflight reports them.
  */
 export const PREFLIGHT_REFUSALS = [
+  // 09 §U6c S20: steps >= 2 are Instantly campaign steps; the engine never sends them.
+  "followup_engine_send_disabled",
   "blocked_sender_domain",
   "sender_not_allowed",
   "sender_mismatch",
   "lead_state_invalid",
   "channel_unsupported",
   "stale_approval",
+  // 09 §U6c S20 (step 1 enroll): the blank-email guard, and the live campaign
+  // must send exactly the approved sequence shape.
+  "sequence_incomplete",
+  "campaign_sequence_drift",
   "suppressed_email",
   "suppressed_domain",
   "reply_freeze",
@@ -302,10 +308,11 @@ export const PREFLIGHT_REFUSALS = [
   "sender_unhealthy",
   "sender_signature_missing",
   "duplicate_company_active",
-  "thread_anchor_missing",
   "timezone_unknown",
   "outside_window",
   "quota_exhausted",
+  // 09 §U6c S20: Instantly's own daily_limit (follow-ups count against it). Deferrable.
+  "provider_daily_limit",
 ] as const;
 
 export type PreflightRefusal = (typeof PREFLIGHT_REFUSALS)[number];

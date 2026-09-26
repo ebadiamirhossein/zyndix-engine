@@ -1,0 +1,17 @@
+{
+  "id": "00000000-0000-4000-8000-0000000e0201",
+  "timestamp_created": "2026-09-26T10:00:05.000Z",
+  "timestamp_email": "2026-09-26T10:00:00.000Z",
+  "message_id": "<00000000-0000-4000-8000-0000000e0201@sender.example.invalid>",
+  "subject": "Re: enquiries going to team@ inbox",
+  "from_address_email": "amir@sender.example.invalid",
+  "to_address_email_list": "prospect@target.example.invalid",
+  "cc_address_email_list": null,
+  "bcc_address_email_list": "",
+  "eaccount": "amir@sender.example.invalid",
+  "campaign_id": "00000000-0000-4000-8000-00000000c001",
+  "lead": "prospect@target.example.invalid",
+  "ue_type": 1,
+  "step": "0_1_0",
+  "thread_id": "thread-synthetic-0001"
+}

@@ -16,6 +16,7 @@ import { createJobQueue } from "../src/lib/jobs/queue";
 import type { JobContext } from "../src/lib/jobs/registry";
 import { POLL_SOURCE, type ReconcileDeps, runReplyPoll, runStaleStopCheck } from "../src/lib/reconcile/core";
 import { createCapacityLedger } from "../src/lib/scheduler/ledger";
+import { engineTimings, instantlySequencePayload } from "../src/lib/sending/campaign-sequence";
 import { capacity_defaults, send_policy, send_windows } from "../src/lib/settings/seed-content";
 import { createSettingsStore } from "../src/lib/settings/core";
 import { runDraftStage } from "../src/lib/stages/draft/core";
@@ -24,6 +25,7 @@ import { runQualifyStage } from "../src/lib/stages/qualify/core";
 import { enqueueSend, runSendJob, SEND_JOB_TYPE, type SendDeps } from "../src/lib/stages/send/core";
 import { runVerifyStage } from "../src/lib/stages/verify/core";
 import { createStateStore } from "../src/lib/state/core";
+import { emailSequenceSchema } from "../src/lib/validation/jsonb";
 import { processTelegramUpdate } from "../src/lib/telegram/handler";
 import { handleInstantlyWebhook, type InstantlyWebhookDeps, WEBHOOK_TOKEN_HEADER } from "../src/lib/webhooks/instantly";
 import type { Database } from "../src/types/database";
@@ -212,7 +214,11 @@ const qualifyAnthropic = {
         fit_score: 82,
         segment: "roofing",
         problem_hypothesis: "Quote requests wait for a next-business-day reply, so evening enquiries go cold.",
-        evidence: [{ source: "website", observation: "Contact page says quote requests are answered the next business day." }],
+        evidence: [
+          { source: "website", observation: "Contact page says quote requests are answered the next business day." },
+          // 09 §U6c S20: step 2 must cite an item step 1 does not (step2_repeats_step1).
+          { source: "website", observation: "The quote form says every quote request is reviewed on the next business day." },
+        ],
         triggers: ["contact form only"],
         visible_tools: ["WordPress"],
         recommended_angle: "speed-to-lead",
@@ -249,7 +255,7 @@ const draftAnthropic = {
           {
             step_no: 2,
             body: `Hi Tess,\n\nOne more thought on ${name}: every quote request waits for the next business day.`,
-            claims: [{ span: "every quote request waits for the next business day", kind: "inference", evidence_ids: ["E1"] }],
+            claims: [{ span: "every quote request waits for the next business day", kind: "inference", evidence_ids: ["E2"] }],
           },
         ],
       }),
@@ -310,6 +316,7 @@ function healthyAccount(email: string): InstantlyAccount {
     provider_code: 2,
     setup_pending: false,
     stat_warmup_score: 100,
+    daily_limit: 30,
   } as InstantlyAccount;
 }
 
@@ -330,9 +337,21 @@ const instantly = {
     mock.enroll += 1;
     return { outcome: "created" as const, leadId: randomUUID(), raw: {} as never };
   },
-  async replyToEmail() {
-    mock.instantly.push("replyToEmail");
-    throw new Error("mock: replyToEmail is not expected in this suite");
+  // 09 §U6c S20: the enroll reads the live campaign (it matches email_sequence
+  // v1 through the delay mapping) and Instantly's daily budget.
+  async getCampaign(id: string) {
+    mock.instantly.push("getCampaign");
+    return {
+      id,
+      name: "mock",
+      status: 1,
+      timestamp_created: new Date().toISOString(),
+      sequences: instantlySequencePayload(engineTimings(emailSequenceSchema.parse(email_sequence))),
+    } as never;
+  },
+  async getAccountDailyAnalytics(params: { emails: string[]; startDate: string }) {
+    mock.instantly.push("getAccountDailyAnalytics");
+    return params.emails.map((email) => ({ date: params.startDate, email_account: email, sent: 0 }));
   },
   async getAccount(email: string) {
     mock.instantly.push("getAccount");

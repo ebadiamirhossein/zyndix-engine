@@ -177,7 +177,11 @@ export const instantlyCampaignDetailSchema = instantlyCampaignSchema
                 .object({
                   type: z.string(),
                   delay: z.number(),
-                  variants: z.array(z.object({ subject: z.string(), body: z.string() }).passthrough()),
+                  /** Spec default "days" when absent (09 §U6c S20 drift diff). */
+                  delay_unit: z.enum(["minutes", "hours", "days"]).nullable().optional(),
+                  variants: z.array(
+                    z.object({ subject: z.string(), body: z.string(), v_disabled: z.boolean().nullable().optional() }).passthrough(),
+                  ),
                 })
                 .passthrough(),
             ),
@@ -208,6 +212,9 @@ export const instantlyEmailSchema = z
     subject: z.string(),
     eaccount: z.string(),
     to_address_email_list: z.string(),
+    // GET /api/v2/emails/{id} (09 §U6c): the post-send recipient check reads these.
+    cc_address_email_list: z.string().nullable().optional(),
+    bcc_address_email_list: z.string().nullable().optional(),
     thread_id: z.string().nullable().optional(),
     lead: z.string().nullable().optional(),
     campaign_id: z.string().nullable().optional(),
@@ -226,6 +233,23 @@ export const instantlyEmailSchema = z
   .passthrough();
 
 export const instantlyEmailPageSchema = pageSchema(instantlyEmailSchema);
+
+// ---------------------------------------------------------------------------
+// Daily account analytics — GET /api/v2/accounts/analytics/daily (09 §U6c S20:
+// provider_daily_limit). `sent` = "the total number of campaign emails sent on
+// this date by this account, including emails for subsequences" (spec). The
+// spec does not say which timezone `date` is in.
+// ---------------------------------------------------------------------------
+
+export const instantlyAccountDailyAnalyticsSchema = z.array(
+  z
+    .object({
+      date: z.string().min(1),
+      email_account: z.string().min(1),
+      sent: z.number().int().nonnegative(),
+    })
+    .passthrough(),
+);
 
 // ---------------------------------------------------------------------------
 // Leads — POST /api/v2/leads/list, DELETE /api/v2/leads/{id}
@@ -336,6 +360,7 @@ export type InstantlyWarmupAggregate = z.infer<typeof instantlyWarmupAggregateSc
 export type InstantlyWarmupAnalytics = z.infer<typeof instantlyWarmupAnalyticsSchema>;
 export type InstantlyCampaign = z.infer<typeof instantlyCampaignSchema>;
 export type InstantlyCampaignDetail = z.infer<typeof instantlyCampaignDetailSchema>;
+export type InstantlyAccountDailyAnalytics = z.infer<typeof instantlyAccountDailyAnalyticsSchema>;
 export type InstantlyEmail = z.infer<typeof instantlyEmailSchema>;
 export type InstantlyLead = z.infer<typeof instantlyLeadSchema>;
 export type InstantlyLeadsAddResponse = z.infer<typeof instantlyLeadsAddResponseSchema>;
