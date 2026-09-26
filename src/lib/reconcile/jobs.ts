@@ -2,7 +2,15 @@ import { z } from "zod";
 
 import { defineJob, type RegisteredJob } from "@/lib/jobs/registry";
 
-import { REPLY_POLL_JOB_TYPE, type ReconcileDeps, runReplyPoll, runStaleStopCheck, STALE_STOP_JOB_TYPE } from "./core";
+import {
+  INSTANTLY_LEADS_JOB_TYPE,
+  REPLY_POLL_JOB_TYPE,
+  type ReconcileDeps,
+  runInstantlyLeadSweep,
+  runReplyPoll,
+  runStaleStopCheck,
+  STALE_STOP_JOB_TYPE,
+} from "./core";
 
 // Job definitions for reconciliation (U2 registry). Pure: deps are injected.
 // Nothing enqueues these until U9 puts them on cron.
@@ -28,6 +36,14 @@ export function reconcileJobDefinitions(deps: ReconcileDeps): RegisteredJob[] {
       timeoutMs: RECONCILE_TIMEOUT_MS,
       handler: async () => {
         await runReplyPoll(deps);
+      },
+    }),
+    defineJob({
+      type: INSTANTLY_LEADS_JOB_TYPE,
+      payloadSchema: reconcileSweepPayloadSchema,
+      timeoutMs: RECONCILE_TIMEOUT_MS,
+      handler: async () => {
+        await runInstantlyLeadSweep(deps);
       },
     }),
   ];

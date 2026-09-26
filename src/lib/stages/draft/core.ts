@@ -226,6 +226,9 @@ type SequenceWriteResult =
       failures?: StepViolations[];
       repeats?: RepeatIssue[];
       lastDraft?: unknown;
+      /** Spent on the attempts that were refused (Session 20: holds were reported as $0). */
+      tokens: number;
+      cost: number;
     };
 
 async function writeSequenceWithGuard(
@@ -419,7 +422,7 @@ async function writeSequenceWithGuard(
       const text = renderFollowupTemplate(template.body, { first_name: lead.first_name });
       if (text === null) {
         rejections.push(`step ${spec.step_no}: template_variable_missing: {first_name} has no value`);
-        return { ok: false, rejections, hold: true, holdReason: "template_variable_missing", lastDraft: raw };
+        return { ok: false, rejections, hold: true, holdReason: "template_variable_missing", lastDraft: raw, tokens: totalTokens, cost: totalCost };
       }
       steps.push({
         step_no: spec.step_no,
@@ -444,7 +447,7 @@ async function writeSequenceWithGuard(
       lastFailure = "repeat";
       console.warn(`[draft] step2_repeats_step1 for lead ${lead.id} — ${repeatRetryHint ? "holding" : "retrying"}`);
       if (repeatRetryHint) {
-        return { ok: false, rejections, hold: true, holdReason: "step2_repeats_step1", repeats, lastDraft: raw };
+        return { ok: false, rejections, hold: true, holdReason: "step2_repeats_step1", repeats, lastDraft: raw, tokens: totalTokens, cost: totalCost };
       }
       repeatRetryHint = [
         "REVISION REQUIRED (step2_repeats_step1): a follow-up repeated step 1's evidence:",
@@ -464,7 +467,7 @@ async function writeSequenceWithGuard(
     const writerCanFix = claimCheck.failures.some((f) => sequence.steps.find((s) => s.step_no === f.step)?.source === "writer");
     console.warn(`[draft] claim guard rejected lead ${lead.id} — ${claimRetryHint || !writerCanFix ? "holding" : "retrying"}`);
     if (claimRetryHint || !writerCanFix) {
-      return { ok: false, rejections, hold: true, holdReason: "claim_guard", failures: claimCheck.failures, lastDraft: raw };
+      return { ok: false, rejections, hold: true, holdReason: "claim_guard", failures: claimCheck.failures, lastDraft: raw, tokens: totalTokens, cost: totalCost };
     }
     claimRetryHint = [
       "REVISION REQUIRED: the claim guard refused your draft:",
@@ -478,15 +481,15 @@ async function writeSequenceWithGuard(
   }
 
   if (lastFailure === "claims") {
-    return { ok: false, rejections, hold: true, holdReason: "claim_guard", failures: lastFailures, lastDraft };
+    return { ok: false, rejections, hold: true, holdReason: "claim_guard", failures: lastFailures, lastDraft, tokens: totalTokens, cost: totalCost };
   }
   if (lastFailure === "repeat") {
-    return { ok: false, rejections, hold: true, holdReason: "step2_repeats_step1", lastDraft };
+    return { ok: false, rejections, hold: true, holdReason: "step2_repeats_step1", lastDraft, tokens: totalTokens, cost: totalCost };
   }
   if (lastFailure === "shape" || lastFailure === "nonjson") {
-    return { ok: false, rejections, hold: true, holdReason: "sequence_shape_invalid", lastDraft };
+    return { ok: false, rejections, hold: true, holdReason: "sequence_shape_invalid", lastDraft, tokens: totalTokens, cost: totalCost };
   }
-  return { ok: false, rejections, hold: false };
+  return { ok: false, rejections, hold: false, tokens: totalTokens, cost: totalCost };
 }
 
 async function pickDraftingLeads(
@@ -640,6 +643,10 @@ export async function runDraftStage(
         templates,
       );
 
+      // Every writer call is spent, whatever the verdict (Session 20 finding).
+      summary.tokens_used += result.tokens;
+      summary.est_cost_usd += result.cost;
+
       if (!result.ok && result.hold) {
         // 09 §U6b/§U6c: one revision retry, then hold. No touch is written, so
         // nothing reaches approval; the refused draft is kept on the event.
@@ -661,6 +668,8 @@ export async function runDraftStage(
           prompt_version: promptVersion,
           sequence_setting_version: sequenceSetting.version,
           evidence_policy_version: claimContext.evidencePolicyVersion,
+          tokens_used: result.tokens,
+          est_cost_usd: result.cost,
         });
         summary.claim_held += 1;
         const reasons =
@@ -682,14 +691,14 @@ export async function runDraftStage(
         await deps.transition(lead.id, "drafting", "parked", "writer_generic_3x", {
           rejections: result.rejections,
           prompt_version: promptVersion,
+          tokens_used: result.tokens,
+          est_cost_usd: result.cost,
         });
         summary.parked_generic += 1;
         continue;
       }
 
       const { steps } = result;
-      summary.tokens_used += result.tokens;
-      summary.est_cost_usd += result.cost;
 
       // One statement inserts every step (atomic): all N or none.
       // Follow-ups have no subject of their own (they continue step 1's

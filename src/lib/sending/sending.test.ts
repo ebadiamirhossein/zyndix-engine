@@ -15,6 +15,7 @@ import {
 import { engineTimings, instantlySequencePayload } from "./campaign-sequence";
 import { ALLOWED_SENDER_DOMAINS, checkSenderDomain, normalizeDomain } from "./guard";
 import { DEFERRABLE_REFUSALS, preflight, threadedSubject, type PreflightContext } from "./preflight";
+import { addressList, checkRecipients, isOwnAddress, OWN_DOMAINS } from "./recipient-check";
 import { buildSequenceApprovalSnapshot, sequenceApprovalHash, type EmailSequence, type SequenceTouch } from "./sequence-approval";
 import { isEligibleSender, pickLeastLoaded, type SenderCandidate } from "./sender";
 import { resolveRecipientTimezone, singleTimezoneForCountry } from "./timezone";
@@ -574,5 +575,65 @@ describe("US HQ-state timezone (Session 12)", () => {
       assert.equal(new Set(all).size, all.length, `${state} lists a city twice`);
       assert.ok(!(state in SINGLE_ZONE_STATES), `${state} is both single and split`);
     }
+  });
+});
+
+describe("post-send recipient check (09 §U6c scope 6, S21)", () => {
+  const lead = "jane@acme-realty.example.com";
+  const own = ["amir@zyndixhq.com", "ingrida@getzyndix.com"];
+
+  test("pass: To = exactly [lead], Cc/Bcc empty — case, whitespace and display-name forms", () => {
+    assert.deepEqual(checkRecipients({ to: lead, cc: null, bcc: null, leadEmail: lead, ownAddresses: own }), { ok: true });
+    assert.deepEqual(checkRecipients({ to: " Jane Doe <JANE@Acme-Realty.example.com> ", cc: "", bcc: undefined, leadEmail: lead, ownAddresses: own }), { ok: true });
+  });
+
+  test("own mailbox next to the lead in To (the Session 16 failure) → own_address_in_to + lead_not_sole_to", () => {
+    assert.deepEqual(checkRecipients({ to: `amir@zyndixhq.com,${lead}`, cc: null, bcc: null, leadEmail: lead, ownAddresses: own }), {
+      ok: false,
+      issues: ["own_address_in_to", "lead_not_sole_to"],
+    });
+  });
+
+  test("own mailbox alone in To (the Session 14 failure)", () => {
+    const v = checkRecipients({ to: "amir@zyndixhq.com", cc: null, bcc: null, leadEmail: lead, ownAddresses: own });
+    assert.deepEqual(v, { ok: false, issues: ["own_address_in_to", "lead_not_sole_to"] });
+  });
+
+  test("any zyndix.com / zyndixhq.com / getzyndix.com address or subdomain counts as own, listed or not", () => {
+    const set = new Set(own);
+    for (const a of ["x@zyndix.com", "x@mail.zyndix.com", "x@ZYNDIXHQ.COM", "x@eu.getzyndix.com", "someone-new@zyndixhq.com"]) {
+      assert.equal(isOwnAddress(a, set), true, a);
+    }
+    for (const a of [lead, "x@notzyndix.com", "x@zyndix.com.evil.example", "x@getzyndix.co"]) assert.equal(isOwnAddress(a, set), false, a);
+    assert.deepEqual([...OWN_DOMAINS], ["zyndix.com", "zyndixhq.com", "getzyndix.com"]);
+  });
+
+  test("own-domain Cc, a stranger in Cc, any Bcc, or the lead missing → fail with named issues", () => {
+    assert.deepEqual(checkRecipients({ to: lead, cc: "ops@mail.zyndix.com", bcc: null, leadEmail: lead, ownAddresses: own }), {
+      ok: false,
+      issues: ["own_address_in_cc", "cc_not_empty"],
+    });
+    assert.deepEqual(checkRecipients({ to: lead, cc: "boss@acme-realty.example.com", bcc: null, leadEmail: lead, ownAddresses: own }), {
+      ok: false,
+      issues: ["cc_not_empty"],
+    });
+    assert.deepEqual(checkRecipients({ to: lead, cc: null, bcc: "amir@zyndixhq.com", leadEmail: lead, ownAddresses: own }), {
+      ok: false,
+      issues: ["own_address_in_bcc", "bcc_not_empty"],
+    });
+    assert.deepEqual(checkRecipients({ to: "other@elsewhere.example.com", cc: null, bcc: null, leadEmail: lead, ownAddresses: own }), {
+      ok: false,
+      issues: ["lead_not_sole_to"],
+    });
+    assert.deepEqual(checkRecipients({ to: `${lead}, ${lead}`, cc: null, bcc: null, leadEmail: lead, ownAddresses: own }), {
+      ok: false,
+      issues: ["lead_not_sole_to"],
+    });
+    assert.deepEqual(checkRecipients({ to: lead, cc: null, bcc: null, leadEmail: null, ownAddresses: own }), { ok: false, issues: ["lead_not_sole_to"] });
+  });
+
+  test("addressList parses comma/semicolon lists and display names", () => {
+    assert.deepEqual(addressList('"Amir" <Amir@ZyndixHQ.com>; b@y.example.com, c@z.example.com'), ["amir@zyndixhq.com", "b@y.example.com", "c@z.example.com"]);
+    assert.deepEqual(addressList(null), []);
   });
 });

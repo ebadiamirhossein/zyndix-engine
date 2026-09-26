@@ -9,10 +9,11 @@ import { jobQueue } from "@/lib/jobs";
 import { capacityLedger } from "@/lib/scheduler";
 import { getActiveSetting } from "@/lib/settings";
 import { transition } from "@/lib/state";
-import type { DatabaseWithSending } from "@/types/database-extensions";
+import type { RecipientCheckDeps } from "@/lib/sending/recipient-check";
+import type { DatabaseWithSending, DatabaseWithWebhooks } from "@/types/database-extensions";
 
 import type { SendDeps } from "./send/core";
-import { sendJobDefinitions } from "./send/jobs";
+import { recipientCheckJobDefinition, sendJobDefinitions } from "./send/jobs";
 
 export {
   enqueueSend,
@@ -23,7 +24,7 @@ export {
   type SendDeps,
   type SendOutcome,
 } from "./send/core";
-export { sendJobDefinitions } from "./send/jobs";
+export { recipientCheckJobDefinition, sendJobDefinitions } from "./send/jobs";
 
 /**
  * Production deps for the send stage. Nothing calls this until U9 wires the
@@ -42,6 +43,17 @@ export function createSendDeps(): SendDeps {
   };
 }
 
+/** Production deps for the post-send recipient check (09 §U6c S21). Unscheduled until U9. */
+export function createRecipientCheckDeps(): RecipientCheckDeps {
+  const telegram = createTelegramClient();
+  return {
+    db: db as unknown as SupabaseClient<DatabaseWithWebhooks>,
+    instantly: createInstantlyClient(),
+    transition,
+    alert: (text) => telegram.sendAlert(text),
+  };
+}
+
 export function sendJobs() {
-  return sendJobDefinitions(createSendDeps());
+  return [...sendJobDefinitions(createSendDeps()), recipientCheckJobDefinition(createRecipientCheckDeps())];
 }

@@ -5,6 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { db } from "@/lib/db";
 import { createInstantlyClient } from "@/lib/integrations/instantly";
 import { createTelegramClient } from "@/lib/integrations/telegram";
+import { jobQueue } from "@/lib/jobs";
 import { getActiveSetting } from "@/lib/settings";
 import { transition } from "@/lib/state";
 import type { DatabaseWithWebhooks } from "@/types/database-extensions";
@@ -19,7 +20,14 @@ export function createInstantlyWebhookDeps(): InstantlyWebhookDeps {
     db: db as unknown as SupabaseClient<DatabaseWithWebhooks>,
     secret: process.env.INSTANTLY_WEBHOOK_SECRET,
     transition,
-    instantly: { addBlockListEntry: instantly.addBlockListEntry, pauseCampaign: instantly.pauseCampaign },
+    instantly: {
+      addBlockListEntry: instantly.addBlockListEntry,
+      pauseCampaign: instantly.pauseCampaign,
+      deleteLead: instantly.deleteLead,
+      getLead: instantly.getLead,
+      findLeadInCampaign: instantly.findLeadInCampaign,
+    },
+    queue: jobQueue,
     getActiveSetting,
     alert: (text) => telegram.sendAlert(text),
   };

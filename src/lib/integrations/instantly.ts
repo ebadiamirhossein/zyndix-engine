@@ -641,15 +641,21 @@ export function createInstantlyClient(options: InstantlyClientOptions = {}) {
 
   /**
    * One page of a campaign's leads (POST /api/v2/leads/list, a read). The
-   * campaign --update guard (09 §U6c) only needs to know whether any exist.
+   * campaign --update guard (09 §U6c) only needs to know whether any exist;
+   * the reconcile lead sweep (S21) pages through them.
    */
-  function listCampaignLeads(campaignId: string, params: { limit?: number } = {}) {
+  function listCampaignLeads(campaignId: string, params: { limit?: number; startingAfter?: string } = {}) {
     return request(
       {
         op: "listCampaignLeads",
         method: "POST",
         path: "/api/v2/leads/list",
-        body: { campaign: campaignId, limit: params.limit ?? PAGE_LIMIT },
+        body: {
+          campaign: campaignId,
+          limit: params.limit ?? PAGE_LIMIT,
+          // Spec: the last lead's `id` of the previous page (distinct_contacts false).
+          ...(params.startingAfter ? { starting_after: params.startingAfter } : {}),
+        },
         mutating: false,
       },
       instantlyLeadPageSchema,

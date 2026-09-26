@@ -656,6 +656,73 @@ All existing guard, draft and approval tests stay green. A live `test-draft --li
   - `listCampaignLeads` was added for `campaign_has_leads`.
   - The last-step delay repeats the last engine delay.
 
+**S21 as built (Session 21, 2026-09-26) — ✅ tested locally** (mocked Instantly, synthetic fixtures). No Instantly write, no send, no Anthropic call. Evidence in `07` Session 21.
+- **Step 0 (spec re-read, 2026-09-26):**
+  - Lead `status` enum: 1 Active, 2 Paused, 3 Completed, −1 Bounced, −2 Unsubscribed, −3 Skipped;
+  - `DELETE` and `GET /leads/{id}` both document 404;
+  - `POST /leads/list` pages with `starting_after` (the last lead's `id`), `limit` ≤ 100;
+  - **no complaint webhook event exists** (19 event types, none for complaints). A complaint reaches the engine as a reply (freeze + stop) or as an operator suppression (caught by the sweep). No handler was invented.
+- **Tracking** (`webhooks/instantly.ts` `handleSent`):
+  - the webhook `step` (1-indexed; `parseWebhookStep` refuses the API's `"0_1_0"`, 0 and non-integers) → touch N, matched by the lead's enrollment for that campaign and its `sequence_hash`;
+  - touch N → `sent`, `sent_at` = the event time, `provider_message_id` = `email_id`. Step 1 now gets its email id too (the Session 14 backlog row);
+  - steps ≥ 2 → `record_provider_send` (counted once per `email_id`);
+  - no `step`, step > `steps_total`, or no touch → escalated `sent_step_unknown` (`no_step` / `step_out_of_range` / `no_touch_for_step`), no change;
+  - a send on a killed/failed touch or a removed/`stop_failed` enrollment is recorded as the truth plus an escalated **`sent_after_stop`** (T4, added);
+  - every `email_sent` queues `send.recipient_check` (+60 s, key `recipient_check:<email_id>`). A reply's freeze never cancels it. No `email_id` → escalated `recipient_check_unreadable`, hold and stop.
+- **Recipient check** (`lib/sending/recipient-check.ts`, job `send.recipient_check`):
+  - pure `checkRecipients`: pass only when To = exactly [lead] and Cc/Bcc are empty;
+  - issues: `own_address_in_to|cc|bcc`, `lead_not_sole_to`, `cc_not_empty`, `bcc_not_empty`;
+  - own = every `send_accounts.identifier` plus `zyndix.com`/`zyndixhq.com`/`getzyndix.com` and subdomains.
+  - A fail → `recipient_misaddressed`, in this order: touch `failed` (ledger untouched) → escalated exception + alert → lead `manual_hold` → `stopSequence` → `pauseSender`.
+  - `getEmail` unreadable → the job backs off; at the last attempt → escalated `recipient_check_unreadable`, hold + stop, no sender pause.
+  - A replay is `already_handled`.
+- **`stopSequence`** (`lib/sending/stop.ts`):
+  1. kill the unsent follow-ups (step ≥ 2) and cancel queued jobs on them;
+  2. enrollment → `stopping`;
+  3. `DELETE`, at most 2 attempts. A 5xx or timeout → **`getLead` first**; a 404 there = removed, with no second `DELETE`;
+  4. confirm = `getLead` null **and** `leads/list` 0;
+  5. → `removed`, plus a `sequence_stopped` event.
+  - Still unconfirmed → `stop_failed` (enrollment, escalated exception) + `pauseSender`.
+  - `raiseException`/`ExceptionKind` moved to `webhooks/exceptions.ts` and `pauseSender` moved here; `webhooks/instantly.ts` re-exports them.
+- **`pauseSender`:**
+  - order: health paused → `pauseCampaign` → **every live enrollment of that sender** `stopSequence(sender_paused, noPause)` → its `queued`/`sent` leads → `manual_hold`;
+  - used by the bounce auto-pause, stale-stop, `recipient_misaddressed` and `stop_failed`.
+- **Callers:**
+  - reply (`reply_received`, also on the dedupe path), unsubscribe (`unsubscribed`, after the block list), bounce (`bounced`, before the bounce-rate check);
+  - manual hold: `holdAndStop` + `scripts/hold-lead.ts` (dry run by default; `--apply` is a live `DELETE`, operator only);
+  - suppression added outside the webhook: the sweep (`suppressed`);
+  - sender pause (`sender_paused`), booking (exported `stopSequence(…, "meeting_booked")` for U8), `recipient_misaddressed`.
+- **Sweep `reconcile.instantly_leads`** (`reconcile/core.ts` `runInstantlyLeadSweep`, job registered, not on cron until U9):
+  - **R1:** a live enrollment whose lead is stopped (replied … bounced, parked), whose enrollment is `stopping`/`stop_failed`, or whose email hits `checkSuppression`:
+    - still at Instantly → `stopSequence` + escalated `stopped_lead_active`;
+    - already gone → `removed` quietly (`enrollment_confirmed_removed`, no `DELETE`);
+    - a suppression hit → lead → `suppressed`, then stop.
+  - **R2:** pages each sender campaign's leads (≤ 5 pages):
+    - an Active lead with no enrollment → one open `unknown_active_lead` (deduped, no mutation);
+    - `removed` but Active → reopened and stopped (`stopped_lead_active`).
+- **Small items:**
+  - (a) held and parked drafts carry their writer tokens/cost into the summary and the hold event;
+  - (b) the `test-draft.ts` fixture is "Draft Fixture Realty Alpha/Bravo…" with a 3rd evidence item (backed by an `/about` page text), and `--check-fixture` checks it with no Anthropic call;
+  - (c) backlog row (§5).
+- **Tests:**
+
+  | Suite | Result |
+  |---|---|
+  | `pnpm test:stops` (new; T1–T4, S1–S9, R1–R2) | **111/111** |
+  | `test:sequence` (+ 5a on all 7 hold paths) | **120/120** |
+  | `test-draft --check-fixture` (5b) | **7/7** |
+  | `test:sending` (+ `checkRecipients`) | **82/82** |
+  | `test:webhook-rules` (+ step parsing) | **12/12** |
+  | `test:instantly` (+ paging, DELETE 5xx/404) | **95/95** |
+  | `test:webhooks` (+ the recipient check survives a reply) | **59/59** |
+  | `test:traversal` | 62/62 |
+
+  Unchanged and green: `test:send` 97/97, `test:claim-guard` 91/91, `test:jobs` 63/63, `test:scheduler` 80/80, `test:claims` 45/45, `test:sequence-rules` 38/38, `test:campaign-sequence` 10/10 and `test-validation` 16/16. `tsc`, `build`, and eslint on changed files are clean.
+- **Deviations:**
+  - T4 `sent_after_stop` and `recipient_check_unreadable` were added to the DoD;
+  - S5 is proven through the sweep, because the only in-code suppression writers are the webhook paths S2/S3 already cover;
+  - the recipient-check job has its own deps (`createRecipientCheckDeps`) because the send stage's deps deliberately cannot stop or pause.
+
 **Tests / DoD** (mocked Instantly and writer, synthetic fixtures, exact reasons):
 
 | # | Case | Expected |
@@ -1194,13 +1261,16 @@ Carried from `05-build-plan.md` §4, still valid:
 - **`scripts/draft-target-leads.ts` is deprecated** (Session 13): it hard-deletes touches and writes `leads.state` directly. Use `scripts/redraft-drafts.ts` (kills, never deletes; `lib/state` edges). Delete the old script in a cleanup session.
 - **`0002_transition_lead.sql` is `security definer` with no `set search_path`** — Supabase's linter calls this `function_search_path_mutable`. Fixing it means a new migration that replaces the function; it does not belong inside a feature unit.
 - **Reply poll skips leads already `replied`** (Session 14): `pollWindow` covers `queued/sent/no_reply/sequence_done` only, and a finished lead with a recorded inbound touch is counted `already_seen` before the processor. A *second* reply from an already-replied lead is therefore only caught by the webhook. Decide whether U7 needs the poll to cover recently replied leads.
-- **Step-1 touch `provider_message_id` stays null** (Session 14): the enroll returns a lead id and the `email_sent` webhook writes the email id to `outbox.provider_email_id` only. Copy it onto the touch in `handleSent` when the dashboards (U10) need it.
+- ~~**Step-1 touch `provider_message_id` stays null**~~ — **done in U6c S21**: `handleSent` writes every step's `email_id` onto its touch.
 - **Exclude drill leads everywhere** (Session 14): `segment='drill'` companies (lead `7fd018fa`, `drill:s14`; lead `387b413d`, `drill:s14b`, Session 16) must be excluded from U7 classification, digests, Attio sync and any lead listing.
 - **Preflight does not re-run the claim guard** (Session 15): the approval hash binds the ledger, and the guard ran at approval time. If evidence ages past `evidence_policy` between approval and send, the send still goes. Decide at U9 whether preflight should re-check freshness.
 - **Claim guard interim gaps** (Session 15): token-based, not semantic; lowercase place names; number words below three; three contradiction attributes only (`06` §6). Closed by U15/U17.
 - **Sequence completion state** (Session 17): after the last Instantly step, `campaign_completed_for_lead_without_reply` could move a lead `sent → no_reply` (→ `sequence_done`). U6c records the event only. Decide the transition at U7/U9.
 - **Per-campaign cadences need one Instantly campaign per (sender × engine campaign × sequence)** (Session 17). Today there is one campaign per sender. U14 must design the mapping and the migration of `send_accounts.instantly_campaign_id`.
 - **`GET /emails` `step` format `0_0_0` is undocumented** (Session 17). Use the webhook's 1-indexed `step`; confirm the mapping in the S18 spike.
+- **UR prompt work: the writer reserves ≥ 1 evidence item for step 2** (Session 21, from the S20 live v11 draft). Step 1 cited both of the fixture's items, which left step 2 nothing new and made `step2_repeats_step1` (or the guard) the only barrier. The prompt should tell step 1 to leave at least one evidence item unused for step 2. Evidence in `07` Session 20 addendum.
+- **Telegram `/hold <lead>` command** (Session 21): the manual hold is `scripts/hold-lead.ts` for now (`holdAndStop`). A Telegram command should call the same function, with the operator allow-list.
+- **`sent_at` of step 1 is overwritten by the `email_sent` event time** (Session 21): the touch first gets the enroll-accept time, then the send time Instantly reports. The `followupsDueToday` offsets therefore count from the real send. Revisit if U10 needs both times.
 - **Durable webhook endpoint** (Session 14): quick tunnels drop; the next live drill should probe the tunnel before each provider event, and U9's deploy URL replaces them.
 
 ---
@@ -1215,7 +1285,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U4 | Instantly adapter | 4 | 2 | Instantly | partial | U2 |
 | U5 | Send stage, preflight, guards | 4 | 3 | Instantly | yes | U3, U4 |
 | **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 4 (re-test done Session 16 → STOP; 🚩 moves to U6c) | Instantly | yes | U2, U5 |
-| **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; S18 spike passed (Session 18); S19 done (Session 19); **S20 done (Session 20); S21 next** | 4 | 1 plan + 5 (S18 spike ✅ · S19 ✅ · S20–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven live by the S18 spike) | U6, U6b |
+| **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; S18 spike passed (Session 18); S19 done (Session 19); S20 done (Session 20); **S21 done (Session 21); S22 drill next** | 4 | 1 plan + 5 (S18 spike ✅ · S19 ✅ · S20–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven live by the S18 spike) | U6, U6b |
 | **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends — ✅ tested locally (Session 15) | 4 | 1 | Anthropic | yes | U6 |
 | U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
 | **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |

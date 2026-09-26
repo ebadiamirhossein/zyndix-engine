@@ -128,7 +128,8 @@ const anthropic = {
     calls.set(name, n + 1);
     const outs = scripts.get(name) ?? [];
     const out = outs[Math.min(n, outs.length - 1)] ?? {};
-    return { text: JSON.stringify(out), model: "mock", inputTokens: 1, outputTokens: 1, estCostUsd: 0 };
+    // 5a (S21): every call costs 150 tokens / $0.005, so a hold's spend is visible.
+    return { text: JSON.stringify(out), model: "mock", inputTokens: 100, outputTokens: 50, estCostUsd: 0.005 };
   },
 } as unknown as AnthropicClient;
 
@@ -303,6 +304,16 @@ async function expectHeld(label: string, f: Fixture, event: string, writerCalls:
   assert(`${label}: lead manual_hold via ${event}`, (await leadState(f.leadId)) === "manual_hold" && hold !== undefined);
   assert(`${label}: writer calls = ${writerCalls}`, calls.get(f.name) === writerCalls, String(calls.get(f.name)));
   assert(`${label}: operator alerted once`, tg.alerts.length === alertsBefore + 1 && summary.claim_held === 1);
+  // 5a (S21): a held draft's writer calls are counted, in the summary and on the hold event.
+  const detail = hold as unknown as { tokens_used?: number; est_cost_usd?: number } | undefined;
+  assert(
+    `${label}: 5a — held draft costed: summary ${writerCalls * 150} tokens / $${(writerCalls * 0.005).toFixed(3)}, same on the hold event`,
+    summary.tokens_used === writerCalls * 150 &&
+      Math.abs(summary.est_cost_usd - writerCalls * 0.005) < 1e-9 &&
+      detail?.tokens_used === writerCalls * 150 &&
+      Math.abs((detail?.est_cost_usd ?? 0) - writerCalls * 0.005) < 1e-9,
+    `summary=${summary.tokens_used}/${summary.est_cost_usd} event=${detail?.tokens_used}/${detail?.est_cost_usd}`,
+  );
   return hold;
 }
 

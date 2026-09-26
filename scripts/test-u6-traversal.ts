@@ -393,6 +393,19 @@ const instantly = {
     mock.blockList.push(value);
     return { id: `${TAG}.bl`, bl_value: value, is_domain: false } as never;
   },
+  // 09 §U6c S21: the stop path (DELETE → GET 404) and the lead sweep.
+  async deleteLead(id: string) {
+    mock.instantly.push("deleteLead");
+    return { id, status: 1, timestamp_created: new Date().toISOString() } as never;
+  },
+  async getLead() {
+    mock.instantly.push("getLead");
+    return null;
+  },
+  async listCampaignLeads() {
+    mock.instantly.push("listCampaignLeads");
+    return { items: [], next_starting_after: null };
+  },
 };
 
 // Send-related settings come from seed content (as in test-u5-send): the
@@ -445,6 +458,7 @@ function webhookDeps(): InstantlyWebhookDeps {
     secret: SECRET,
     transition: state.transition,
     instantly,
+    queue,
     getActiveSetting,
     alert: async (text) => {
       mock.alerts.push(text);
@@ -456,6 +470,7 @@ function reconcileDeps(): ReconcileDeps {
   return {
     db,
     instantly,
+    queue,
     transition: state.transition,
     getActiveSetting,
     alert: async (text) => {

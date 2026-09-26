@@ -5,6 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { db } from "@/lib/db";
 import { createInstantlyClient } from "@/lib/integrations/instantly";
 import { createTelegramClient } from "@/lib/integrations/telegram";
+import { jobQueue } from "@/lib/jobs";
 import { getActiveSetting } from "@/lib/settings";
 import { transition } from "@/lib/state";
 import type { DatabaseWithWebhooks } from "@/types/database-extensions";
@@ -13,7 +14,10 @@ import type { ReconcileDeps } from "./reconcile/core";
 import { reconcileJobDefinitions } from "./reconcile/jobs";
 
 export {
+  INSTANTLY_LEADS_JOB_TYPE,
+  type LeadSweepSummary,
   REPLY_POLL_JOB_TYPE,
+  runInstantlyLeadSweep,
   runReplyPoll,
   runStaleStopCheck,
   STALE_STOP_JOB_TYPE,
@@ -28,6 +32,7 @@ export function createReconcileDeps(): ReconcileDeps {
   return {
     db: db as unknown as SupabaseClient<DatabaseWithWebhooks>,
     instantly: createInstantlyClient(),
+    queue: jobQueue,
     transition,
     getActiveSetting,
     alert: (text) => telegram.sendAlert(text),

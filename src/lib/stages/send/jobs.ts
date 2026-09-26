@@ -1,6 +1,12 @@
 import { z } from "zod";
 
 import { defineJob, type RegisteredJob } from "@/lib/jobs/registry";
+import {
+  RECIPIENT_CHECK_JOB_TYPE,
+  type RecipientCheckDeps,
+  recipientCheckPayloadSchema,
+  runRecipientCheck,
+} from "@/lib/sending/recipient-check";
 
 import {
   RECONCILE_JOB_TYPE,
@@ -38,4 +44,21 @@ export function sendJobDefinitions(deps: SendDeps): RegisteredJob[] {
       },
     }),
   ];
+}
+
+/**
+ * The post-send recipient check (09 §U6c scope 6). Its own deps: it reads
+ * GET /emails/{id} and may stop a sequence and pause a sender, which the send
+ * stage's deps deliberately cannot do.
+ */
+export function recipientCheckJobDefinition(deps: RecipientCheckDeps): RegisteredJob {
+  return defineJob({
+    type: RECIPIENT_CHECK_JOB_TYPE,
+    payloadSchema: recipientCheckPayloadSchema,
+    // getEmail may wait on the shared 20 req/min limiter; a stop is ≤ 2 DELETEs + reads.
+    timeoutMs: 90_000,
+    handler: async (job) => {
+      await runRecipientCheck(deps, job);
+    },
+  });
 }

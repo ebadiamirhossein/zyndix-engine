@@ -872,10 +872,8 @@ async function accept(
   return { kind: "sent", outboxId: outbox.id, operation: outbox.operation };
 }
 
-/** Normalized addresses from a comma-separated list ("a@x.com, Name <b@y.com>"). */
-export function addressList(value: string | null | undefined): string[] {
-  return (value ?? "").match(/[^\s<>,;"]+@[^\s<>,;"]+/g)?.map((e) => normalizeEmail(e)) ?? [];
-}
+/** Moved to lib/sending/recipient-check.ts (S21); re-exported for the drill/spike scripts. */
+export { addressList } from "@/lib/sending/recipient-check";
 
 async function markTouchSent(deps: SendDeps, touchId: string, senderId: string, emailId: string | null, now: Date) {
   const { error } = await deps.db

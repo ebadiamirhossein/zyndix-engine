@@ -711,7 +711,7 @@ async function emails(): Promise<void> {
 async function poll(): Promise<void> {
   const { lead } = await requireDrillLead();
   const account = await sender();
-  const reconcileDeps: ReconcileDeps = { db: webhookDb, instantly, transition: state.transition, getActiveSetting, alert };
+  const reconcileDeps: ReconcileDeps = { db: webhookDb, instantly, queue, transition: state.transition, getActiveSetting, alert };
   const count = async () => {
     const { count: inbound } = await sendDb.from("touches").select("id", { count: "exact", head: true }).eq("lead_id", lead.id).eq("direction", "inbound");
     const { count: replies } = await baseDb.from("lead_events").select("id", { count: "exact", head: true }).eq("lead_id", lead.id).eq("event", "reply_received");
@@ -753,6 +753,7 @@ async function poll(): Promise<void> {
     secret: undefined,
     transition: state.transition,
     instantly,
+    queue,
     getActiveSetting,
     alert,
   };

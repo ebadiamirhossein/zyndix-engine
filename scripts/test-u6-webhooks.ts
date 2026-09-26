@@ -85,6 +85,12 @@ const mock = {
   paused: [] as string[],
   alerts: [] as string[],
   blockListFails: false,
+  // S21: the stop path's reads/deletes and the recipient-check enqueue. No
+  // fixture here holds an Instantly enrollment, so the stop calls stay at 0.
+  deleted: [] as string[],
+  getLead: [] as string[],
+  findLead: [] as string[],
+  enqueued: [] as Array<{ type: string; payload: unknown; idempotencyKey?: string }>,
 };
 
 function deps(overrides: Partial<InstantlyWebhookDeps> = {}): InstantlyWebhookDeps {
@@ -101,6 +107,24 @@ function deps(overrides: Partial<InstantlyWebhookDeps> = {}): InstantlyWebhookDe
       pauseCampaign: async (id: string) => {
         mock.paused.push(id);
         return { id, name: "paused", status: 2 } as never;
+      },
+      deleteLead: async (id: string) => {
+        mock.deleted.push(id);
+        return { id, status: 1, timestamp_created: NOW.toISOString() } as never;
+      },
+      getLead: async (id: string) => {
+        mock.getLead.push(id);
+        return null;
+      },
+      findLeadInCampaign: async (campaignId: string) => {
+        mock.findLead.push(campaignId);
+        return null;
+      },
+    },
+    queue: {
+      enqueue: async (input) => {
+        mock.enqueued.push({ type: input.type, payload: input.payload, idempotencyKey: input.idempotencyKey });
+        return { job: { id: `${TAG}.job` }, deduped: false } as never;
       },
     },
     getActiveSetting: async (k: string) => {
@@ -344,6 +368,12 @@ async function outOfOrderCase(a: { id: string; campaign: string; identifier: str
     payload("reply_received", f, a, { email_id: `${TAG}.order-reply`, reply_subject: "Re: Your listing pages", reply_text: "Yes, send it.", timestamp: NOW.toISOString() }),
   );
   const afterReply = (await leadRow(f.leadId)).state;
+  // The step-1 touch the late email_sent names (S21: email_sent step N → touch N).
+  const { error: touchError } = await db
+    .from("touches")
+    .insert({ lead_id: f.leadId, step_no: 1, channel: "email", direction: "outbound", status: "sent", subject: "Your listing pages", body: "Step 1" });
+  if (touchError) throw new Error(`order fixture touch: ${touchError.message}`);
+  const enqueuedBefore = mock.enqueued.length;
   const sent = await post(payload("email_sent", f, a, { email_id: `${TAG}.order-step1`, step: 1, timestamp: new Date(NOW.getTime() - 600_000).toISOString() }));
   const final = (await leadRow(f.leadId)).state;
   assert("order: reply on a queued lead → queued → sent → replied", reply.status === 200 && afterReply === "replied", afterReply);
@@ -353,6 +383,12 @@ async function outOfOrderCase(a: { id: string; campaign: string; identifier: str
   assert(
     "order: both events recorded (sent inferred from the reply; late sent logged, state unchanged)",
     inferred.length === 1 && late.length === 1 && (late[0]!.detail as Record<string, unknown>).state_unchanged === "replied",
+  );
+  const checks = mock.enqueued.slice(enqueuedBefore);
+  assert(
+    "order: the late email_sent still queues the recipient check (a reply never cancels it)",
+    checks.length === 1 && checks[0]!.type === "send.recipient_check" && checks[0]!.idempotencyKey === `recipient_check:${TAG}.order-step1`,
+    JSON.stringify(checks),
   );
 }
 

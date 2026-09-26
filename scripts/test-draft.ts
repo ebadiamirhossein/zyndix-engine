@@ -171,9 +171,19 @@ async function assertNoForeignDraftingLeads(): Promise<void> {
   }
 }
 
+// No digit in any name the writer may quote (Session 20: "Realty 1" put an
+// uncovered "1" in the subject, so the run tested the fixture, not the writer).
+const FIXTURE_NAME_WORDS = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliett"];
+
+function fixtureCompanyName(index: number): string {
+  const word = FIXTURE_NAME_WORDS[(index - 1) % FIXTURE_NAME_WORDS.length]!;
+  const round = Math.floor((index - 1) / FIXTURE_NAME_WORDS.length);
+  return `Draft Fixture Realty ${word}${round > 0 ? ` ${FIXTURE_NAME_WORDS[round % FIXTURE_NAME_WORDS.length]}` : ""}`;
+}
+
 async function seedFixture(index: number): Promise<Fixture> {
   const domain = `${RUN_TAG}-${index}${FIXTURE_DOMAIN_SUFFIX}`;
-  const companyName = `Draft Fixture Realty ${index}`;
+  const companyName = fixtureCompanyName(index);
 
   const { data: company, error: companyError } = await db
     .from("companies")
@@ -234,6 +244,14 @@ async function seedFixture(index: number): Promise<Fixture> {
           "Follow Up Boss is embedded on the listings pages, but no scheduling or auto-response widget is present on any page crawled.",
         source: "website",
       },
+      {
+        // Session 21 (09 §U6c S21 item 5b): a third item, so a step 2 can cite
+        // something step 1 did not (step2_repeats_step1) even when step 1
+        // uses two. Supported verbatim by the /about page text below.
+        observation:
+          "The about page says enquiries are answered by the office team during business hours and names no after-hours contact.",
+        source: "website",
+      },
     ],
     triggers: ["hiring a transaction coordinator"],
     visible_tools: ["Follow Up Boss"],
@@ -259,6 +277,10 @@ async function seedFixture(index: number): Promise<Fixture> {
       payload: [
         { url: `https://${domain}/contact`, text: `${companyName}\nContact our team: team@${domain}\nCall the office.` },
         { url: `https://${domain}/listings`, text: "Listings powered by Follow Up Boss. Browse homes for sale." },
+        {
+          url: `https://${domain}/about`,
+          text: `About ${companyName}\nEnquiries are answered by our office team during business hours.`,
+        },
       ],
     },
     {
@@ -324,7 +346,41 @@ async function cleanupFixtures(fixtures: Fixture[]): Promise<void> {
   );
 }
 
+/**
+ * `--check-fixture` (09 §U6c S21 item 5b): seed one fixture, check its shape,
+ * clean up. No Anthropic call, no Telegram message.
+ */
+async function checkFixture(): Promise<void> {
+  console.log(`\n=== test-draft --check-fixture (tag=${RUN_TAG}) — no Anthropic call ===\n`);
+  await assertNoForeignDraftingLeads();
+  const before = await snapshotCounts();
+  console.log(`BEFORE  ${formatCounts(before)}`);
+  const fixtures: Fixture[] = [];
+  try {
+    fixtures.push(await seedFixture(1));
+    fixtures.push(await seedFixture(2));
+    for (const fixture of fixtures) {
+      const { data: lead } = await db.from("leads").select("first_name, last_name, state").eq("id", fixture.leadId).single();
+      const { data: qual } = await db.from("qualification").select("evidence").eq("lead_id", fixture.leadId).single();
+      const evidence = Array.isArray(qual?.evidence) ? qual.evidence : [];
+      const names = [fixture.companyName, lead?.first_name ?? "", lead?.last_name ?? ""];
+      assert(`5b: ${fixture.companyName}: ≥ 3 evidence items`, evidence.length >= 3, `evidence=${evidence.length}`);
+      assert(`5b: ${fixture.companyName}: no digit in the company or lead name`, names.every((n) => !/\d/.test(n)), names.join(" | "));
+      assert(`5b: ${fixture.companyName}: lead in drafting`, lead?.state === "drafting", `state=${lead?.state}`);
+    }
+  } finally {
+    await cleanupFixtures(fixtures);
+  }
+  const after = await snapshotCounts();
+  console.log(`AFTER   ${formatCounts(after)}`);
+  assert("5b: BEFORE = AFTER", JSON.stringify(before) === JSON.stringify(after));
+  const failed = results.filter((r) => !r.pass);
+  console.log(failed.length ? `\n${failed.length} of ${results.length} check(s) FAILED.` : `\nAll ${results.length} checks passed.`);
+  if (failed.length) process.exit(1);
+}
+
 async function main(): Promise<void> {
+  if (process.argv.includes("--check-fixture")) return checkFixture();
   const limit = parseLimit(process.argv.slice(2));
   console.log(`\n=== test-draft (fixtures=${limit}, tag=${RUN_TAG}) ===\n`);
 
@@ -407,7 +463,7 @@ async function main(): Promise<void> {
           .from("lead_events")
           .select("event, detail")
           .eq("lead_id", fixture.leadId)
-          .in("event", ["claim_guard_hold", "sequence_shape_invalid", "template_variable_missing"]);
+          .in("event", ["claim_guard_hold", "sequence_shape_invalid", "template_variable_missing", "step2_repeats_step1"]);
         for (const hold of holds ?? []) console.log(`${(hold.event ?? "hold").toUpperCase()}:\n${JSON.stringify(hold.detail, null, 2)}`);
         assert(`${fixture.leadId} touches exist`, false, `state=${lead?.state}`);
         continue;

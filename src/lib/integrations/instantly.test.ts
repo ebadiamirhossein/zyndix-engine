@@ -763,6 +763,27 @@ describe("U6c S20 additions: updateCampaign, getLead, getEmail, daily analytics"
     assert.ok(page.items.length >= 1);
   });
 
+  test("listCampaignLeads pages with starting_after (S21 lead sweep)", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(200, fixture("leads-list-found")));
+    await client(impl).listCampaignLeads(CAMPAIGN, { limit: 100, startingAfter: "01a0d8ea-25f0-7f5a-aafe-6d47599d69b8" });
+    assert.deepEqual(calls[0].body, { campaign: CAMPAIGN, limit: 100, starting_after: "01a0d8ea-25f0-7f5a-aafe-6d47599d69b8" });
+  });
+
+  test("deleteLead: a 5xx is an uncertain outcome, never retried (the stop path reads before deleting again)", async () => {
+    const { impl, calls } = mockFetch(() => jsonResponse(500, { message: "boom" }));
+    const error = await capture(() => client(impl).deleteLead("00000000-0000-4000-8000-00000000d001"));
+    assert.ok(error instanceof InstantlyUncertainOutcomeError);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "DELETE");
+  });
+
+  test("deleteLead: a 404 is a permanent error with status 404 (already gone)", async () => {
+    const { impl } = mockFetch(() => jsonResponse(404, fixture("error-404")));
+    const error = await capture(() => client(impl).deleteLead("00000000-0000-4000-8000-00000000d001"));
+    assert.ok(error instanceof InstantlyPermanentError);
+    assert.equal((error as InstantlyPermanentError).status, 404);
+  });
+
   test("getLead returns the lead, and null on 404 (removed)", async () => {
     const found = mockFetch(() => jsonResponse(200, fixture("lead-deleted")));
     const lead = await client(found.impl).getLead("00000000-0000-4000-8000-00000000d001");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { instantlyExternalId, isAutoReply, parseReturnDate } from "./instantly";
+import { instantlyExternalId, isAutoReply, parseReturnDate, parseWebhookStep } from "./instantly";
 
 // Pure rules of the Instantly webhook processor (09 §U6). No DB, no network.
 
@@ -73,5 +73,16 @@ describe("dedupe id (the payload carries no event id)", () => {
     assert.notEqual(instantlyExternalId({ ...base, email_id: "e2" }), id);
     assert.notEqual(instantlyExternalId({ ...base, timestamp: "2026-09-29T06:00:01.000Z" }), id);
     assert.match(id, /^ix:[0-9a-f]{64}$/);
+  });
+});
+
+describe("email_sent step (09 §U6c S21): the webhook's 1-indexed step, never the API's", () => {
+  test("numbers and numeric strings ≥ 1", () => {
+    assert.equal(parseWebhookStep(2), 2);
+    assert.equal(parseWebhookStep("2"), 2);
+    assert.equal(parseWebhookStep(" 1 "), 1);
+  });
+  test("refused: missing, 0, negative, fractional, the GET /emails format", () => {
+    for (const v of [undefined, null, 0, -1, 1.5, "0_1_0", "", "two", "2a"]) assert.equal(parseWebhookStep(v), null, String(v));
   });
 });

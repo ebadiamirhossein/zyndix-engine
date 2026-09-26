@@ -3,14 +3,25 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { InstantlyClient } from "@/lib/integrations/instantly";
+import type { JobQueue } from "@/lib/jobs/queue";
+import { ledgerDate, rampQuota } from "@/lib/scheduler/windows";
 import { canonicalJson } from "@/lib/sending/approval";
+import { RECIPIENT_CHECK_DELAY_MS, RECIPIENT_CHECK_JOB_TYPE, type RecipientCheckPayload } from "@/lib/sending/recipient-check";
+import { pauseSender, stopSequence } from "@/lib/sending/stop";
 import { normalizeEmail } from "@/lib/sending/suppression";
 import type { createStateStore } from "@/lib/state/core";
 import { instantlyWebhookSchema, type InstantlyWebhookPayload } from "@/lib/validation/external";
 import { capacityDefaultsSchema } from "@/lib/validation/jsonb";
 import type { Json } from "@/types/database";
-import type { DatabaseWithWebhooks } from "@/types/database-extensions";
+import type { DatabaseWithEnrollments, DatabaseWithWebhooks, InstantlyEnrollmentRowShape } from "@/types/database-extensions";
 import type { LeadState } from "@/types/enums";
+
+import { type ExceptionKind, raiseException, WebhookProcessingError } from "./exceptions";
+
+// Moved in S21 (09 §U6c): raiseException/ExceptionKind to ./exceptions and
+// pauseSender to lib/sending/stop.ts. Re-exported for existing importers.
+export { type ExceptionKind, raiseException, WebhookProcessingError } from "./exceptions";
+export { pauseSender, type StopDeps } from "@/lib/sending/stop";
 
 // Instantly webhooks (09 §U6, brief §10). The stop path:
 //
@@ -28,6 +39,10 @@ import type { LeadState } from "@/types/enums";
 //      Bounce → invalid email, suppression, bounce-rate auto-pause.
 //   4. Anything the engine cannot attribute goes to the exceptions queue with
 //      zero lead mutations. A stop that fails is escalated to the operator.
+//   5. (09 §U6c S21) Reply, unsubscribe and bounce also remove the lead from
+//      its Instantly sequence (stopSequence: DELETE → GET 404). email_sent
+//      step N marks touch N sent, counts a follow-up in the ledger once, and
+//      queues the post-send recipient check.
 //
 // Ordering: events are applied against current state, never assumed to
 // arrive in order. `email_sent` never regresses a later state, so a reply
@@ -45,8 +60,10 @@ export type InstantlyWebhookDeps = {
   /** The shared token Instantly sends in WEBHOOK_TOKEN_HEADER. Undefined = not configured. */
   secret: string | undefined;
   transition: ReturnType<typeof createStateStore>["transition"];
-  /** Only the two stop operations. No model client exists here by design. */
-  instantly: Pick<InstantlyClient, "addBlockListEntry" | "pauseCampaign">;
+  /** Only stop operations and their confirmation reads. No model client exists here by design. */
+  instantly: Pick<InstantlyClient, "addBlockListEntry" | "pauseCampaign" | "deleteLead" | "getLead" | "findLeadInCampaign">;
+  /** email_sent enqueues the post-send recipient check (09 §U6c scope 6). */
+  queue: Pick<JobQueue, "enqueue">;
   getActiveSetting: (key: string) => Promise<{ version: number; value: unknown }>;
   alert: (text: string) => Promise<void>;
   now?: () => Date;
@@ -56,26 +73,6 @@ export type WebhookOutcome =
   | { kind: "duplicate"; eventId: string }
   | { kind: "processed"; eventId: string; action: string; leadId?: string }
   | { kind: "exception"; eventId: string; exception: ExceptionKind };
-
-export type ExceptionKind =
-  | "unmatched_recipient"
-  | "foreign_campaign"
-  | "stop_failed"
-  | "invalid_payload"
-  | "unexpected_state"
-  // Raised by the reconcile job (src/lib/reconcile/core.ts), not by a delivery.
-  | "stop_processing_stale"
-  | "reply_poll_truncated"
-  // Raised by the send stage (src/lib/stages/send/core.ts): an accepted
-  // follow-up whose recipients do not include the lead (Session 14 drill).
-  | "reply_misaddressed";
-
-export class WebhookProcessingError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "WebhookProcessingError";
-  }
-}
 
 // ---------------------------------------------------------------------------
 // HTTP entry point (the route is a thin wrapper around this)
@@ -420,6 +417,8 @@ const handleReply: Handler = async (deps, { eventId, payload, lead, now }) => {
       if (frozen.cancelled_jobs > 0 || frozen.killed_touches > 0) {
         await logEvent(deps.db, lead.id, "reply_refrozen", { webhook_event_id: eventId, email_id: payload.email_id, ...frozen });
       }
+      // Idempotent: a no-op once the enrollment is removed.
+      await stopSequence(deps, lead.id, "reply_received", { eventId });
       return { kind: "processed", eventId, action: "duplicate_reply", leadId: lead.id };
     }
   }
@@ -444,6 +443,8 @@ const handleReply: Handler = async (deps, { eventId, payload, lead, now }) => {
     if (state) await deps.transition(lead.id, state, "manual_hold", "reply_unexpected_state", { ...detail, from_state: state });
     await raiseException(deps, { kind: "unexpected_state", eventId, leadId: lead.id, detail: { event_type: payload.event_type, state } });
   }
+  // Provider side, beside Instantly's own stop_on_reply (09 §U6c scope 4).
+  await stopSequence(deps, lead.id, "reply_received", { eventId });
   return { kind: "processed", eventId, action: "reply_frozen", leadId: lead.id };
 };
 
@@ -475,6 +476,8 @@ const handleUnsubscribe: Handler = async (deps, { eventId, payload, lead, now })
       detail: { stop: "instantly_block_list", error: error instanceof Error ? error.message : String(error) },
     });
   }
+  // And out of its sequence (09 §U6c scope 4).
+  await stopSequence(deps, lead.id, "unsubscribed", { eventId });
   return { kind: "processed", eventId, action: "suppressed", leadId: lead.id };
 };
 
@@ -499,37 +502,217 @@ const handleBounce: Handler = async (deps, { eventId, payload, lead, account, no
     await logEvent(deps.db, lead.id, "bounced", { ...detail, state_unchanged: state });
   }
 
+  // Out of its sequence before any sender-level decision (09 §U6c scope 4).
+  await stopSequence(deps, lead.id, "bounced", { eventId });
   const accountId = lead.send_account_id ?? account?.id ?? null;
   if (accountId) await checkBounceRate(deps, eventId, accountId, now);
   return { kind: "processed", eventId, action: "bounced", leadId: lead.id };
 };
 
-/** Provider confirms a send. Never regresses a later state. */
-const handleSent: Handler = async (deps, { eventId, payload, lead, account }) => {
-  // Step 1's Instantly email id is the thread anchor for follow-ups.
-  if (payload.email_id && account?.instantly_campaign_id && payload.campaign_id === account.instantly_campaign_id) {
+/**
+ * Provider confirms a send (09 §U6c scope 5). The webhook's `step` (1-indexed)
+ * names the touch — never GET /emails, whose step format is 0-indexed. Touch N
+ * → sent with the provider email id; a follow-up (N >= 2) is counted in the
+ * capacity ledger exactly once; the post-send recipient check is queued.
+ * Never regresses a later lead state.
+ */
+const handleSent: Handler = async (deps, { eventId, payload, lead, account, now }) => {
+  const emailId = payload.email_id ?? null;
+  const step = parseWebhookStep(payload.step);
+  if (step === null) {
+    await raiseException(deps, {
+      kind: "sent_step_unknown",
+      eventId,
+      leadId: lead.id,
+      escalate: true,
+      detail: { reason: "no_step", step: payload.step ?? null, email_id: emailId, campaign_id: payload.campaign_id ?? null },
+    });
+    return { kind: "exception", eventId, exception: "sent_step_unknown" };
+  }
+  const found = await findSentTouch(deps.db, lead.id, payload.campaign_id ?? null, step);
+  if (!found.ok) {
+    await raiseException(deps, {
+      kind: "sent_step_unknown",
+      eventId,
+      leadId: lead.id,
+      escalate: true,
+      detail: { reason: found.reason, step, email_id: emailId, campaign_id: payload.campaign_id ?? null },
+    });
+    return { kind: "exception", eventId, exception: "sent_step_unknown" };
+  }
+  const { touch, enrollment } = found;
+  const sentAt = eventTime(payload, now);
+  const sendAccountId = lead.send_account_id ?? enrollment?.send_account_id ?? account?.id ?? null;
+
+  // Step 1's Instantly email id on the outbox row (kept from U6).
+  if (step === 1 && emailId && account?.instantly_campaign_id && payload.campaign_id === account.instantly_campaign_id) {
     const { error } = await deps.db
       .from("outbox")
-      .update({ provider_email_id: payload.email_id })
+      .update({ provider_email_id: emailId })
       .eq("lead_id", lead.id)
       .eq("operation", "enroll")
       .is("provider_email_id", null)
       .in("state", ["accepted", "reconciled_sent", "uncertain"]);
     if (error) throw new WebhookProcessingError(`outbox anchor: ${error.message}`);
   }
+
+  // Touch N → sent. A redelivery of the same email changes nothing (and never
+  // undoes a recipient check that failed the touch).
+  const alreadyRecorded = emailId !== null && touch.provider_message_id === emailId;
+  if (!alreadyRecorded) {
+    const stoppedBefore =
+      touch.status === "killed" || touch.status === "failed" || enrollment?.state === "removed" || enrollment?.state === "stop_failed";
+    const { error } = await deps.db
+      .from("touches")
+      .update({
+        status: "sent",
+        sent_at: sentAt,
+        ...(emailId ? { provider_message_id: emailId } : {}),
+        ...(sendAccountId ? { send_account_id: sendAccountId } : {}),
+      })
+      .eq("id", touch.id);
+    if (error) throw new WebhookProcessingError(`touch ${step} sent: ${error.message}`);
+    if (stoppedBefore) {
+      // The one failure the stop path exists to prevent: surface it loudly.
+      await raiseException(deps, {
+        kind: "sent_after_stop",
+        eventId,
+        leadId: lead.id,
+        escalate: true,
+        detail: {
+          step,
+          email_id: emailId,
+          touch_id: touch.id,
+          touch_status_before: touch.status,
+          enrollment_state: enrollment?.state ?? null,
+          stop_reason: enrollment?.stop_reason ?? null,
+        },
+      });
+    }
+  }
+
+  // A follow-up is sent by Instantly, not reserved by the engine: count it once.
+  if (step >= 2 && emailId && sendAccountId) {
+    await recordProviderSend(deps, sendAccountId, sentAt, emailId);
+  }
+
   const state = await currentState(deps.db, lead.id);
   if (state === "queued") {
-    await deps.transition(lead.id, "queued", "sent", "sent_confirmed_by_webhook", { webhook_event_id: eventId });
+    await deps.transition(lead.id, "queued", "sent", "sent_confirmed_by_webhook", { webhook_event_id: eventId, step });
   } else {
     await logEvent(deps.db, lead.id, "provider_email_sent", {
       webhook_event_id: eventId,
-      email_id: payload.email_id ?? null,
-      step: payload.step ?? null,
+      email_id: emailId,
+      step,
+      touch_id: touch.id,
       state_unchanged: state,
     });
   }
+
+  // Post-send recipient check, on every step (09 §U6c scope 6).
+  if (emailId) {
+    const checkPayload: RecipientCheckPayload = {
+      lead_id: lead.id,
+      touch_id: touch.id,
+      email_id: emailId,
+      step,
+      send_account_id: sendAccountId,
+    };
+    await deps.queue.enqueue({
+      type: RECIPIENT_CHECK_JOB_TYPE,
+      payload: checkPayload as unknown as Json,
+      runAfter: new Date(now.getTime() + RECIPIENT_CHECK_DELAY_MS).toISOString(),
+      idempotencyKey: `recipient_check:${emailId}`,
+    });
+  } else {
+    // Nothing to read back: the recipients cannot be verified. Fail closed.
+    await raiseException(deps, {
+      kind: "recipient_check_unreadable",
+      eventId,
+      leadId: lead.id,
+      escalate: true,
+      detail: { reason: "no_email_id", step, touch_id: touch.id },
+    });
+    const current = await currentState(deps.db, lead.id);
+    if (current && current !== "manual_hold" && current !== "suppressed") {
+      await deps.transition(lead.id, current, "manual_hold", "recipient_check_unreadable", { webhook_event_id: eventId, step });
+    }
+    await stopSequence(deps, lead.id, "recipient_check_unreadable", { eventId });
+  }
   return { kind: "processed", eventId, action: "sent_recorded", leadId: lead.id };
 };
+
+/** The webhook `step` as a 1-based integer: 2 or "2". Anything else (incl. the API's "0_1_0") → null. */
+export function parseWebhookStep(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && /^\s*\d+\s*$/.test(value) ? Number(value) : NaN;
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+type SentTouch = { id: string; status: string | null; provider_message_id: string | null };
+
+async function findSentTouch(
+  db: WebhookDb,
+  leadId: string,
+  campaignId: string | null,
+  step: number,
+): Promise<
+  | { ok: true; touch: SentTouch; enrollment: InstantlyEnrollmentRowShape | null }
+  | { ok: false; reason: "step_out_of_range" | "no_touch_for_step" }
+> {
+  const { data: enrollments, error } = await (db as unknown as SupabaseClient<DatabaseWithEnrollments>)
+    .from("instantly_enrollments")
+    .select("*")
+    .eq("lead_id", leadId)
+    .order("created_at", { ascending: false });
+  if (error) throw new WebhookProcessingError(`enrollment lookup: ${error.message}`);
+  const all = enrollments ?? [];
+  const enrollment = (campaignId ? all.find((e) => e.campaign_id === campaignId) : all[0]) ?? null;
+
+  if (enrollment) {
+    if (step > enrollment.steps_total) return { ok: false, reason: "step_out_of_range" };
+    const { data: touches, error: touchError } = await db
+      .from("touches")
+      .select("id, status, provider_message_id")
+      .eq("lead_id", leadId)
+      .eq("direction", "outbound")
+      .eq("step_no", step)
+      .eq("approval_hash", enrollment.sequence_hash);
+    if (touchError) throw new WebhookProcessingError(`step touch: ${touchError.message}`);
+    if (touches?.length !== 1) return { ok: false, reason: "no_touch_for_step" };
+    return { ok: true, touch: touches[0]!, enrollment };
+  }
+
+  // Pre-U6c single-touch sends have no enrollment: only step 1 can be theirs.
+  if (step !== 1) return { ok: false, reason: "no_touch_for_step" };
+  const { data: legacy, error: legacyError } = await db
+    .from("touches")
+    .select("id, status, provider_message_id, sent_at")
+    .eq("lead_id", leadId)
+    .eq("direction", "outbound")
+    .eq("step_no", 1)
+    .order("sent_at", { ascending: false, nullsFirst: false })
+    .limit(1);
+  if (legacyError) throw new WebhookProcessingError(`legacy step touch: ${legacyError.message}`);
+  const touch = legacy?.[0];
+  return touch ? { ok: true, touch, enrollment: null } : { ok: false, reason: "no_touch_for_step" };
+}
+
+/** record_provider_send (0009d): used/accepted +1 on the first delivery of this email id only. */
+async function recordProviderSend(deps: InstantlyWebhookDeps, sendAccountId: string, sentAt: string, emailId: string): Promise<void> {
+  const date = ledgerDate(new Date(sentAt));
+  const { data: sender, error } = await deps.db.from("send_accounts").select("ramp_started_on").eq("id", sendAccountId).maybeSingle();
+  if (error) throw new WebhookProcessingError(`ledger sender: ${error.message}`);
+  const defaults = capacityDefaultsSchema.parse((await deps.getActiveSetting("capacity_defaults")).value);
+  // The day's quota only ever lowers; unknown ramp → 0 (never invents room).
+  const quota = rampQuota(defaults.email_inbox, sender?.ramp_started_on ?? null, date) ?? 0;
+  const { error: rpcError } = await (deps.db as unknown as SupabaseClient<DatabaseWithEnrollments>).rpc("record_provider_send", {
+    p_send_account_id: sendAccountId,
+    p_date: date,
+    p_quota: quota,
+    p_email_id: emailId,
+  });
+  if (rpcError) throw new WebhookProcessingError(`record_provider_send: ${rpcError.message}`);
+}
 
 // ---------------------------------------------------------------------------
 // Shared steps
@@ -603,8 +786,9 @@ const KILLABLE_TOUCH_STATUSES = ["drafted", "pending_approval", "approved", "edi
 
 /**
  * Stops everything not yet dispatched for this lead, on every channel: queued
- * jobs referencing its touches or the lead are cancelled, and outbound touches
- * that have not left are killed. A job already leased is stopped by the send
+ * jobs referencing its touches or the lead are cancelled (except the
+ * post-send recipient check: an email that already left must still be
+ * checked), and outbound touches that have not left are killed. A job already leased is stopped by the send
  * stage's second preflight, which sees the reply/suppression written here.
  */
 async function freezeOutreach(db: WebhookDb, leadId: string, now: Date): Promise<{ cancelled_jobs: number; killed_touches: number }> {
@@ -619,6 +803,7 @@ async function freezeOutreach(db: WebhookDb, leadId: string, now: Date): Promise
       .from("jobs")
       .update({ state: "cancelled", finished_at: finished, last_error: "frozen by webhook" })
       .eq("state", "queued")
+      .neq("type", RECIPIENT_CHECK_JOB_TYPE)
       .in("payload->>touch_id", touchIds)
       .select("id");
     if (jobError) throw new WebhookProcessingError(`cancel touch jobs: ${jobError.message}`);
@@ -628,6 +813,7 @@ async function freezeOutreach(db: WebhookDb, leadId: string, now: Date): Promise
     .from("jobs")
     .update({ state: "cancelled", finished_at: finished, last_error: "frozen by webhook" })
     .eq("state", "queued")
+    .neq("type", RECIPIENT_CHECK_JOB_TYPE)
     .eq("payload->>lead_id", leadId)
     .select("id");
   if (leadJobError) throw new WebhookProcessingError(`cancel lead jobs: ${leadJobError.message}`);
@@ -694,88 +880,4 @@ async function checkBounceRate(deps: InstantlyWebhookDeps, eventId: string, acco
     eventId,
     why: `bounce_rate_7d ${(rate * 100).toFixed(1)}% > ${(threshold * 100).toFixed(1)}% (${total} sent in 7d)`,
   });
-}
-
-export type StopDeps = Pick<InstantlyWebhookDeps, "db" | "alert" | "now"> & {
-  instantly: Pick<InstantlyClient, "pauseCampaign">;
-};
-
-/**
- * Stops a sender: engine side first (health=paused, which preflight and
- * pickSender both refuse), then the provider side (its Instantly campaign).
- * A failed provider pause is escalated, never ignored. Shared by the bounce
- * auto-pause and the reconcile job's stop_processing_stale.
- */
-export async function pauseSender(
-  deps: StopDeps,
-  input: {
-    account: AccountMatch;
-    /** Written to paused_reason; null when the caller already wrote health/paused_reason. */
-    reason: string | null;
-    eventId?: string | null;
-    /** The alert's second line. */
-    why: string;
-  },
-): Promise<{ campaignPaused: boolean }> {
-  const { account } = input;
-  if (input.reason !== null) {
-    const { error } = await deps.db
-      .from("send_accounts")
-      .update({ health: "paused", paused_reason: input.reason.slice(0, 500) })
-      .eq("id", account.id);
-    if (error) throw new WebhookProcessingError(`pause sender: ${error.message}`);
-  }
-
-  let campaignPaused = false;
-  if (account.instantly_campaign_id) {
-    try {
-      await deps.instantly.pauseCampaign(account.instantly_campaign_id);
-      campaignPaused = true;
-    } catch (pauseError) {
-      await raiseException(deps, {
-        kind: "stop_failed",
-        eventId: input.eventId ?? null,
-        escalate: true,
-        detail: {
-          stop: "instantly_pause_campaign",
-          send_account_id: account.id,
-          error: pauseError instanceof Error ? pauseError.message : String(pauseError),
-        },
-      });
-    }
-  }
-  await deps.alert(
-    `⛔ Sender auto-paused: ${account.identifier ?? account.id}\n` +
-      `${input.why}\n` +
-      `Engine: health=paused. Instantly campaign pause: ${campaignPaused ? "done" : "NOT done — see exceptions"}.`,
-  );
-  return { campaignPaused };
-}
-
-export async function raiseException(
-  deps: Pick<InstantlyWebhookDeps, "db" | "alert" | "now">,
-  input: {
-    kind: ExceptionKind;
-    eventId: string | null;
-    leadId?: string;
-    detail: Record<string, unknown>;
-    escalate?: boolean;
-    /** Send the escalation alert. Defaults to `escalate`; false when the caller alerts itself. */
-    notify?: boolean;
-  },
-): Promise<void> {
-  const now = (deps.now ?? (() => new Date()))().toISOString();
-  const { error } = await deps.db.from("exceptions").insert({
-    kind: input.kind,
-    provider: PROVIDER,
-    webhook_event_id: input.eventId,
-    lead_id: input.leadId ?? null,
-    detail: input.detail as Json,
-    status: input.escalate ? "escalated" : "open",
-    escalated_at: input.escalate ? now : null,
-  });
-  if (error) throw new WebhookProcessingError(`exception insert: ${error.message}`);
-  if (input.notify ?? input.escalate) {
-    await deps.alert(`⚠️ Instantly ${input.kind}${input.leadId ? ` · lead ${input.leadId}` : ""}\n${JSON.stringify(input.detail).slice(0, 400)}`);
-  }
 }

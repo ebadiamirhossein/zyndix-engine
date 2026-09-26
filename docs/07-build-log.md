@@ -58,6 +58,165 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-26 — Session 21 — U6c S21: follow-up tracking, post-send recipient check, stopSequence, reconcile lead sweep
+
+**Step:** U6c, build part 3 (`09` §U6c, S21), on `main`. Plan mode first. The plan fit one session (cut line: the sweep); no cut was needed.
+
+**Plan decisions** (approved with the plan):
+- every sender pause cascades;
+- `recipient_check_unreadable` holds and stops but does not pause the sender;
+- a stop is confirmed by GET 404 **and** list 0;
+- manual hold is a guarded script for now;
+- `sent_at` = Instantly's event time.
+
+**Status at end:** 🟨 **S21 done — tested locally** (mocked Instantly, synthetic fixtures).
+- The ⛔ row in `06` §6 stays open until the S22 live drill. 🚩 not reached.
+
+**Safety and spend:**
+- No Instantly write, no email, no Anthropic call, no prospect read or touched.
+- One public read: the Instantly OpenAPI spec download (Step 0).
+- Supabase: every DB test used synthetic fixtures (`*.example.invalid` / `*.example.com`, tagged) with scoped cleanup; before/after counts are identical.
+- The `hold-lead.ts` dry run was run only against a non-existent UUID.
+
+**Did**
+- **Step 0, spec re-read** (`https://api.instantly.ai/openapi/api_v2.json`, 2026-09-26):
+  - Lead `status` enum `1 Active, 2 Paused, 3 Completed, -1 Bounced, -2 Unsubscribed, -3 Skipped`;
+  - `DELETE /api/v2/leads/{id}` and `GET` both list 404 "The requested resource was not found";
+  - `POST /api/v2/leads/list` `starting_after` = "the `id` value from the last lead of the previous page", `limit` 1–100;
+  - the webhook `event_type` enum is `all_events, email_sent, email_opened, email_link_clicked, reply_received, email_bounced, lead_unsubscribed, campaign_completed, account_error, lead_neutral, lead_interested, lead_not_interested, lead_meeting_booked, lead_meeting_completed, lead_closed, lead_out_of_office, lead_wrong_person, lead_no_show, supersearch_enrichment_completed`. **No complaint event exists**, so no handler was invented.
+- **Tracking** (`handleSent` rewritten):
+  - the webhook `step` → touch N, via the lead's enrollment for that campaign and its `sequence_hash`;
+  - touch → `sent`, with `sent_at` = the event time and `provider_message_id` = `email_id` (step 1 included);
+  - steps ≥ 2 → `record_provider_send`;
+  - `sent_step_unknown` (`no_step` / `step_out_of_range` / `no_touch_for_step`), and the added `sent_after_stop`;
+  - every `email_sent` queues `send.recipient_check` (+60 s, key `recipient_check:<email_id>`). `freezeOutreach` no longer cancels that job type.
+- **`lib/sending/recipient-check.ts`:**
+  - pure `checkRecipients`, `isOwnAddress` and `OWN_DOMAINS`; `addressList` moved here and is re-exported by send core;
+  - `runRecipientCheck` implements `recipient_misaddressed` and `recipient_check_unreadable`;
+  - `recipientCheckJobDefinition` and `createRecipientCheckDeps` (production wiring; nothing schedules it until U9).
+- **`lib/sending/stop.ts`:**
+  - `stopSequence`: kill follow-ups → `stopping` → `DELETE` (≤ 2, read-before-retry on 5xx/timeout) → GET 404 + list 0 → `removed`; or `stop_failed` + escalate + `pauseSender`;
+  - `pauseSender`, moved here from the webhook module, now cascades to every live enrollment of the sender;
+  - `holdAndStop`, `killFollowups`, `loadSender`.
+- **`webhooks/exceptions.ts`:** `raiseException`, `ExceptionKind` (+6 kinds) and `WebhookProcessingError`, moved out and re-exported from `webhooks/instantly.ts`.
+- **Callers:**
+  - `stopSequence` from reply (both paths), unsubscribe (after the block list) and bounce (before the bounce-rate check);
+  - webhook deps gain `deleteLead`, `getLead`, `findLeadInCampaign` and `queue`.
+- **Sweep:** `runInstantlyLeadSweep` + job `reconcile.instantly_leads` (R1 stopped/suppressed/unfinished enrollments; R2 unknown Active leads, report only). `ReconcileDeps` gains the stop reads, `listCampaignLeads` and `queue`.
+- **Adapter:** `listCampaignLeads` takes `startingAfter`.
+- **5a:** held and parked drafts count their writer tokens/cost (summary + hold/park event).
+- **5b:** the `test-draft.ts` fixture:
+  - is named "Draft Fixture Realty Alpha/Bravo/…";
+  - gets a 3rd evidence item, "The about page says enquiries are answered by the office team during business hours and names no after-hours contact.", backed by an `/about` page text;
+  - `--check-fixture` checks it without Anthropic.
+- **5c:** a `09` §5 backlog row: the writer reserves ≥ 1 evidence item for step 2 (UR prompt work).
+- **`scripts/hold-lead.ts`:** operator manual hold. Dry run by default; `--apply` = `holdAndStop`, a live `DELETE` when enrolled.
+
+**Files touched**
+- **New:**
+  - `src/lib/sending/stop.ts`
+  - `src/lib/sending/recipient-check.ts`
+  - `src/lib/webhooks/exceptions.ts`
+  - `scripts/test-u6c-stops.ts`
+  - `scripts/hold-lead.ts`
+- **Changed:**
+  - `src/lib/webhooks/{instantly,instantly-server}.ts`
+  - `src/lib/reconcile/{core,jobs}.ts`, `src/lib/reconcile.ts`
+  - `src/lib/stages/send.ts`, `src/lib/stages/send/{core,jobs}.ts`
+  - `src/lib/stages/draft/core.ts`
+  - `src/lib/integrations/instantly.ts`
+  - `package.json` (`test:stops`)
+- **Tests changed:**
+  - `src/lib/{integrations/instantly,sending/sending,webhooks/instantly}.test.ts`
+  - `scripts/test-u6-webhooks.ts` (widened deps; the order case gets its step-1 touch and checks that the recipient check survives a reply)
+  - `scripts/test-u6-traversal.ts` (deps)
+  - `scripts/test-u6c-sequence.ts` (costed mock writer, 5a)
+  - `scripts/test-draft.ts` (5b)
+  - `scripts/drill-u6.ts` (deps)
+- **Docs:**
+  - `docs/06-build-progress.md` (U6c row; §5 +7 rows; §6: 3 resolved, 1 updated)
+  - `docs/09-build-plan-v2.md` (§U6c "S21 as built", unit table, §5 +3 rows, 1 closed)
+  - `docs/07-build-log.md` (this entry)
+
+**Verification**
+```
+$ pnpm exec tsc --noEmit ; pnpm build ; eslint (changed files)          → clean
+$ pnpm test:stops
+PASS: T1: touch 2 sent, provider_message_id = email_id, sent_at = the event time
+PASS: T1: ledger used 1, accepted 1 (record_provider_send) — {"used":1,"accepted":1,"quota":15}
+PASS: T1: exact redelivery → duplicate
+PASS: T1: same email_id via a second delivery → processed, ledger still used 1 (counted once)
+PASS: T1: the recipient check is queued as send.recipient_check, one idempotency key, ≥ 60 s later, for touch 2
+PASS: T1: step 1 → touch 1 gets provider_message_id (06 §6 row), ledger unchanged (its reservation counted it)
+PASS: T2: no step / step 4 of 3 / the API's "0_1_0" → exception sent_step_unknown (all escalated) — ["no_step","no_step","step_out_of_range"]
+PASS: T3 own mailbox in To: recipient_misaddressed with issues own_address_in_to,lead_not_sole_to
+PASS: T3 own-domain Cc: recipient_misaddressed with issues own_address_in_cc,cc_not_empty
+PASS: T3 lead missing: recipient_misaddressed with issues lead_not_sole_to
+PASS: T3 (each): touch 2 failed, capacity still counted (used 1) · lead manual_hold · DELETE ×1, enrollment removed (recipient_misaddressed)
+      · sender paused (health + campaign ×1), its other in-flight lead stopped and held · operator alerted
+PASS: T3 replay: the same job again → already_handled, no second exception
+PASS: T3+: passed → recipient_check_passed, touch sent, lead sent, no DELETE, no pause
+PASS: T3 unreadable: attempt 1 of 3 throws (the job backs off) · last attempt → recipient_check_unreadable escalated, lead manual_hold, sequence stopped, sender NOT paused
+PASS: S1–S5, S7 (reply / unsubscribe / bounce / manual hold / suppression via sweep / booking): DELETE ×1 · GET 404 · enrollment removed with
+      reply_received / unsubscribed / bounced / manual_hold / suppressed / meeting_booked · follow-ups 2 and 3 killed
+PASS: S3: the lead is stopped before the bounce-rate auto-pause — delete@37 pause@40
+PASS: S6: pauseCampaign before any DELETE — pauseCampaign,deleteLead,getLead,findLeadInCampaign,deleteLead,getLead,findLeadInCampaign
+PASS: S6: 2 leads removed, 0 failed · both sender_paused · both leads manual_hold
+PASS: S7: a second stop is a no-op (already_removed, no DELETE)
+PASS: S8: stop_failed after 2 DELETE attempts, each followed by a GET · enrollment stop_failed; escalated stop_failed (instantly_delete_lead) · sender paused (health + campaign ×1)
+PASS: S9: removed with no second DELETE — {"outcome":"removed","attempts":1}
+PASS: T4: the truth is recorded (touch 3 sent) and sent_after_stop escalated
+PASS: R1: sweep → DELETE ×1 + escalated stopped_lead_active · (already gone) recorded removed quietly — no DELETE, no exception · a live, still-sent lead is left alone
+PASS: R2: one open unknown_active_lead (the Completed lead is not reported) · zero mutating Instantly calls — 26 → 26 · a second sweep does not re-raise it — 1/0
+PASS: no network call escaped the mocks (0 Anthropic, 0 Instantly)
+BEFORE = AFTER  leads=36 touches=13 lead_events=263 jobs=4 companies=36 send_accounts=4 suppression_list=0 webhook_events=13 exceptions=0 instantly_enrollments=0 capacity_ledger=1 capacity_reservations=4
+All 111 checks passed.
+$ pnpm test:sequence
+PASS: D2 / D3 / D4 wrong count / D4 malformed / F2 24 days / repeat: 5a — held draft costed: summary 300 tokens / $0.010, same on the hold event
+PASS: no first name: 5a — held draft costed: summary 150 tokens / $0.005, same on the hold event
+120/120 passed · BEFORE = AFTER
+$ pnpm exec tsx scripts/test-draft.ts --check-fixture        (no Anthropic call)
+PASS: 5b: Draft Fixture Realty Alpha: ≥ 3 evidence items — evidence=3
+PASS: 5b: Draft Fixture Realty Alpha: no digit in the company or lead name — Draft Fixture Realty Alpha | Test | Lead
+PASS: 5b: Draft Fixture Realty Bravo: (same) · BEFORE = AFTER — leads=36 touches=13 lead_events=263
+All 7 checks passed.
+$ pnpm test:sending 82/82 · test:webhook-rules 12/12 · test:instantly 95/95 · test:claims 45/45 · test:sequence-rules 38/38
+  test:campaign-sequence 10/10 · test:source-filters 9/9 · test:apollo 6/6 · test-validation 16/16
+$ pnpm test:webhooks 59/59 · test:traversal 62/62 · test:send 97/97 · test:claim-guard 91/91 · test:jobs 63/63 · test:scheduler 80/80   (all BEFORE = AFTER)
+$ pnpm exec tsx scripts/hold-lead.ts --lead 00000000-0000-4000-8000-000000000000   → "No lead …" (dry run; guard + read path only)
+```
+Result: **pass**.
+
+**Decisions** (full rows in `06` §5)
+- **Every sender pause cascades to its in-flight leads.** Reason: the S17 rule, applied uniformly; `noPause` prevents recursion.
+- **An unreadable recipient check holds and stops, with no sender pause.** Reason: unverified is not proven misaddressed.
+- **A stop is confirmed by GET 404 AND list 0; a 5xx/timeout `DELETE` is read first.** Reason: never assume, never blindly resend a mutation.
+- **The recipient check is a job (+60 s) that a reply's freeze does not cancel.** Reason: the listing lag, the shared limiter, and an email that left must still be checked.
+- **`sent_after_stop` records the truth and escalates.** Reason: the failure the stop path exists to prevent must be visible.
+- **No complaint handler.** Reason: no such event exists in the spec.
+- **Manual hold = `scripts/hold-lead.ts`.** Reason: S22 needs it; the Telegram `/hold` command goes to the backlog.
+
+**Problems hit**
+- **The reply freeze would have cancelled the recipient check.** `freezeOutreach` cancels every queued job carrying the lead's id, and the check carries one. Found in design, fixed (`.neq("type", "send.recipient_check")`), and covered by the webhook order case.
+- **Import cycle risk:** `stop.ts` needs `raiseException`, and the webhook needs `stopSequence`/`pauseSender`. Fixed by moving `raiseException` into `webhooks/exceptions.ts` and re-exporting the moved names.
+- **The U6 order test's lead had no step-1 touch.** Under S21 an `email_sent` without a matching touch is `sent_step_unknown`. The fixture now has the step-1 touch that real leads always have.
+- **Not fixed, noted:**
+  - the recipient-check job and the sweep run only when U9 schedules them;
+  - step 1's `sent_at` now moves from the accept time to Instantly's send time (`09` §5 row).
+
+**Next action**
+- **S22 — U6c engine drill** (`09` §U6c S22). Each Instantly write is asked for separately:
+  1. PATCH the drill campaign (paused, 0 leads) to the variable templates with distinct delays (e.g. step 2 +5 min, step 3 +20 min);
+  2. webhook create/test through a probed tunnel, then activate;
+  3. engine enroll of a new alias lead (`drill:s17`) in an open window;
+  4. run the `send.recipient_check` job for step 1 and step 2 (by script);
+  5. step 2 → touch 2 `sent`, ledger +1;
+  6. `hold-lead.ts --apply` → DELETE → 404;
+  7. past step 3's due time + 15 min: no step 3.
+- Then the 2 drill-lead deletes in `5392fcac`, and the 4 production PATCHes, one at a time.
+
+---
+
 ### 2026-09-26 — Session 20 — U6c S20: enroll carries every step, new enroll refusals, engine follow-up send disabled, delay mapping
 
 **Step:** U6c, build part 2 (`09` §U6c, S20), on `main`. Plan mode first. The plan said this fits one session, with a cut line after the send path; no cut was needed.

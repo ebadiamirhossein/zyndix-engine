@@ -2,7 +2,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { type InstantlyClient, InstantlyRetryableError } from "@/lib/integrations/instantly";
 import type { InstantlyEmail } from "@/lib/integrations/instantly-types";
-import { normalizeEmail } from "@/lib/sending/suppression";
+import type { JobQueue } from "@/lib/jobs/queue";
+import { killFollowups, stopSequence } from "@/lib/sending/stop";
+import { checkSuppression, normalizeEmail } from "@/lib/sending/suppression";
 import type { createStateStore } from "@/lib/state/core";
 import {
   type InstantlyWebhookDeps,
@@ -11,7 +13,8 @@ import {
   raiseException,
   type WebhookOutcome,
 } from "@/lib/webhooks/instantly";
-import type { DatabaseWithWebhooks } from "@/types/database-extensions";
+import type { Database, Json } from "@/types/database";
+import type { DatabaseWithEnrollments, DatabaseWithWebhooks, InstantlyEnrollmentRowShape } from "@/types/database-extensions";
 import type { LeadState } from "@/types/enums";
 
 // Reconciliation (09 §U6): the safety net under the webhook stop path.
@@ -32,6 +35,14 @@ import type { LeadState } from "@/types/enums";
 //     webhook_events carry payload.source = "reconcile_poll" and never count
 //     as webhook activity for the stale check.
 //
+//   instantly_leads sweep (09 §U6c S21) — the safety net under stopSequence:
+//     R1: an enrollment that is still live while the engine considers the lead
+//     stopped (a stopped lead state, a stop that never finished, or an email
+//     on the suppression list) is read at Instantly; still there → stopped
+//     again + escalated `stopped_lead_active`; gone → recorded removed.
+//     R2: an Active lead in one of our sender campaigns that the engine never
+//     enrolled → `unknown_active_lead`, report only (zero mutations).
+//
 // No cursor table: the poll window is derived from the awaiting leads' own
 // send times (floored at 30 days), and dedupe makes re-reading harmless.
 // GET /api/v2/emails is limited to 20 req/min; the adapter spaces calls and
@@ -40,6 +51,7 @@ import type { LeadState } from "@/types/enums";
 // escalate to the operator.
 
 export const STALE_STOP_JOB_TYPE = "reconcile.stale_stop";
+export const INSTANTLY_LEADS_JOB_TYPE = "reconcile.instantly_leads";
 export const REPLY_POLL_JOB_TYPE = "reconcile.reply_poll";
 export const POLL_SOURCE = "reconcile_poll";
 
@@ -71,7 +83,17 @@ type ReconcileDb = SupabaseClient<DatabaseWithWebhooks>;
 
 export type ReconcileDeps = {
   db: ReconcileDb;
-  instantly: Pick<InstantlyClient, "listEmails" | "pauseCampaign" | "addBlockListEntry">;
+  instantly: Pick<
+    InstantlyClient,
+    | "listEmails"
+    | "pauseCampaign"
+    | "addBlockListEntry"
+    | "deleteLead"
+    | "getLead"
+    | "findLeadInCampaign"
+    | "listCampaignLeads"
+  >;
+  queue: Pick<JobQueue, "enqueue">;
   transition: ReturnType<typeof createStateStore>["transition"];
   getActiveSetting: (key: string) => Promise<{ version: number; value: unknown }>;
   alert: (text: string) => Promise<void>;
@@ -220,6 +242,7 @@ export async function runReplyPoll(deps: ReconcileDeps, options: ReconcileOption
     secret: undefined, // not an HTTP delivery: no token to check
     transition: deps.transition,
     instantly: deps.instantly,
+    queue: deps.queue,
     getActiveSetting: deps.getActiveSetting,
     alert: deps.alert,
     now: deps.now,
@@ -431,4 +454,250 @@ async function trackTruncation(deps: ReconcileDeps, summary: ReplyPollSummary, n
         `Missed replies may not be recovered until it completes. Check exceptions.`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// instantly_leads sweep (09 §U6c S21)
+// ---------------------------------------------------------------------------
+
+/** Lead states in which no Instantly step may go out any more. */
+const STOPPED_LEAD_STATES: readonly LeadState[] = [
+  "replied",
+  "classifying",
+  "human_review",
+  "meeting_booked",
+  "handed_off",
+  "suppressed",
+  "manual_hold",
+  "bounced",
+  "parked",
+];
+/** Instantly Lead.status (OpenAPI enum, read 2026-09-26): 1 Active, 2 Paused, 3 Completed, -1 Bounced, -2 Unsubscribed, -3 Skipped. */
+export const INSTANTLY_LEAD_ACTIVE = 1;
+export const SWEEP_PAGE_LIMIT = 100;
+export const SWEEP_MAX_PAGES_PER_CAMPAIGN = 5;
+
+export type LeadSweepSummary = {
+  enrollments_checked: number;
+  stopped_lead_active: number;
+  suppressed_found: number;
+  confirmed_removed: number;
+  unreadable: number;
+  campaigns_scanned: number;
+  active_leads_seen: number;
+  unknown_active_lead: number;
+  truncated: boolean;
+};
+
+export async function runInstantlyLeadSweep(deps: ReconcileDeps, options: ReconcileOptions = {}): Promise<LeadSweepSummary> {
+  const summary: LeadSweepSummary = {
+    enrollments_checked: 0,
+    stopped_lead_active: 0,
+    suppressed_found: 0,
+    confirmed_removed: 0,
+    unreadable: 0,
+    campaigns_scanned: 0,
+    active_leads_seen: 0,
+    unknown_active_lead: 0,
+    truncated: false,
+  };
+  await sweepStoppedEnrollments(deps, options, summary);
+  await sweepUnknownActiveLeads(deps, options, summary);
+  return summary;
+}
+
+function enrollDb(db: ReconcileDb): SupabaseClient<DatabaseWithEnrollments> {
+  return db as unknown as SupabaseClient<DatabaseWithEnrollments>;
+}
+
+/** R1: live enrollments of leads the engine has stopped. */
+async function sweepStoppedEnrollments(deps: ReconcileDeps, options: ReconcileOptions, summary: LeadSweepSummary): Promise<void> {
+  const now = clock(deps);
+  let query = enrollDb(deps.db).from("instantly_enrollments").select("*").in("state", ["active", "stopping", "stop_failed"]);
+  if (options.sendAccountIds) query = query.in("send_account_id", options.sendAccountIds);
+  const { data: enrollments, error } = await query;
+  if (error) throw new ReconcileError(`live enrollments: ${error.message}`);
+
+  for (const enrollment of enrollments ?? []) {
+    const { data: lead, error: leadError } = await deps.db.from("leads").select("id, state, email").eq("id", enrollment.lead_id).maybeSingle();
+    if (leadError) throw new ReconcileError(`sweep lead: ${leadError.message}`);
+    if (!lead) continue;
+    summary.enrollments_checked += 1;
+    const state = lead.state as LeadState;
+
+    const hit = await checkSuppression(deps.db as unknown as SupabaseClient<Database>, { email: lead.email, companyDomain: null });
+    const suppressed = hit.email || hit.domain;
+    const stopped = STOPPED_LEAD_STATES.includes(state) || enrollment.state !== "active" || suppressed;
+    if (!stopped) continue;
+
+    if (suppressed && state !== "suppressed") {
+      // A suppression written outside the webhook path (operator, dashboard):
+      // the engine side catches up first, then the sequence is stopped.
+      await deps.transition(lead.id, state, "suppressed", "suppression_found_by_sweep", { suppression_ids: hit.rowIds });
+      summary.suppressed_found += 1;
+      await stopSequence(deps, lead.id, "suppressed");
+      continue;
+    }
+
+    const presence = await instantlyPresence(deps, enrollment, lead.email);
+    if (presence === "unreadable") {
+      summary.unreadable += 1; // next run retries; nothing assumed
+      continue;
+    }
+    if (presence === "absent") {
+      // Gone at Instantly already: record it, no DELETE.
+      const killed = await killFollowups(deps.db, lead.id, now);
+      const { error: updateError } = await enrollDb(deps.db)
+        .from("instantly_enrollments")
+        .update({
+          state: "removed",
+          removed_at: now.toISOString(),
+          last_checked_at: now.toISOString(),
+          stop_reason: enrollment.stop_reason ?? "stopped_lead_active",
+        })
+        .eq("id", enrollment.id);
+      if (updateError) throw new ReconcileError(`sweep removed: ${updateError.message}`);
+      await logLeadEvent(deps.db, lead.id, "enrollment_confirmed_removed", { enrollment_id: enrollment.id, lead_state: state, ...killed });
+      summary.confirmed_removed += 1;
+      continue;
+    }
+
+    await flagStoppedLeadActive(deps, enrollment, state, "engine_stopped");
+    summary.stopped_lead_active += 1;
+  }
+}
+
+/** Instantly still holds this lead → stop it again and escalate. */
+async function flagStoppedLeadActive(
+  deps: ReconcileDeps,
+  enrollment: InstantlyEnrollmentRowShape,
+  leadState: string,
+  why: "engine_stopped" | "removed_but_active",
+): Promise<void> {
+  const outcome = await stopSequence(deps, enrollment.lead_id, "stopped_lead_active");
+  await raiseException(deps, {
+    kind: "stopped_lead_active",
+    eventId: null,
+    leadId: enrollment.lead_id,
+    escalate: true,
+    detail: {
+      why,
+      lead_state: leadState,
+      enrollment_id: enrollment.id,
+      enrollment_state: enrollment.state,
+      campaign_id: enrollment.campaign_id,
+      provider_lead_id: enrollment.provider_lead_id,
+      stop: outcome.outcome,
+    },
+  });
+}
+
+async function instantlyPresence(
+  deps: ReconcileDeps,
+  enrollment: InstantlyEnrollmentRowShape,
+  email: string | null,
+): Promise<"present" | "absent" | "unreadable"> {
+  try {
+    if (enrollment.provider_lead_id) {
+      return (await deps.instantly.getLead(enrollment.provider_lead_id)) ? "present" : "absent";
+    }
+    if (!email) return "unreadable";
+    return (await deps.instantly.findLeadInCampaign(enrollment.campaign_id, email)) ? "present" : "absent";
+  } catch {
+    return "unreadable";
+  }
+}
+
+/** R2: Active leads in our sender campaigns that the engine never enrolled (report only). */
+async function sweepUnknownActiveLeads(deps: ReconcileDeps, options: ReconcileOptions, summary: LeadSweepSummary): Promise<void> {
+  let query = deps.db.from("send_accounts").select("id, identifier, instantly_campaign_id").not("instantly_campaign_id", "is", null);
+  if (options.sendAccountIds) query = query.in("id", options.sendAccountIds);
+  const { data: accounts, error } = await query;
+  if (error) throw new ReconcileError(`sweep senders: ${error.message}`);
+
+  for (const account of accounts ?? []) {
+    const campaignId = account.instantly_campaign_id!;
+    summary.campaigns_scanned += 1;
+    let startingAfter: string | undefined;
+    for (let page = 0; ; page += 1) {
+      if (page >= SWEEP_MAX_PAGES_PER_CAMPAIGN) {
+        summary.truncated = true;
+        break;
+      }
+      let result;
+      try {
+        result = await deps.instantly.listCampaignLeads(campaignId, { limit: SWEEP_PAGE_LIMIT, startingAfter });
+      } catch {
+        summary.truncated = true;
+        break;
+      }
+      const active = result.items.filter((l) => l.status === INSTANTLY_LEAD_ACTIVE && (!l.campaign || l.campaign === campaignId));
+      summary.active_leads_seen += active.length;
+      if (active.length) {
+        const { data: known, error: knownError } = await enrollDb(deps.db)
+          .from("instantly_enrollments")
+          .select("*")
+          .in("provider_lead_id", active.map((l) => l.id));
+        if (knownError) throw new ReconcileError(`sweep known leads: ${knownError.message}`);
+        const byProviderId = new Map((known ?? []).map((e) => [e.provider_lead_id!, e]));
+        for (const lead of active) {
+          const enrollment = byProviderId.get(lead.id);
+          if (!enrollment) {
+            if (await reportUnknownActiveLead(deps, account, lead)) summary.unknown_active_lead += 1;
+            continue;
+          }
+          if (enrollment.state === "removed") {
+            // The engine recorded it removed, but Instantly still runs it: reopen and stop again.
+            const { error: reopenError } = await enrollDb(deps.db)
+              .from("instantly_enrollments")
+              .update({ state: "stopping" })
+              .eq("id", enrollment.id)
+              .eq("state", "removed");
+            if (reopenError) throw new ReconcileError(`sweep reopen: ${reopenError.message}`);
+            const { data: lead2 } = await deps.db.from("leads").select("state").eq("id", enrollment.lead_id).maybeSingle();
+            await flagStoppedLeadActive(deps, enrollment, lead2?.state ?? "unknown", "removed_but_active");
+            summary.stopped_lead_active += 1;
+          }
+        }
+      }
+      const last = result.items.at(-1)?.id;
+      if (!last || result.items.length < SWEEP_PAGE_LIMIT) break;
+      startingAfter = last;
+    }
+  }
+}
+
+/** One open exception per unknown provider lead: a repeat sweep does not re-raise it. */
+async function reportUnknownActiveLead(
+  deps: ReconcileDeps,
+  account: SenderRow,
+  lead: { id: string; email?: string | null; status: number },
+): Promise<boolean> {
+  const { data: open, error } = await deps.db
+    .from("exceptions")
+    .select("id")
+    .eq("kind", "unknown_active_lead")
+    .neq("status", "resolved")
+    .eq("detail->>provider_lead_id", lead.id)
+    .limit(1);
+  if (error) throw new ReconcileError(`unknown lead lookup: ${error.message}`);
+  if ((open ?? []).length > 0) return false;
+  await raiseException(deps, {
+    kind: "unknown_active_lead",
+    eventId: null,
+    detail: {
+      provider_lead_id: lead.id,
+      lead_email: lead.email ?? null,
+      status: lead.status,
+      campaign_id: account.instantly_campaign_id,
+      send_account_id: account.id,
+      identifier: account.identifier,
+    },
+  });
+  return true;
+}
+
+async function logLeadEvent(db: ReconcileDb, leadId: string, event: string, detail: Record<string, unknown>): Promise<void> {
+  const { error } = await db.from("lead_events").insert({ lead_id: leadId, event, detail: detail as Json });
+  if (error) throw new ReconcileError(`lead_event ${event}: ${error.message}`);
 }

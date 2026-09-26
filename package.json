@@ -23,6 +23,7 @@
     "test:claim-guard": "tsx scripts/test-u6b-claims.ts",
     "test:sequence-rules": "tsx --test src/lib/stages/draft/sequence.test.ts",
     "test:sequence": "tsx scripts/test-u6c-sequence.ts",
+    "test:stops": "tsx scripts/test-u6c-stops.ts",
     "test:campaign-sequence": "tsx --test src/lib/sending/campaign-sequence.test.ts"
   },
   "dependencies": {
