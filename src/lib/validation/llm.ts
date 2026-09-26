@@ -140,6 +140,55 @@ export const writerOutputSchema = z
     }
   });
 
+// Writer output v10 (09 §U6c): one call writes the writer steps of the
+// sequence (steps 1–2). Only step 1 has a subject: follow-ups share its
+// thread, and Instantly renders their subject as "Re: <step-1 subject>".
+// Which step numbers are expected comes from email_sequence, so the shape
+// check (sequenceShapeIssues) is separate from this parse.
+export const writerSequenceStepSchema = z
+  .object({
+    step_no: z.number().int().positive(),
+    subject: z.string().min(1).optional(),
+    body: z.string().min(1),
+    claims: z.array(claimSchema).min(1),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (wordCount(data.body) > 120) {
+      ctx.addIssue({
+        code: "custom",
+        message: `body must be ≤120 words (got ${wordCount(data.body)})`,
+        path: ["body"],
+      });
+    }
+  });
+
+export const writerSequenceOutputSchema = z
+  .object({
+    steps: z.array(writerSequenceStepSchema).min(1),
+  })
+  .strict();
+
+export type WriterSequenceStep = z.infer<typeof writerSequenceStepSchema>;
+export type WriterSequenceOutput = z.infer<typeof writerSequenceOutputSchema>;
+
+/**
+ * `sequence_shape_invalid` (09 §U6c): the steps must be exactly the expected
+ * writer steps, in order; step 1 carries the subject and no later step does.
+ */
+export function sequenceShapeIssues(output: WriterSequenceOutput, expectedSteps: number[]): string[] {
+  const issues: string[] = [];
+  const got = output.steps.map((s) => s.step_no);
+  if (got.length !== expectedSteps.length || got.some((n, i) => n !== expectedSteps[i])) {
+    issues.push(`expected steps [${expectedSteps.join(",")}], got [${got.join(",")}]`);
+  }
+  for (const step of output.steps) {
+    if (step.step_no === 1 && !step.subject?.trim()) issues.push("step 1 must have a subject");
+    if (step.step_no > 1 && step.subject !== undefined) issues.push(`step ${step.step_no} must not have a subject (it continues step 1's thread)`);
+  }
+  return issues;
+}
+
 // ---------------------------------------------------------------------------
 // Reply classifier output (doc 04 §6)
 // ---------------------------------------------------------------------------

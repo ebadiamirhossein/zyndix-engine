@@ -1,17 +1,21 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { z } from "zod";
 
 import type { TelegramClient } from "@/lib/integrations/telegram";
 import { parseAllowedUserIds } from "@/lib/integrations/telegram";
 import { escapeTelegramHtml } from "@/lib/integrations/telegram-format";
-import { approvalHash, buildApprovalSnapshot, composeOutboundBody, findSignOff } from "@/lib/sending/approval";
+import { TELEGRAM_TEXT_LIMIT, telegramVisibleLength } from "@/lib/integrations/telegram-approval";
+import { findSignOff } from "@/lib/sending/approval";
 import { chooseSenderForApproval } from "@/lib/sending/sender";
-import { claimsStillPresent, formatViolations } from "@/lib/stages/draft/claims";
-import { loadClaimContext, runClaimCheck } from "@/lib/stages/draft/claims-context";
+import { buildSequenceApprovalSnapshot, sequenceApprovalHash } from "@/lib/sending/sequence-approval";
+import { claimsStillPresent } from "@/lib/stages/draft/claims";
+import { loadClaimContext } from "@/lib/stages/draft/claims-context";
+import { checkSequenceClaims, formatStepViolations, type SequenceStepDraft } from "@/lib/stages/draft/sequence";
 import { createStateStore } from "@/lib/state/core";
-import { sendPolicySchema } from "@/lib/validation/jsonb";
+import { emailSequenceSchema, sendPolicySchema } from "@/lib/validation/jsonb";
 import { claimLedgerSchema } from "@/lib/validation/llm";
 import type { Database, Json } from "@/types/database";
-import type { DatabaseWithSending } from "@/types/database-extensions";
+import type { DatabaseWithEnrollments, DatabaseWithSending } from "@/types/database-extensions";
 
 export type TelegramHandlerDeps = {
   db: SupabaseClient<Database>;
@@ -221,19 +225,23 @@ async function resolvePendingEdit(
 }
 
 /**
- * Approves a pending touch AND binds the approval to its exact content,
- * recipient, sending account and signature (09 §U5; Session 12):
- * send_account_id / approval_hash / approval_snapshot / approved_at /
- * approved_by. Fenced on status = pending_approval, so a stale or repeated
- * button press changes nothing.
+ * Approves a lead's whole pending email sequence AND binds the approval to
+ * its exact content, recipient, sending account and signature (09 §U5;
+ * Session 12; 09 §U6c).
  *
- * Session 15 (09 §U6b): the claim guard re-runs on the exact subject and body
- * being approved, operator edits included. For an edit, claims whose span is
- * no longer in the text are dropped; anything the edit added is uncovered and
- * refused. The accepted ledger is written to the touch and into the snapshot.
+ * One approval covers every step. The steps must be exactly the active
+ * email_sequence's steps, all pending_approval. The claim guard re-runs on
+ * every step at this instant (freshness with each step's offset, template
+ * mode for template steps), operator edits included: an edit replaces one
+ * step's body, claims whose span is no longer in it are dropped, and anything
+ * the edit added is uncovered and refused. One hash over the whole
+ * SequenceApprovalSnapshot is written on every touch by approve_email_sequence
+ * (0009d), fenced on all of them being pending_approval — all or none.
  */
+type BoundStep = { step_no: number; touch_id: string; subject: string; outbound: string };
+
 type BindResult =
-  | { ok: true; sender: { identifier: string; signature: string | null }; outbound: string }
+  | { ok: true; sender: { identifier: string; signature: string | null }; hash: string; steps: BoundStep[] }
   | { ok: false; message: string };
 
 const SENDER_REFUSAL: Record<string, string> = {
@@ -243,40 +251,75 @@ const SENDER_REFUSAL: Record<string, string> = {
   follow_up_unbound: "this follow-up's lead has no bound sending account",
 };
 
-async function bindApproval(
+const approveResultSchema = z.object({ status: z.enum(["approved", "not_pending"]) }).passthrough();
+
+async function pendingSequenceTouches(db: SupabaseClient<Database>, leadId: string) {
+  const sendDb = db as unknown as SupabaseClient<DatabaseWithSending>;
+  const { data, error } = await sendDb
+    .from("touches")
+    .select("id, step_no, channel, subject, draft_body, prompt_version, status, claim_ledger")
+    .eq("lead_id", leadId)
+    .eq("direction", "outbound")
+    .eq("status", "pending_approval");
+  if (error) throw new Error(`load pending touches for ${leadId}: ${error.message}`);
+  return [...(data ?? [])].sort((a, b) => (a.step_no ?? 0) - (b.step_no ?? 0));
+}
+
+async function bindSequenceApproval(
   db: SupabaseClient<Database>,
   getSetting: TelegramHandlerDeps["getActiveSetting"],
-  touchId: string,
   leadId: string,
-  body: string,
   approvedBy: number,
+  edit?: { touchId: string; body: string },
 ): Promise<BindResult> {
   const sendDb = db as unknown as SupabaseClient<DatabaseWithSending>;
-  const { data: touch } = await sendDb
-    .from("touches")
-    .select("id, step_no, channel, subject, prompt_version, status, claim_ledger")
-    .eq("id", touchId)
-    .maybeSingle();
   const { data: lead } = await sendDb.from("leads").select("id, email, send_account_id").eq("id", leadId).maybeSingle();
-  if (!touch || !lead) return { ok: false, message: "Touch or lead not found — nothing approved." };
+  if (!lead) return { ok: false, message: "Lead not found — nothing approved." };
 
-  const signOff = findSignOff(body);
-  if (signOff) {
+  const sequenceSetting = await getSetting("email_sequence");
+  const sequence = emailSequenceSchema.parse(sequenceSetting.value);
+  const touches = await pendingSequenceTouches(db, leadId);
+  const got = touches.map((t) => t.step_no ?? 0);
+  const expected = sequence.steps.map((s) => s.step_no);
+  if (got.length !== expected.length || got.some((n, i) => n !== expected[i])) {
     return {
       ok: false,
-      message: `Not approved: the body signs itself ("${signOff}"). The mailbox signature is added at send — edit the body to remove the sign-off, or redraft.`,
+      message: `Not approved: the pending draft is steps [${got.join(",")}], but email_sequence v${sequenceSetting.version} has steps [${expected.join(",")}]. Kill it and redraft.`,
     };
+  }
+  if (edit && !touches.some((t) => t.id === edit.touchId)) {
+    return { ok: false, message: "Not approved: the step you are editing is no longer pending_approval." };
   }
 
-  const ledger = claimLedgerSchema.safeParse(touch.claim_ledger);
-  if (touch.claim_ledger === null || touch.claim_ledger === undefined || !ledger.success) {
-    return {
-      ok: false,
-      message: "Not approved: this draft has no valid claim ledger (written before the claim guard). Kill it and redraft.",
-    };
+  const firstSubject = touches[0]!.subject ?? "";
+  const drafts: SequenceStepDraft[] = [];
+  for (const [i, touch] of touches.entries()) {
+    const spec = sequence.steps[i]!;
+    const body = edit && edit.touchId === touch.id ? edit.body : (touch.draft_body ?? "");
+    const signOff = findSignOff(body);
+    if (signOff) {
+      return {
+        ok: false,
+        message: `Not approved: step ${spec.step_no} signs itself ("${signOff}"). The mailbox signature is added at send — edit that step to remove the sign-off, or redraft.`,
+      };
+    }
+    const ledger = claimLedgerSchema.safeParse(touch.claim_ledger);
+    if (touch.claim_ledger === null || touch.claim_ledger === undefined || !ledger.success) {
+      return {
+        ok: false,
+        message: `Not approved: step ${spec.step_no} has no valid claim ledger (written before the claim guard). Kill it and redraft.`,
+      };
+    }
+    const subject = spec.step_no === 1 ? firstSubject : "";
+    drafts.push({
+      step_no: spec.step_no,
+      source: spec.source,
+      subject: spec.step_no === 1 ? firstSubject : null,
+      body,
+      claims: claimsStillPresent(ledger.data, subject, body),
+    });
   }
-  const subject = touch.subject ?? "";
-  const claims = claimsStillPresent(ledger.data, subject, body);
+
   let claimContext;
   try {
     claimContext = await loadClaimContext(db, getSetting, leadId);
@@ -284,59 +327,101 @@ async function bindApproval(
     const message = error instanceof Error ? error.message : String(error);
     return { ok: false, message: `Not approved: the claim guard could not load its evidence (${message}).` };
   }
-  const claimCheck = runClaimCheck(claimContext, { subject, body, claims });
+  const claimCheck = checkSequenceClaims(claimContext, drafts, sequence);
   if (!claimCheck.ok) {
     return {
       ok: false,
-      message: ["Not approved — the claim guard refused this text:", ...formatViolations(claimCheck.violations).map((line) => `• ${line}`)].join("\n"),
+      message: ["Not approved — the claim guard refused this sequence:", ...formatStepViolations(claimCheck.failures).map((line) => `• ${line}`)].join("\n"),
     };
   }
 
   const policy = sendPolicySchema.parse((await getSetting("send_policy")).value);
   const choice = await chooseSenderForApproval(sendDb, {
     leadSendAccountId: lead.send_account_id,
-    step: touch.step_no ?? 1,
+    step: 1,
     assignable: policy.assignable_senders,
   });
   if (!choice.ok) {
     return { ok: false, message: `Not approved: ${SENDER_REFUSAL[choice.reason] ?? choice.reason}.` };
   }
 
-  const snapshot = buildApprovalSnapshot({ ...touch, body, claim_ledger: claims }, lead, choice.sender);
-  const { data, error } = await sendDb
-    .from("touches")
-    .update({
-      body,
-      claim_ledger: claims as unknown as Json,
-      status: "approved",
-      send_account_id: choice.sender.id,
-      approval_hash: approvalHash(snapshot),
-      approval_snapshot: snapshot as unknown as Json,
-      approved_at: new Date().toISOString(),
-      approved_by: `telegram:${approvedBy}`,
-    })
-    .eq("id", touchId)
-    .eq("status", "pending_approval")
-    .select("id");
-  if (error) throw new Error(`approve touch ${touchId}: ${error.message}`);
-  if ((data ?? []).length !== 1) {
-    return { ok: false, message: `Touch is ${touch.status ?? "unknown"}, not pending_approval — nothing approved.` };
+  const approvedTouches = touches.map((touch, i) => ({
+    id: touch.id,
+    step_no: touch.step_no,
+    channel: touch.channel,
+    subject: touch.subject,
+    body: drafts[i]!.body,
+    prompt_version: touch.prompt_version,
+    claim_ledger: drafts[i]!.claims,
+  }));
+  const snapshot = buildSequenceApprovalSnapshot({
+    lead,
+    sender: choice.sender,
+    sequence: { version: sequenceSetting.version, value: sequence },
+    touches: approvedTouches,
+  });
+  const hash = sequenceApprovalHash(snapshot);
+
+  const rpcDb = db as unknown as SupabaseClient<DatabaseWithEnrollments>;
+  const { data, error } = await rpcDb.rpc("approve_email_sequence", {
+    p_lead_id: leadId,
+    p_steps: approvedTouches.map((t) => ({ touch_id: t.id, body: t.body, claim_ledger: t.claim_ledger })) as unknown as Json,
+    p_hash: hash,
+    p_snapshot: snapshot as unknown as Json,
+    p_send_account_id: choice.sender.id,
+    p_approved_by: `telegram:${approvedBy}`,
+  });
+  if (error) throw new Error(`approve sequence for lead ${leadId}: ${error.message}`);
+  const result = approveResultSchema.parse(data);
+  if (result.status !== "approved") {
+    return { ok: false, message: "The sequence is no longer entirely pending_approval — nothing approved." };
   }
   return {
     ok: true,
     sender: { identifier: choice.sender.identifier ?? "", signature: snapshot.signature },
-    outbound: composeOutboundBody(body, snapshot.signature),
+    hash,
+    steps: snapshot.steps.map((step) => ({ step_no: step.step_no, touch_id: step.touch_id, subject: step.subject, outbound: step.body })),
   };
 }
 
-/** What the approved touch will send, shown back to the operator. */
-function approvedFooter(bound: Extract<BindResult, { ok: true }>, label: string): string {
-  return [
-    "",
-    `${label} · From: ${escapeTelegramHtml(bound.sender.identifier)}`,
-    "<b>Final text (with signature):</b>",
-    `<pre>${escapeTelegramHtml(bound.outbound)}</pre>`,
-  ].join("\n");
+/** The final texts of an approved sequence, as HTML messages that each fit Telegram's limit. */
+function approvedTextMessages(bound: Extract<BindResult, { ok: true }>, label: string): string[] {
+  const head = `${label} · From: ${escapeTelegramHtml(bound.sender.identifier)} · approval ${bound.hash.slice(0, 12)}`;
+  const blocks = bound.steps.map((step) =>
+    [
+      `<b>Step ${step.step_no} final text (with signature)</b> — ${escapeTelegramHtml(step.subject)}`,
+      `<pre>${escapeTelegramHtml(step.outbound)}</pre>`,
+    ].join("\n"),
+  );
+  const messages: string[] = [];
+  let current = head;
+  for (const block of blocks) {
+    const next = `${current}\n\n${block}`;
+    if (telegramVisibleLength(next) > TELEGRAM_TEXT_LIMIT) {
+      messages.push(current);
+      current = block;
+    } else current = next;
+  }
+  messages.push(current);
+  return messages;
+}
+
+/** Marks the card approved (plain text, only if it still fits), then posts the final texts. */
+async function reportApproved(
+  deps: TelegramHandlerDeps,
+  bound: Extract<BindResult, { ok: true }>,
+  label: string,
+  chatId: number,
+  messageId?: number,
+  originalText?: string,
+): Promise<void> {
+  const suffix = `\n\n${label} · all ${bound.steps.length} steps · From: ${bound.sender.identifier}`;
+  if (messageId && originalText && originalText.length + suffix.length <= TELEGRAM_TEXT_LIMIT) {
+    await deps.telegram.editMessage(chatId, messageId, `${originalText}${suffix}`);
+  }
+  for (const text of approvedTextMessages(bound, label)) {
+    await deps.telegram.sendMessage(chatId, text, { parseMode: "HTML" });
+  }
 }
 
 async function handleApprove(
@@ -362,28 +447,20 @@ async function handleApprove(
     return;
   }
 
-  const bound = await bindApproval(deps.db, deps.getActiveSetting, touchId, touch.lead_id, touch.draft_body, userId);
+  const bound = await bindSequenceApproval(deps.db, deps.getActiveSetting, touch.lead_id, userId);
   if (!bound.ok) {
     await deps.telegram.sendMessage(chatId, bound.message);
     return;
   }
 
   await deps.transition(touch.lead_id, "pending_approval", "approved", "approved", {
-    touch_id: touchId,
+    touch_id: bound.steps[0]!.touch_id,
+    touch_ids: bound.steps.map((s) => s.touch_id),
+    approval_hash: bound.hash,
     source: "telegram",
   });
 
-  const suffix = `\n${approvedFooter(bound, "✅ APPROVED")}`;
-  if (originalText) {
-    await deps.telegram.editMessage(
-      chatId,
-      messageId,
-      `${originalText}${suffix}`,
-      { parseMode: "HTML" },
-    );
-  } else {
-    await deps.telegram.sendMessage(chatId, `Touch ${touchId}${suffix}`);
-  }
+  await reportApproved(deps, bound, "✅ APPROVED", chatId, messageId, originalText);
 }
 
 async function handleEditPrompt(
@@ -399,21 +476,19 @@ async function handleEditPrompt(
     await deps.telegram.sendMessage(chatId, "Touch not found.");
     return;
   }
+  const { data: stepRow } = await deps.db.from("touches").select("step_no").eq("id", touchId).maybeSingle();
+  const stepNo = stepRow?.step_no ?? 1;
 
   const promptId = await deps.telegram.sendMessage(
     chatId,
-    "✏️ Reply to this message with the new email body (subject stays the same).",
+    `✏️ Reply to this message with the new body for STEP ${stepNo}${stepNo === 1 ? " (subject stays the same)" : ""}. ` +
+      "Sending it approves the whole sequence with that change.",
   );
 
   await setPendingEdit(deps.db, touch.lead_id, userId, touchId, promptId);
 
-  if (originalText) {
-    await deps.telegram.editMessage(
-      chatId,
-      messageId,
-      `${originalText}\n\n✏️ Waiting for your edited body…`,
-      { parseMode: "HTML" },
-    );
+  if (originalText && originalText.length + 40 <= TELEGRAM_TEXT_LIMIT) {
+    await deps.telegram.editMessage(chatId, messageId, `${originalText}\n\n✏️ Waiting for your edited step ${stepNo}…`);
   }
 }
 
@@ -443,7 +518,10 @@ async function handleEditedBody(
     return;
   }
 
-  const bound = await bindApproval(deps.db, deps.getActiveSetting, pending.touchId, pending.leadId, newBody.trim(), userId);
+  const bound = await bindSequenceApproval(deps.db, deps.getActiveSetting, pending.leadId, userId, {
+    touchId: pending.touchId,
+    body: newBody.trim(),
+  });
   if (!bound.ok) {
     await deps.telegram.sendMessage(chatId, `${bound.message} Edit not applied.`);
     return;
@@ -451,16 +529,16 @@ async function handleEditedBody(
 
   await deps.transition(pending.leadId, "pending_approval", "approved", "edited", {
     touch_id: pending.touchId,
+    touch_ids: bound.steps.map((s) => s.touch_id),
+    approval_hash: bound.hash,
     source: "telegram",
   });
 
   await resolvePendingEdit(deps.db, pending.eventId);
 
-  await deps.telegram.sendMessage(
-    chatId,
-    `✏️ EDITED — touch ${pending.touchId} approved with your edits.\n${approvedFooter(bound, "✅ APPROVED")}`,
-    { parseMode: "HTML" },
-  );
+  const edited = bound.steps.find((s) => s.touch_id === pending.touchId)?.step_no ?? "?";
+  await deps.telegram.sendMessage(chatId, `✏️ EDITED — step ${edited} changed; the sequence is approved with your edit.`);
+  await reportApproved(deps, bound, "✅ APPROVED", chatId);
 }
 
 async function handleKill(
@@ -476,7 +554,14 @@ async function handleKill(
     return;
   }
 
-  await deps.db.from("touches").update({ status: "killed" }).eq("id", touchId);
+  // The whole sequence dies together (09 §U6c): every pending or approved
+  // outbound touch of the lead. Sent touches are history and stay as they are.
+  await deps.db
+    .from("touches")
+    .update({ status: "killed" })
+    .eq("lead_id", touch.lead_id)
+    .eq("direction", "outbound")
+    .in("status", ["pending_approval", "approved"]);
 
   const leadState = await getLeadState(deps.db, touch.lead_id);
   if (leadState === "pending_approval") {

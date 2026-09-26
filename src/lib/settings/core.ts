@@ -12,6 +12,8 @@ import {
   segmentsSettingsSchema,
   sendPolicySchema,
   evidencePolicySchema,
+  emailSequenceSchema,
+  followupTemplatesSchema,
   sendWindowsSchema,
 } from "@/lib/validation/jsonb";
 import type { Database, Json } from "@/types/database";
@@ -32,6 +34,8 @@ export const SETTING_KEYS = [
   "send_windows",
   "send_policy",
   "evidence_policy",
+  "email_sequence",
+  "followup_templates",
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -78,6 +82,10 @@ function schemaForKey(key: string): z.ZodType {
       return sendPolicySchema;
     case "evidence_policy":
       return evidencePolicySchema;
+    case "email_sequence":
+      return emailSequenceSchema;
+    case "followup_templates":
+      return followupTemplatesSchema;
     case "apify_actor_templates":
       return apifyActorTemplatesSchema;
     default:

@@ -58,6 +58,159 @@ Result: pass / fail
 
 ## Sessions
 
+### 2026-09-26 — Session 19 — U6c S19: migration 0009d, sequence settings, a 3-step draft, one sequence approval
+
+**Step:** U6c, build part 1 (`09` §U6c, S19), on `main`. Plan mode first. Operator decisions in plan mode:
+- **Narrow preflight hash bridge:** `stale_approval` rebuilds the sequence hash; no new refusals.
+- **✏️ Edit N = approve** the sequence with step N replaced.
+- **Operator addition:** record the delay mapping (engine "after previous" vs Instantly "before next") for S20, with a pure DoD test (M1).
+
+**Status at end:** 🟨 **S19 done — tested locally.**
+- Writer v10 **verified with provider** (1 live Anthropic call on a synthetic fixture, not a send).
+- Migration `0009d` applied by the operator.
+- 3 settings written (operator-approved).
+- Enroll, stops and tracking (S20–S21) not started. The ⛔ row in `06` §6 stays open until S22. 🚩 not reached.
+
+**Safety and spend:**
+- No Instantly call, no email, no prospect read or touched.
+- Every DB test used synthetic `*.example.com` fixtures (plus one synthetic send account `*.example.invalid`, health paused), with scoped cleanup and identical before/after row counts.
+- Anthropic: 1 live writer call, $0.0167.
+- Telegram: one card + the APPROVED texts to the operator's own chat (the `test-draft` approve path).
+
+**Did**
+- **Migration `0009d_instantly_enrollments.sql`:**
+  - table `instantly_enrollments`;
+  - `record_provider_send` (`provider_sent:<email_id>`, counts once, the quota never rises);
+  - `approve_email_sequence`: approves all steps or none, fenced on every pending outbound touch of the lead.
+- **Settings** (`scripts/update-u6c-sequence-settings.ts`, dry run, then `--apply` on the operator's OK):
+  - `email_sequence` v1 (0/7/7 days after the previous step);
+  - `followup_templates` v1 (the operator's honest close, exact);
+  - `writer_prompt_email` v10 (a SEQUENCE block; `{steps:[…]}`).
+  - New schemas in `validation/jsonb.ts`: production delays must be whole days in multiples of 7; `{first_name}` is the only placeholder.
+- **Draft stage.**
+  - One writer call writes steps 1–2; step 3 comes from the template; the footer goes on every step.
+  - The claim guard runs on every step: template mode, `offsetDays` freshness ("step 2: 24d + 7d > 30d"), step 1's subject checked only with step 1.
+  - Holds: `sequence_shape_invalid` (retry once → hold), `claim_guard_hold {steps:[{step, reasons}]}`, `template_variable_missing`.
+  - On success: one multi-row insert of 3 `pending_approval` touches and one card.
+- **Approval.**
+  - `SequenceApprovalSnapshot`: rendered subjects (`Re: <step 1>`), composed bodies, delays, ledgers, sender, signature, campaign, setting version. One hash on every touch through `approve_email_sequence`.
+  - Freshness is re-checked at approval.
+  - Kill kills the sequence.
+  - The APPROVED texts go out as separate messages, each within Telegram's 4096-character limit.
+- **Card.** Every step with "+7 days · same thread", "Instantly adds a quote of step 1 below", claims with evidence id, date and excerpt. A length ladder keeps it one message ≤ 4096 characters.
+- **Preflight bridge.** `preflight.ts` + `send/core.ts` rebuild a sequence-approved touch's hash from all its steps and the ACTIVE `email_sequence`. `threadedSubject` moved to `approval.ts` (re-exported).
+- **Existing suites moved to the v10 shape:**
+  - mocked writers in `test-u6b-claims.ts`, `test-u6-traversal.ts`;
+  - live `test-draft.ts` (per-step checks, sequence hash).
+- **Docs (`09` §U6c).**
+  - Written during the session, before the operator OK'd `--apply`: the S20 delay-mapping note and DoD row M1.
+  - At close (operator): "S19 as built" and the "S20 scope additions": `step2_repeats_step1` and writer v11.
+
+**Files touched**
+- **New:**
+  - `supabase/migrations/0009d_instantly_enrollments.sql`
+  - `src/lib/sending/sequence-approval.ts`
+  - `src/lib/stages/draft/sequence.ts`
+  - `src/lib/stages/draft/sequence.test.ts`
+  - `scripts/update-u6c-sequence-settings.ts`
+  - `scripts/test-u6c-sequence.ts`
+- **Changed:**
+  - `src/lib/stages/draft/{core,claims,claims-context}.ts`
+  - `src/lib/telegram/handler.ts`
+  - `src/lib/integrations/{telegram,telegram-approval}.ts`
+  - `src/lib/sending/{approval,preflight}.ts`
+  - `src/lib/stages/send/core.ts`
+  - `src/lib/settings/core.ts`
+  - `src/lib/validation/{jsonb,llm}.ts`
+  - `src/types/database-extensions.ts`
+  - `package.json` (`test:sequence`, `test:sequence-rules`)
+- **Test scripts:** `scripts/test-u6b-claims.ts`, `scripts/test-u6-traversal.ts`, `scripts/test-draft.ts`.
+- **Docs:**
+  - `docs/06-build-progress.md`: the U6c row; §5 +7 rows; §6 quote row resolved, +5 rows; §7 settings.
+  - `docs/09-build-plan-v2.md`: §U6c S20 notes, S19 as built, S20 scope additions, DoD row M1, the S20 effort line, the §6 row.
+  - `docs/07-build-log.md`: this entry.
+
+**Verification**
+```
+-- 0009d, operator in the SQL editor (2026-09-26):
+instantly_enrollments | relrowsecurity = true
+approve_email_sequence: postgres, service_role · record_provider_send: postgres, service_role (no anon/authenticated/PUBLIC)
+constraints: instantly_enrollments_state_check, instantly_enrollments_steps_total_check
+
+$ pnpm exec tsc --noEmit ; eslint (changed files) ; pnpm build      → clean
+$ pnpm test:sequence-rules      # tests 34 · pass 34 · fail 0
+$ pnpm test:claims 45/45 · test:sending 69/69 · test:instantly 81/81 · test:webhook-rules 10/10 · test:source-filters 9/9 · test:apollo 6/6
+$ pnpm test:send     All 78 checks passed.
+$ pnpm test:webhooks All 58 checks passed.
+$ pnpm test:jobs     All 63 checks passed.
+$ pnpm test:scheduler All 80 checks passed.
+$ pnpm test:sequence
+PASS: D1: 3 touches pending_approval (steps 1–3) · one card · the card is one message ≤ 4096 — 2590
+PASS: A1: all 3 approved, one shared hash; snapshot binds every subject (rendered), composed body, delay, sender, signature, version
+PASS: A4: a new email_sequence delay → the recomputed hash differs · a changed signature → differs
+PASS: D2: invented_timing named on step 2 (and only step 2) — [[2,["invented_timing","uncovered_fact"]]]
+PASS: D3: unapproved_offer on step 2 — [[2,["unapproved_offer"]]]
+PASS: D4 wrong count: both attempts named sequence_shape_invalid (2 writer calls, hold) · malformed (v9 shape) → hold · step-2 subject fixed on the retry
+PASS: 22 days / F1 23 days (−1 h) → pending_approval
+PASS: F2: step 2 refused 'step 2: 24d + 7d > 30d' · F3: step 1 and the step-3 template are not refused — [2]
+PASS: F4: approval refused, stale_evidence on step 2; all 3 still pending_approval
+PASS: A2: /edit 2 "Beaumont" → uncovered_fact, 'Edit not applied'; all 3 still pending
+PASS: A3: approved with the edited step 2; a new hash ≠ the unedited sequence's hash
+PASS: kill: all 3 killed, lead parked
+PASS: fence: approve_email_sequence with one step not pending → {"named":3,"status":"not_pending","matching":2,"lead_pending":2}
+PASS: no first name → template_variable_missing hold (1 writer call)
+PASS: record_provider_send: recorded then 'already'; 2 emails → used 2, accepted 2, reserved 0; quota 15 kept (p_quota 30 later)
+BEFORE = AFTER (companies 36, leads 36, touches 13, lead_events 263, …, instantly_enrollments 0)
+90/90 passed
+$ pnpm test:claim-guard   91/91 passed   (after two harness fixes, see Problems)
+$ pnpm test:traversal     All 62 checks passed.
+$ pnpm exec tsx scripts/update-u6c-sequence-settings.ts --apply
+WROTE email_sequence v1 · followup_templates v1 · writer_prompt_email v10
+$ pnpm exec tsx scripts/test-draft.ts --limit 1     (live writer v10, synthetic fixture)
+{"leads_picked":1,"drafted":1,"claim_held":0,"tokens_used":2786,"est_cost_usd":0.016674}
+STEP 1 (day 0) "enquiries going to team@ inbox" — 88 words, 5 claims (E1, E1, E2, E1+E2, offer)
+STEP 2 (day 7, no subject) — 58 words, 4 claims (E2, E1+E2, E1+E2, offer)
+STEP 3 (day 14, template) — "Hi Test, I haven't heard back, …", 0 claims
+PASS: claim guard re-check passes (every step) · all 3 approved · one sequence hash binds every step, recipient, sender
+80/80 passed · BEFORE = AFTER (leads 36, touches 13, lead_events 263)
+```
+Result: **pass**.
+
+**Decisions** (full rows in `06` §5)
+- **Narrow preflight hash bridge** (operator). Reason: keeps the traversal green and makes A4 real without S20's new refusals.
+- **✏️ Edit N = approve with step N replaced** (operator). Reason: keeps today's edit semantics; no new saved-edit state.
+- **`approve_email_sequence` in 0009d.** Reason: all-or-none approval across N rows is impossible through PostgREST.
+- **`email_sequence` `delay` = after the previous step; Instantly's = before the next.** S20 maps engine step N onto Instantly step N−1 (DoD M1); S22 confirms it live.
+- **The quote of step 1 is bound by the same hash; the card says so.** Reason: resolves the S18 quote row.
+- **Freshness consequence:** a sequence needs evidence ≤ 23 days old (step 2 at +7 d).
+- **Live-draft findings go to S20 scope, not the general backlog** (operator): `step2_repeats_step1` and writer v11. The semantic gap stays with operator review until U15/U17.
+
+**Problems hit**
+- **`test:claim-guard` first ran 73/87.** Both causes were in the test harness; no code change was needed:
+  - the 29-day case now correctly holds on step 2 (29 d + 7 d > 30 d); the test expects step 2 only;
+  - the Steffen fixtures have only E1, so the default mocked step 2 (citing E2) was invalid for them; they now get their own step 2.
+- **A pure-test fixture sentence starting "Whoever"** was read as a name (`uncovered_fact`), a known interim gap; the fixture was reworded.
+- **`scripts/test-validation.ts` fails 1 case on `main` before and after this session** ("writer 90-word body passes": its fixture has no `claims`). Logged in `06` §6.
+- **The live v10 draft passed the guard with three quality defects:**
+  - step 2 repeated step 1's Follow Up Boss observation;
+  - step 1 said "they fill out the form" (E1: "rather than a routed form") and added "the next showing";
+  - step 2 generalised ("usually where buyer interest goes quiet").
+
+  They are recorded as S20 scope (`09` §U6c) and as a `06` §6 row.
+- **Found, not fixed** (`06` §6): `cadence_default` still seeds `sequence_steps` (0/3/7/14); a Telegram edit that drops the compliance footer is approved without it (pre-existing).
+
+**Next action**
+- **S20 — U6c build, part 2** (`09` §U6c):
+  - enroll with `custom_variables` (`zx_subject`, `zx_body`, `zx_body_2`, `zx_body_3`, `zx_touch_id`);
+  - preflight `sequence_incomplete` / `campaign_sequence_drift` / `provider_daily_limit`;
+  - `runSendJob` refuses step > 1 (`followup_engine_send_disabled`);
+  - adapter `updateCampaign`/`getLead`/`getEmail`;
+  - `instantly-sender-campaigns.ts --update` with the delay mapping (M1);
+  - plus the Session 19 additions `step2_repeats_step1` and writer v11 (dry run, then the operator's OK).
+- All with mocks; no live writes.
+
+---
+
 ### 2026-09-25 — Session 18 — U6c S18 live spike: Instantly-owned follow-ups go to the lead only, thread, are text-only, and stop on DELETE
 
 **Step:** U6c, the S18 live spike (`09` §U6c "S18"), on `main`. Plan mode first. Operator decisions in plan mode: the delete is **pre-approved once and fires automatically** on step 2; the webhook sink is a **script-local listener**.

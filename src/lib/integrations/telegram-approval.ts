@@ -157,3 +157,172 @@ export function formatApprovalMessagePlain(
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
 }
+
+// ---------------------------------------------------------------------------
+// Sequence card (09 §U6c): one card for every step of an email sequence.
+// ---------------------------------------------------------------------------
+
+export type SequenceCardStep = {
+  touch_id: string;
+  step_no: number;
+  source: "writer" | "template";
+  /** Wait after the previous step (email_sequence semantics). */
+  delay: number;
+  delay_unit: string;
+  /** Days after step 1 this step goes out. */
+  offset_days: number;
+  /** Step 1's subject; null for follow-ups (rendered "Re: <step-1 subject>"). */
+  subject: string | null;
+  body: string;
+  claims: Claim[];
+};
+
+export type SequenceCardInput = {
+  steps: SequenceCardStep[];
+  sequence_setting_version: number;
+};
+
+/** Telegram's limit on one message's text (after entity parsing). */
+export const TELEGRAM_TEXT_LIMIT = 4096;
+
+type CardLevel = { excerptChars: number; maxClaims: number; spanChars: number };
+
+// Shrink order when the card is too long: excerpts first, then how many
+// claims per step, then span length. Bodies are never truncated.
+const CARD_LEVELS: CardLevel[] = [
+  { excerptChars: 140, maxClaims: 8, spanChars: 140 },
+  { excerptChars: 80, maxClaims: 8, spanChars: 140 },
+  { excerptChars: 80, maxClaims: 5, spanChars: 100 },
+  { excerptChars: 0, maxClaims: 5, spanChars: 80 },
+  { excerptChars: 0, maxClaims: 3, spanChars: 60 },
+];
+
+function cut(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/** The text Telegram counts: tags removed, entities decoded. */
+export function telegramVisibleLength(html: string): number {
+  return html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&").length;
+}
+
+function unitLabel(n: number, unit: string): string {
+  const singular = unit.replace(/s$/, "");
+  return `${n} ${n === 1 ? singular : `${singular}s`}`;
+}
+
+function sequenceClaimLines(claims: Claim[], qualification: QualificationContext, level: CardLevel): string[] {
+  const fetched = qualification.evidence_fetched_at?.slice(0, 10) ?? "unknown";
+  const lines: string[] = [];
+  for (const claim of claims.slice(0, level.maxClaims)) {
+    lines.push(`• [${claim.kind}] “${escapeTelegramHtml(cut(claim.span, level.spanChars))}”`);
+    for (const id of claim.evidence_ids) {
+      const item = qualification.evidence.find((e) => e.id === id);
+      if (!item) lines.push(`   ← ${id} · (not found)`);
+      else if (level.excerptChars > 0) {
+        lines.push(`   ← ${id} · ${fetched} · <i>${escapeTelegramHtml(cut(item.observation, level.excerptChars))}</i>`);
+      } else lines.push(`   ← ${id} · ${fetched}`);
+    }
+  }
+  if (claims.length > level.maxClaims) lines.push(`• … ${claims.length - level.maxClaims} more claims`);
+  return lines;
+}
+
+function evidenceAgeDays(fetchedAt: string | null | undefined, now: Date): number | null {
+  if (!fetchedAt) return null;
+  const age = (now.getTime() - Date.parse(fetchedAt)) / 86_400_000;
+  return Number.isFinite(age) ? Math.floor(age) : null;
+}
+
+function formatSequenceStepBlock(
+  step: SequenceCardStep,
+  firstSubject: string,
+  qualification: QualificationContext,
+  level: CardLevel,
+  ageDays: number | null,
+): string[] {
+  const header =
+    step.step_no === 1
+      ? "<b>STEP 1 · day 0</b>"
+      : `<b>STEP ${step.step_no} · +${unitLabel(step.delay, step.delay_unit)} · same thread</b> (day ${step.offset_days})`;
+  const subject = step.step_no === 1 ? firstSubject : `Re: ${firstSubject.replace(/^re:\s*/i, "")}`;
+  const cites = step.claims.some((c) => c.evidence_ids.length > 0);
+  const max = qualification.max_age_days;
+  const freshness =
+    !cites
+      ? step.source === "template"
+        ? "template · cites no evidence"
+        : "cites no evidence"
+      : ageDays === null || max === undefined
+        ? "freshness: unknown"
+        : `freshness: ${ageDays}d + ${step.offset_days}d ≤ ${max}d`;
+  const lines = [
+    header,
+    `<i>${freshness}</i>`,
+    `<b>SUBJECT:</b> ${escapeTelegramHtml(subject)}`,
+    `<pre>${escapeTelegramHtml(step.body)}</pre>`,
+  ];
+  if (step.step_no > 1) lines.push("<i>Instantly adds a quote of step 1 below.</i>");
+  const claimLines = sequenceClaimLines(step.claims, qualification, level);
+  if (claimLines.length > 0) lines.push("<b>CLAIMS:</b>", ...claimLines);
+  return lines;
+}
+
+/**
+ * The sequence card as one or more HTML messages. Normally one: the ladder
+ * above shortens the claim evidence until it fits. Only if even the shortest
+ * form is too long is it split at step boundaries (buttons go on the last).
+ */
+export function formatSequenceApprovalMessages(
+  sequence: SequenceCardInput,
+  lead: LeadContext,
+  qualification: QualificationContext,
+  company: CompanyContext,
+  now: Date = new Date(),
+): string[] {
+  const steps = [...sequence.steps].sort((a, b) => a.step_no - b.step_no);
+  const firstSubject = steps[0]?.subject ?? "(none)";
+  const ageDays = evidenceAgeDays(qualification.evidence_fetched_at, now);
+  const head = [
+    `🎯 <b>${escapeTelegramHtml(formatLeadName(lead))}</b> — ${escapeTelegramHtml(lead.title?.trim() || "—")}`,
+    `🏢 ${escapeTelegramHtml(company.name)} · ${escapeTelegramHtml(company.domain?.trim() || "—")}`,
+    `${fitScoreEmoji(qualification.fit_score)} fit ${qualification.fit_score ?? "—"}  ·  ${escapeTelegramHtml(
+      angleLabel(qualification.recommended_angle, qualification.segment),
+    )}  ·  ${emailStatusMarker(lead.email_status)}`,
+    "",
+    `<b>WHY:</b> ${escapeTelegramHtml(qualification.problem_hypothesis)}`,
+    `<i>${steps.length}-step sequence · email_sequence v${sequence.sequence_setting_version} · claim guard: pass · evidence_policy v${
+      qualification.evidence_policy_version ?? "?"
+    } (≤${qualification.max_age_days ?? "?"}d) · evidence fetched ${qualification.evidence_fetched_at?.slice(0, 10) ?? "unknown"}</i>`,
+  ];
+  const tail = [
+    "──────────",
+    "<i>One approval covers every step. Sender + signature are fixed when you approve; the APPROVED update shows the final texts.</i>",
+  ];
+
+  let blocks: string[][] = [];
+  for (const level of CARD_LEVELS) {
+    blocks = steps.map((step) => ["──────────", ...formatSequenceStepBlock(step, firstSubject, qualification, level, ageDays)]);
+    const whole = [...head, ...blocks.flat(), ...tail].join("\n");
+    if (telegramVisibleLength(whole) <= TELEGRAM_TEXT_LIMIT) return [whole];
+  }
+
+  // Still too long at the shortest level: split at step boundaries.
+  const messages: string[] = [];
+  let current = [...head];
+  for (const block of blocks) {
+    const next = [...current, ...block];
+    if (telegramVisibleLength(next.join("\n")) > TELEGRAM_TEXT_LIMIT && current.length > 0) {
+      messages.push(current.join("\n"));
+      current = [...block];
+    } else current = next;
+  }
+  current.push(...tail);
+  messages.push(current.join("\n"));
+  return messages;
+}

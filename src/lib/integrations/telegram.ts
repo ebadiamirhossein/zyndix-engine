@@ -3,6 +3,8 @@ const TELEGRAM_API_BASE = "https://api.telegram.org";
 import {
   formatApprovalMessageHtml,
   formatApprovalMessagePlain,
+  formatSequenceApprovalMessages,
+  type SequenceCardInput,
   type ApprovalCompanyContext,
   type ApprovalLeadContext,
   type ApprovalQualificationContext,
@@ -96,6 +98,25 @@ function approvalButtons(touchId: string): TelegramInlineButton[][] {
       { text: "✏️ Edit", callback_data: `edit:${touchId}` },
       { text: "❌ Kill", callback_data: `kill:${touchId}` },
       { text: "💤 Snooze", callback_data: `snooze:${touchId}` },
+    ],
+  ];
+}
+
+/**
+ * Sequence card buttons (09 §U6c): one approval for every step, one edit
+ * button per step (the "/edit N" operation), kill and snooze for the whole
+ * sequence. Each callback carries a touch id; the handler resolves the lead's
+ * whole pending sequence from it.
+ */
+export function sequenceApprovalButtons(steps: { step_no: number; touch_id: string }[]): TelegramInlineButton[][] {
+  const ordered = [...steps].sort((a, b) => a.step_no - b.step_no);
+  const first = ordered[0]!.touch_id;
+  return [
+    [{ text: `✅ Approve all ${ordered.length}`, callback_data: `approve:${first}` }],
+    ordered.map((step) => ({ text: `✏️ Edit ${step.step_no}`, callback_data: `edit:${step.touch_id}` })),
+    [
+      { text: "❌ Kill", callback_data: `kill:${first}` },
+      { text: "💤 Snooze", callback_data: `snooze:${first}` },
     ],
   ];
 }
@@ -196,6 +217,40 @@ export function createTelegramClient() {
     return { sent, failed };
   }
 
+  /** One card for a whole email sequence (09 §U6c); buttons on the last message. */
+  async function sendSequenceApproval(
+    sequence: SequenceCardInput,
+    lead: LeadContext,
+    qualification: QualificationContext,
+    company: CompanyContext,
+  ): Promise<TelegramSendResult> {
+    const allowed = parseAllowedUserIds();
+    if (allowed.size === 0) {
+      throw new Error("TELEGRAM_ALLOWED_USER_IDS is empty");
+    }
+
+    const messages = formatSequenceApprovalMessages(sequence, lead, qualification, company);
+    const buttons = sequenceApprovalButtons(sequence.steps);
+    const failed: { userId: number; error: string }[] = [];
+    let sent = 0;
+
+    for (const userId of allowed) {
+      try {
+        for (const [i, text] of messages.entries()) {
+          await sendMessage(userId, text, {
+            ...(i === messages.length - 1 ? { replyMarkup: buttons } : {}),
+            parseMode: "HTML",
+          });
+        }
+        sent += 1;
+      } catch (error) {
+        failed.push({ userId, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    return { sent, failed };
+  }
+
   async function sendAlert(text: string): Promise<void> {
     const allowed = parseAllowedUserIds();
     await Promise.all([...allowed].map((userId) => sendMessage(userId, text)));
@@ -225,6 +280,7 @@ export function createTelegramClient() {
     editMessage,
     answerCallback,
     sendApproval,
+    sendSequenceApproval,
     sendAlert,
     getUpdates,
     deleteWebhook,

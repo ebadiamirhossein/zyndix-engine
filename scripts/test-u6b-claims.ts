@@ -14,6 +14,12 @@
  * evidence_policy and cta_variants are pinned in-process (v1 / the approved
  * line) so the DoD does not depend on which settings version is active; the
  * other settings are read live.
+ *
+ * Session 19 (09 §U6c): the draft stage writes a 3-step sequence. The mocked
+ * writer wraps each U6b draft as step 1 of the v10 shape plus a clean step 2
+ * (`v10()`); email_sequence / followup_templates are pinned in-process too.
+ * The U6b assertions are unchanged; only touch counts (3 per draft) and the
+ * approval's sequence snapshot differ. Sequence cases: test-u6c-sequence.ts.
  */
 import { config } from "dotenv";
 import { resolve } from "node:path";
@@ -25,8 +31,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createServiceClient } from "../src/lib/db/service-client";
 import type { AnthropicClient } from "../src/lib/integrations/anthropic";
 import type { TelegramClient } from "../src/lib/integrations/telegram";
-import { formatApprovalMessageHtml } from "../src/lib/integrations/telegram-approval";
-import { approvalHash, buildApprovalSnapshot } from "../src/lib/sending/approval";
+import { formatSequenceApprovalMessages } from "../src/lib/integrations/telegram-approval";
+import { buildSequenceApprovalSnapshot, sequenceApprovalHash, type EmailSequence } from "../src/lib/sending/sequence-approval";
 import { createSettingsStore } from "../src/lib/settings/core";
 import type { ClaimReason } from "../src/lib/stages/draft/claims";
 import { runDraftStage } from "../src/lib/stages/draft/core";
@@ -77,8 +83,20 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   throw new Error(`unexpected network call: ${target}`);
 }) as typeof fetch;
 
+const SEQUENCE: EmailSequence = {
+  steps: [
+    { step_no: 1, delay: 0, delay_unit: "days", source: "writer" },
+    { step_no: 2, delay: 7, delay_unit: "days", source: "writer" },
+    { step_no: 3, delay: 7, delay_unit: "days", source: "template" },
+  ],
+};
+const HONEST_CLOSE =
+  "Hi {first_name},\n\nI haven't heard back, so I'll assume now isn't the right time and won't follow up again.\n\nIf it becomes a priority later, just reply to this email.";
+
 async function getActiveSetting(k: string): Promise<{ version: number; value: unknown }> {
   if (k === "evidence_policy") return { version: 1, value: { max_age_days: 30 } };
+  if (k === "email_sequence") return { version: 1, value: SEQUENCE };
+  if (k === "followup_templates") return { version: 1, value: { templates: [{ step_no: 3, id: "honest_close", body: HONEST_CLOSE }] } };
   if (k === "cta_variants") {
     return {
       version: 3,
@@ -108,14 +126,14 @@ const anthropic = {
     calls.set(name, n + 1);
     const outs = scripts.get(name) ?? [];
     const out = outs[Math.min(n, outs.length - 1)] ?? {};
-    return { text: JSON.stringify(out), model: "mock", inputTokens: 1, outputTokens: 1, estCostUsd: 0 };
+    return { text: JSON.stringify(v10(out)), model: "mock", inputTokens: 1, outputTokens: 1, estCostUsd: 0 };
   },
 } as unknown as AnthropicClient;
 
 const tg = { cards: [] as string[], messages: [] as string[], alerts: [] as string[] };
 const telegram = {
-  async sendApproval(...args: Parameters<typeof formatApprovalMessageHtml>) {
-    tg.cards.push(formatApprovalMessageHtml(...args));
+  async sendSequenceApproval(...args: Parameters<typeof formatSequenceApprovalMessages>) {
+    tg.cards.push(formatSequenceApprovalMessages(...args).join("\n"));
     return { sent: 1, failed: [] };
   },
   async sendMessage(_chat: number, text: string) {
@@ -251,6 +269,24 @@ function draft(middle = CLEAN_MIDDLE, extraClaims: Claim[] = [], offer = APPROVE
   };
 }
 
+// A clean step 2 (09 §U6c): a new angle citing E1 + E2, anchored on "Houston".
+const STEP2_SPAN = "for a Houston and Katy team, the office phone and the shared team inbox are the only two ways in";
+const STEP2 = {
+  step_no: 2,
+  body: `Hi Pat,\n\nOne more thought: ${STEP2_SPAN}. The first person to pick up owns the reply.`,
+  claims: [{ span: STEP2_SPAN, kind: "inference", evidence_ids: ["E1", "E2"] }],
+};
+
+/**
+ * Wraps a v9-shaped U6b draft as step 1 of the v10 output, plus a clean step 2
+ * (the default one, or the draft's own `step2` when its evidence differs).
+ */
+function v10(out: WriterOut): unknown {
+  const o = out as { subject?: unknown; body?: unknown; claims?: unknown; step2?: unknown };
+  if (!("body" in o)) return out;
+  return { steps: [{ step_no: 1, subject: o.subject, body: o.body, claims: o.claims }, o.step2 ?? STEP2] };
+}
+
 async function runDraft(f: Fixture) {
   return runDraftStage(
     { db, anthropic, telegram, getActiveSetting, transition: state.transition },
@@ -263,7 +299,7 @@ async function leadState(id: string): Promise<string> {
 }
 
 async function touchesFor(leadId: string) {
-  const { data } = await sendDb.from("touches").select("*").eq("lead_id", leadId);
+  const { data } = await sendDb.from("touches").select("*").eq("lead_id", leadId).order("step_no");
   return data ?? [];
 }
 
@@ -294,7 +330,12 @@ async function expectPending(label: string, f: Fixture, writerCalls = 1) {
   const touches = await touchesFor(f.leadId);
   const t = touches[0];
   assert(`${label}: lead pending_approval`, (await leadState(f.leadId)) === "pending_approval");
-  assert(`${label}: one pending touch with a claim ledger`, touches.length === 1 && t?.status === "pending_approval" && Array.isArray(t?.claim_ledger));
+  assert(
+    `${label}: 3 pending touches (steps 1–3), each with a claim ledger`,
+    touches.length === 3 &&
+      touches.map((x) => x.step_no).join() === "1,2,3" &&
+      touches.every((x) => x.status === "pending_approval" && Array.isArray(x.claim_ledger)),
+  );
   assert(`${label}: writer calls = ${writerCalls}`, calls.get(f.name) === writerCalls, String(calls.get(f.name)));
   return t!;
 }
@@ -372,9 +413,14 @@ async function main(): Promise<void> {
     f = await fixture("stale-31", { fetchedDaysAgo: 31 });
     scripts.set(f.name, [draft()]);
     await expectHold("DoD 4 (31d)", f, "stale_evidence");
+    // Session 19 (09 §U6c per-step freshness): at 29 days step 1 still passes,
+    // but step 2 goes out 7 days later (29 + 7 > 30), so the sequence holds on
+    // step 2 only. A 22-day fixture passes whole (test-u6c-sequence.ts).
     f = await fixture("fresh-29", { fetchedDaysAgo: 29 });
     scripts.set(f.name, [draft()]);
-    await expectPending("DoD 4 (29d)", f);
+    await expectHold("DoD 4 (29d)", f, "stale_evidence", /^step 2: 29d \+ 7d > 30d/);
+    const fresh29 = (await holdEvent(f.leadId)) as { steps?: { step: number }[] } | undefined;
+    assert("DoD 4 (29d): step 1 passes; only step 2 is stale", fresh29?.steps?.map((x) => x.step).join() === "2", JSON.stringify(fresh29?.steps?.map((x) => x.step)));
 
     console.log("\n--- DoD 5: REBG contradiction ---");
     f = await fixture("rebg", {
@@ -421,6 +467,12 @@ async function main(): Promise<void> {
         { span: "every consignment starts with a manual back-and-forth", kind: "inference", evidence_ids: ["E1"] },
         { span: APPROVED, kind: "offer", evidence_ids: [] },
       ],
+      // Step 2 grounded in Steffen's own single evidence item.
+      step2: {
+        step_no: 2,
+        body: "Hi Pat,\n\nOne more thought: the Auction Gallery page pitches a flat-rate commission to sellers.",
+        claims: [{ span: "the Auction Gallery page pitches a flat-rate commission to sellers", kind: "inference", evidence_ids: ["E1"] }],
+      },
     });
     const quoted = 'your gallery page asks sellers to "contact us to schedule a preview"';
     const unquoted = "your gallery page asks sellers to contact us to schedule a preview";
@@ -451,18 +503,22 @@ async function main(): Promise<void> {
     scripts.set(f.name, [draft()]);
     let touch = await expectPending("DoD 9", f);
     const card = tg.cards.slice(cardsBefore).at(-1) ?? "";
-    assert("DoD 9: Telegram card lists each claim with its evidence id and fetch date", card.includes("<b>CLAIMS:</b>") && card.includes("← E2 · fetched") && card.includes("[prospect_fact]") && card.includes("claim guard: pass"));
+    assert("DoD 9: Telegram card lists each claim with its evidence id and fetch date", card.includes("<b>CLAIMS:</b>") && /← E2 · \d{4}-\d{2}-\d{2}/.test(card) && card.includes("[prospect_fact]") && card.includes("claim guard: pass"));
     await callback(`approve:${touch.id}`, 1);
-    const [approved] = await touchesFor(f.leadId);
-    const snapshot = approved?.approval_snapshot as { claim_ledger?: unknown } | null;
-    assert("DoD 9: touch approved, lead approved", approved?.status === "approved" && (await leadState(f.leadId)) === "approved", tg.messages.at(-1)?.slice(0, 200));
-    assert("DoD 9: snapshot carries the ledger", JSON.stringify(snapshot?.claim_ledger) === JSON.stringify(approved?.claim_ledger) && Array.isArray(snapshot?.claim_ledger));
+    const all = await touchesFor(f.leadId);
+    const approved = all[0];
+    const snapshot = approved?.approval_snapshot as { steps?: { claim_ledger?: unknown }[] } | null;
+    assert("DoD 9: touch approved, lead approved", all.every((x) => x.status === "approved") && (await leadState(f.leadId)) === "approved", tg.messages.at(-1)?.slice(0, 200));
+    assert("DoD 9: snapshot carries the ledger", JSON.stringify(snapshot?.steps?.[0]?.claim_ledger) === JSON.stringify(approved?.claim_ledger) && Array.isArray(snapshot?.steps?.[0]?.claim_ledger));
     if (approved) {
-      const { data: sender } = await sendDb.from("send_accounts").select("id, signature_text").eq("id", approved.send_account_id ?? "").maybeSingle();
+      const { data: sender } = await sendDb.from("send_accounts").select("id, signature_text, instantly_campaign_id").eq("id", approved.send_account_id ?? "").maybeSingle();
       const lead = await state.getLead(f.leadId);
-      const recomputed = approvalHash(buildApprovalSnapshot(approved, { id: lead.id, email: lead.email }, sender));
-      assert("DoD 9: hash recomputes equal (preflight view)", recomputed === approved.approval_hash);
-      const tampered = approvalHash(buildApprovalSnapshot({ ...approved, claim_ledger: [] }, { id: lead.id, email: lead.email }, sender));
+      const rebuild = (touches: typeof all) =>
+        sequenceApprovalHash(
+          buildSequenceApprovalSnapshot({ lead: { id: lead.id, email: lead.email }, sender: sender!, sequence: { version: 1, value: SEQUENCE }, touches }),
+        );
+      assert("DoD 9: hash recomputes equal (preflight view)", rebuild(all) === approved.approval_hash);
+      const tampered = rebuild(all.map((x, i) => (i === 0 ? { ...x, claim_ledger: [] } : x)));
       assert("DoD 9: a different ledger changes the hash", tampered !== approved.approval_hash);
     }
 
@@ -477,6 +533,7 @@ async function main(): Promise<void> {
     const [afterEdit] = await touchesFor(f.leadId);
     assert("DoD 10: refused with the failing claim listed", /claim guard refused/.test(refusal) && refusal.includes("Beaumont") && refusal.includes("Edit not applied"), refusal.slice(0, 200));
     assert("DoD 10: touch still pending_approval, body not written", afterEdit?.status === "pending_approval" && afterEdit.body === null && (await leadState(f.leadId)) === "pending_approval");
+    // The refused edit changed nothing; the pending edit stays open for the next reply.
     // A clean edit (a sentence deleted) is accepted, with the dropped claim removed from the ledger.
     const cleanEdit = (touch.draft_body ?? "").replace(` ${CLEAN_MIDDLE}`, "");
     await processTelegramUpdate(handlerDeps, { update_id: 4, message: { message_id: 6, from: { id: APPROVER }, chat: { id: APPROVER }, text: cleanEdit } }, { skipStore: true });

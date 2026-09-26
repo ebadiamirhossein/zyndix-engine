@@ -14,6 +14,7 @@ import type { CapacityLedger } from "@/lib/scheduler/ledger";
 import { jitteredSendAt, ledgerDate, nextSendWindow, rampQuota } from "@/lib/scheduler/windows";
 import { composeOutboundBody, sendIdempotencyKey } from "@/lib/sending/approval";
 import { checkSenderDomain } from "@/lib/sending/guard";
+import { isSequenceSnapshot } from "@/lib/sending/sequence-approval";
 import {
   DEFERRABLE_REFUSALS,
   preflight,
@@ -26,7 +27,7 @@ import {
 import { checkSuppression, normalizeEmail } from "@/lib/sending/suppression";
 import type { createStateStore } from "@/lib/state/core";
 import { raiseException } from "@/lib/webhooks/instantly";
-import type { capacityDefaultsSchema } from "@/lib/validation/jsonb";
+import { emailSequenceSchema, type capacityDefaultsSchema } from "@/lib/validation/jsonb";
 import type { Database, Json } from "@/types/database";
 import type { DatabaseWithSending, DatabaseWithWebhooks, OutboxRowShape } from "@/types/database-extensions";
 import type { LeadState } from "@/types/enums";
@@ -292,7 +293,9 @@ async function buildContext(
       prompt_version: touch.prompt_version,
       approval_hash: touch.approval_hash,
       claim_ledger: touch.claim_ledger,
+      approval_snapshot: touch.approval_snapshot,
     },
+    sequence: isSequenceSnapshot(touch.approval_snapshot) ? await loadApprovedSequence(deps, touch) : undefined,
     lead: {
       id: lead.id,
       state: lead.state as LeadState,
@@ -321,6 +324,33 @@ async function buildContext(
     windows: settings.windows,
   };
   return { ctx, anchor };
+}
+
+/**
+ * 09 §U6c hash bridge: the steps sharing this touch's approval hash and the
+ * ACTIVE email_sequence, for preflight to rebuild the sequence hash. Null
+ * (→ stale_approval) when the setting is missing or invalid.
+ */
+async function loadApprovedSequence(
+  deps: SendDeps,
+  touch: Loaded["touch"],
+): Promise<PreflightContext["sequence"]> {
+  if (!touch.lead_id || !touch.approval_hash) return null;
+  const { data, error } = await deps.db
+    .from("touches")
+    .select("id, step_no, channel, subject, body, prompt_version, claim_ledger")
+    .eq("lead_id", touch.lead_id)
+    .eq("approval_hash", touch.approval_hash);
+  if (error) throw new SendStageError(`load sequence touches: ${error.message}`);
+  let setting: { version: number; value: unknown };
+  try {
+    setting = await deps.getActiveSetting("email_sequence");
+  } catch {
+    return null;
+  }
+  const parsed = emailSequenceSchema.safeParse(setting.value);
+  if (!parsed.success) return null;
+  return { touches: data ?? [], setting: { version: setting.version, value: parsed.data } };
 }
 
 type StepOneAnchor = { emailId: string; threadId: string | null; subject: string; outboxId: string };

@@ -536,6 +536,72 @@ All existing guard, draft and approval tests stay green. A live `test-draft --li
   - tunnel and listener stopped;
   - the operator sets `amir@getzyndix.com`'s Instantly daily limit back to 1.
 
+**S20 notes — delay mapping (operator addition, Session 19).** The two systems mean different things by "delay":
+- **Engine** `email_sequence` step `delay` = the wait **after the previous step** (step 1 = 0). v1 is 0/7/7, which puts the steps on days 0/7/14.
+- **Instantly** step `delay` = the wait **before the NEXT email** (spec: "The delay value before sending the NEXT email").
+- **So S20 maps engine step N's delay onto Instantly step N−1:**
+  - Instantly step 1 gets engine step 2's delay;
+  - Instantly step 2 gets engine step 3's delay;
+  - the last Instantly step has no next email, so S20 picks its value and records why (help discourages 0).
+- `diffCampaign` and `campaign_sequence_drift` compare through the same mapping.
+- A pure test (DoD row **M1**) pins it.
+- **S22** uses different delays per step (e.g. 5 min vs 20 min) to confirm the mapping live. That also settles the open "which step's `delay` sets the gap" row in `06` §6.
+
+**S19 as built (Session 19, 2026-09-26) — ✅ tested locally** (mocked writer and Telegram, synthetic fixtures). The writer v10 output is also **verified with provider**: one live Anthropic call on a synthetic fixture, not a send. Evidence in `07` Session 19.
+- **Migration `0009d_instantly_enrollments.sql`** (applied by the operator; verification in `07`):
+  - table `instantly_enrollments` (RLS, `trg_updated_at`, at most one live enrollment per lead);
+  - `record_provider_send(account, date, quota, email_id)`: key `provider_sent:<email_id>`, `used`/`accepted` +1 only on the first delivery, a quota that never rises;
+  - **`approve_email_sequence`** (added in plan mode): approves every step or none, fenced on all of the lead's pending outbound touches. PostgREST cannot fence N rows atomically.
+- **Settings** (operator-approved `--apply`, `scripts/update-u6c-sequence-settings.ts`):
+  - `email_sequence` v1 = 0/7/7 days after the previous step, i.e. days 0/7/14. The schema refuses any production delay that is not whole days in multiples of 7, a step 1 delay ≠ 0, and writer steps after a template step.
+  - `followup_templates` v1 = the operator's honest close; `{first_name}` is the only placeholder allowed.
+  - `writer_prompt_email` v10 = v9 with STEP VARIANTS replaced by a SEQUENCE block, and output `{steps:[…]}`.
+- **Draft stage** (`stages/draft/{core,sequence}.ts`):
+  - One writer call for steps 1–2; step 3 from the template. The compliance footer goes on every step.
+  - The claim guard runs on every step: template mode (no `no_cited_evidence`), a freshness offset, step 1's subject checked only with step 1.
+  - Holds, all to `manual_hold` with 0 touches:
+    - `claim_guard_hold` (`{steps:[{step, reasons, violations}]}` plus the flat list);
+    - `sequence_shape_invalid` (retry once);
+    - `template_variable_missing` (no first name, no retry).
+  - On success: one multi-row insert of N touches (follow-up subject null) and one card.
+- **Approval** (`sending/sequence-approval.ts`, `telegram/handler.ts`):
+  - A `SequenceApprovalSnapshot` binds, per step, the rendered subject (`Re: <step 1>` for follow-ups), the composed body, delay and ledger, plus recipient, sender, signature, campaign and setting version.
+  - One hash on every touch. The pending set must equal the active sequence.
+  - Freshness is re-checked with offsets at the approval instant.
+  - `✏️ Edit N` = approve with step N replaced (operator decision).
+  - Kill kills the whole sequence.
+- **Card.** Every step with "+7 days · same thread", "Instantly adds a quote of step 1 below" on steps ≥ 2, and claims with evidence id, date and excerpt. A length ladder keeps it one message ≤ 4096 characters (the D1 card was 2,590).
+- **Preflight hash bridge** (operator decision): a sequence-approved touch's hash is rebuilt from all its steps plus the ACTIVE `email_sequence`. No new refusals. A sequence-approved step 2 stays unsendable by the engine: its null subject fails the old `Re:` check.
+- **Tests:**
+
+  | Suite | Result |
+  |---|---|
+  | `pnpm test:sequence` (new; D1–D4, A1–A4, F1–F4, 22 d / 24 d, kill, the RPC fence, no first name, `record_provider_send`) | **90/90** |
+  | `pnpm test:sequence-rules` (new, pure) | **34/34** |
+  | `test:claim-guard` | **91/91** |
+  | `test:traversal` | **62/62** |
+  | `test:send` | 78/78 |
+  | `test:webhooks` | 58/58 |
+  | `test:jobs` | 63/63 |
+  | `test:scheduler` | 80/80 |
+  | `test:claims` | 45/45 |
+  | `test:sending` | 69/69 |
+  | `test:instantly` | 81/81 |
+
+  Also clean: `tsc`, `build`, eslint on changed files. Live `test-draft --limit 1`: 80/80, $0.0167, 1 writer call.
+- **Deviations:**
+  - The U6b 29-day case now holds on step 2 (29 d + 7 d > 30 d). In practice a sequence needs evidence ≤ 23 days old.
+  - Malformed writer output is now held as `sequence_shape_invalid`, not `claim_guard_hold`.
+  - `test-validation` still fails 1 case, which predates this session (`06` §6).
+
+**S20 scope additions (operator, Session 19, from the live v10 draft).** The guard passed a draft whose step 2 repeated step 1's observation and generalised. Step 1 also contradicted its own evidence ("fill out the form" vs E1 "rather than a routed form") and added "the next showing".
+- **(a) Deterministic check `step2_repeats_step1`.** Step 2 must cite ≥ 1 evidence id that step 1 does not cite. Otherwise: one revision retry, then hold (`manual_hold`, reason `step2_repeats_step1`), and it is re-checked at approval. DoD: a step 2 citing only step 1's ids → retry → hold; a step 2 citing a new id → passes.
+- **(b) `writer_prompt_email` v11** (versioned, dry run then `--apply` after the operator's OK):
+  - no claims about visitor or buyer behaviour ("they fill out the form and wait") unless the evidence states it;
+  - no generic "usually / most / often" statements;
+  - step 2 must use a different evidence item than step 1.
+- **(c)** The semantic gap (06 §6, claim guard interim gap (a)) stays covered only by operator review until U15/U17.
+
 **Tests / DoD** (mocked Instantly and writer, synthetic fixtures, exact reasons):
 
 | # | Case | Expected |
@@ -567,6 +633,7 @@ All existing guard, draft and approval tests stay green. A live `test-draft --li
 | R1 | engine `replied`, Instantly still Active | sweep deletes + `stopped_lead_active` |
 | R2 | unknown Active lead in a `zx-sender` campaign | `unknown_active_lead`, no mutation |
 | C1 | `--update` with leads > 0 or not paused | `campaign_has_leads` / `campaign_not_paused` |
+| M1 | (S20, pure) engine delays → Instantly step delays | engine 0/7/7 → Instantly `7`, `7`, `<last>`; distinct case engine 0/7/14 → `7`, `14`, `<last>`. An unshifted (0/7/…) or doubly shifted mapping fails |
 
 - Existing suites green: `test:send` (step-2 reply cases rewritten to E6), `test:webhooks`, `test:traversal`, `test:claim-guard`, `test:claims`, `test:sending`, `test:instantly`, `test:jobs`, `test:scheduler`, `tsc`, `build`.
 - One live writer v10 call on a synthetic fixture (≈ $0.01–0.02).
@@ -594,7 +661,7 @@ All existing guard, draft and approval tests stay green. A live `test-draft --li
 **Effort.** 1 planning session (S17) + **5 sessions**:
 - S18: spike;
 - S19: migration, settings, writer v10, per-step guard + freshness, approval, card and edit;
-- S20: enroll variables, preflight, reply path disabled, adapter + campaign `--update`;
+- S20: enroll variables, preflight, reply path disabled, adapter + campaign `--update`, the delay mapping (M1), `step2_repeats_step1` and writer v11 (Session 19 additions);
 - S21: tracking, recipient check, `stopSequence`, reconcile sweep;
 - S22: engine drill + prod PATCHes.
 
@@ -1094,7 +1161,7 @@ Carried from `05-build-plan.md` §4, still valid:
 | U4 | Instantly adapter | 4 | 2 | Instantly | partial | U2 |
 | U5 | Send stage, preflight, guards | 4 | 3 | Instantly | yes | U3, U4 |
 | **U6** | **Webhooks, reply freeze, suppression** 🚩 | 4 | 4 (re-test done Session 16 → STOP; 🚩 moves to U6c) | Instantly | yes | U2, U5 |
-| **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; **S18 spike passed (Session 18); S19 next** | 4 | 1 plan + 5 (S18 spike ✅ · S19–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven live by the S18 spike) | U6, U6b |
+| **U6c** | **Instantly-owned follow-up steps** 🚩 — planned Session 17; S18 spike passed (Session 18); **S19 done (Session 19); S20 next** | 4 | 1 plan + 5 (S18 spike ✅ · S19 ✅ · S20–S21 build · S22 drill) | Instantly, Anthropic | yes (mechanics proven live by the S18 spike) | U6, U6b |
 | **U6b** | **Claim guard (interim slice)** ⛔ gates prospect sends — ✅ tested locally (Session 15) | 4 | 1 | Anthropic | yes | U6 |
 | U7 | Reply classifier + routing policy | 4 | 2 | Anthropic | yes | U6 |
 | **UD** | **Apply design system** 🎨 | 3 (§3) | 2 | — | yes | U1 + the design system |

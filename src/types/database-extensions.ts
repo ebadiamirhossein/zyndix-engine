@@ -311,3 +311,59 @@ export type DatabaseWithWebhooks = Omit<DatabaseWithSending, "public"> & {
     };
   };
 };
+
+type WebhookTables = DatabaseWithWebhooks["public"]["Tables"];
+
+export type InstantlyEnrollmentState = "active" | "stopping" | "removed" | "completed" | "stop_failed";
+
+export type InstantlyEnrollmentRowShape = {
+  id: string;
+  lead_id: string;
+  send_account_id: string;
+  campaign_id: string;
+  provider_lead_id: string | null;
+  sequence_hash: string;
+  steps_total: number;
+  state: InstantlyEnrollmentState;
+  stop_reason: string | null;
+  removed_at: string | null;
+  last_checked_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+/**
+ * Table and RPCs added in 0009d_instantly_enrollments.sql (09 §U6c, Session
+ * 19) — merge into database.ts after gen:types. Both RPCs return jsonb; the
+ * callers Zod-parse the shape.
+ */
+export type DatabaseWithEnrollments = Omit<DatabaseWithWebhooks, "public"> & {
+  public: Omit<DatabaseWithWebhooks["public"], "Tables" | "Functions"> & {
+    Tables: WebhookTables & {
+      instantly_enrollments: {
+        Row: InstantlyEnrollmentRowShape;
+        Insert: Partial<InstantlyEnrollmentRowShape> &
+          Pick<InstantlyEnrollmentRowShape, "lead_id" | "send_account_id" | "campaign_id" | "sequence_hash" | "steps_total">;
+        Update: Partial<InstantlyEnrollmentRowShape>;
+        Relationships: [];
+      };
+    };
+    Functions: DatabaseWithWebhooks["public"]["Functions"] & {
+      record_provider_send: {
+        Args: { p_send_account_id: string; p_date: string; p_quota: number; p_email_id: string };
+        Returns: Json;
+      };
+      approve_email_sequence: {
+        Args: {
+          p_lead_id: string;
+          p_steps: Json;
+          p_hash: string;
+          p_snapshot: Json;
+          p_send_account_id: string;
+          p_approved_by: string;
+        };
+        Returns: Json;
+      };
+    };
+  };
+};

@@ -20,7 +20,9 @@
     "test:webhook-rules": "tsx --test src/lib/webhooks/instantly.test.ts",
     "test:traversal": "tsx scripts/test-u6-traversal.ts",
     "test:claims": "tsx --test src/lib/stages/draft/claims.test.ts",
-    "test:claim-guard": "tsx scripts/test-u6b-claims.ts"
+    "test:claim-guard": "tsx scripts/test-u6b-claims.ts",
+    "test:sequence-rules": "tsx --test src/lib/stages/draft/sequence.test.ts",
+    "test:sequence": "tsx scripts/test-u6c-sequence.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

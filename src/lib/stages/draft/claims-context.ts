@@ -141,11 +141,15 @@ export async function loadClaimContext(
   };
 }
 
+/** Per-step options (09 §U6c): template mode, freshness offset, step label. */
+export type ClaimStepOptions = { mode?: "writer" | "template"; offsetDays?: number; stepNo?: number };
+
 /** Runs the guard on exactly this subject and body (the footer is stripped first). */
 export function runClaimCheck(
   ctx: ClaimContext,
   draft: { subject: string; body: string; claims: Claim[] },
   now: Date = new Date(),
+  step: ClaimStepOptions = {},
 ): ClaimCheckResult {
   const { content } = splitComplianceFooter(draft.body, ctx.complianceFooter);
   return checkClaims({
@@ -163,5 +167,8 @@ export function runClaimCheck(
     visibleTools: ctx.visibleTools,
     contradictions: ctx.contradictions,
     contextTexts: ctx.contextTexts,
+    mode: step.mode,
+    offsetDays: step.offsetDays,
+    stepNo: step.stepNo,
   });
 }

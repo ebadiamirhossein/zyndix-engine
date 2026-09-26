@@ -22,6 +22,11 @@
  * tech scan) so the claim guard can judge it, the stage is scoped to the
  * fixture lead ids, and the run prints the writer's claim ledger and the
  * guard's verdict. A claim-guard hold is reported, not hidden.
+ *
+ * Session 19 (09 §U6c): the writer (v10) returns steps 1–2 and the stage adds
+ * the step-3 template, so each fixture yields 3 touches and ONE card. Every
+ * step is checked; the claim guard re-runs over the whole sequence; approve
+ * binds all 3 under one sequence hash.
  */
 import { config } from "dotenv";
 import { resolve } from "node:path";
@@ -36,12 +41,14 @@ import { createTelegramClient } from "../src/lib/integrations/telegram";
 import { createSettingsStore } from "../src/lib/settings/core";
 import { createStateStore } from "../src/lib/state/core";
 import { runDraftStage } from "../src/lib/stages/draft/core";
-import { formatViolations } from "../src/lib/stages/draft/claims";
-import { loadClaimContext, runClaimCheck } from "../src/lib/stages/draft/claims-context";
+import { loadClaimContext } from "../src/lib/stages/draft/claims-context";
+import { checkSequenceClaims, formatStepViolations } from "../src/lib/stages/draft/sequence";
+import { recomputeSequenceHash } from "../src/lib/sending/sequence-approval";
+import { emailSequenceSchema } from "../src/lib/validation/jsonb";
 import { claimLedgerSchema } from "../src/lib/validation/llm";
 import { checkGenericDraft, wordCount } from "../src/lib/stages/draft/guard";
 import { processTelegramUpdate } from "../src/lib/telegram/handler";
-import { approvalHash, buildApprovalSnapshot, findSignOff } from "../src/lib/sending/approval";
+import { findSignOff } from "../src/lib/sending/approval";
 import type { DatabaseWithSending } from "../src/types/database-extensions";
 
 const url = process.env.SUPABASE_URL;
@@ -335,6 +342,8 @@ async function main(): Promise<void> {
   const complianceFooter = String(footerSetting.value);
   const proofSetting = await settings.getActiveSetting("proof_points");
   const proofPoints = proofSetting.value as Record<string, string | null>;
+  const sequenceSetting = await settings.getActiveSetting("email_sequence");
+  const sequence = emailSequenceSchema.parse(sequenceSetting.value);
 
   const fixtures: Fixture[] = [];
   try {
@@ -376,9 +385,9 @@ async function main(): Promise<void> {
 
     const { data: touches } = await (db as unknown as SupabaseClient<DatabaseWithSending>)
       .from("touches")
-      .select("id, lead_id, status, subject, draft_body, body, prompt_version, claim_ledger")
+      .select("id, lead_id, step_no, status, subject, draft_body, body, prompt_version, claim_ledger")
       .in("lead_id", fixtureLeadIds)
-      .order("created_at", { ascending: false });
+      .order("step_no", { ascending: true });
 
     const { data: qualifications } = await db
       .from("qualification")
@@ -390,131 +399,116 @@ async function main(): Promise<void> {
     console.log("\n--- Drafts (full) ---");
     for (const fixture of fixtures) {
       const lead = (after ?? []).find((row) => row.id === fixture.leadId);
-      const touch = (touches ?? []).find((row) => row.lead_id === fixture.leadId);
+      const leadTouches = (touches ?? []).filter((row) => row.lead_id === fixture.leadId);
 
-      if (!touch) {
+      if (leadTouches.length === 0) {
         console.log(`\n[${fixture.companyName}] lead=${fixture.leadId} — NO TOUCH`);
-        const { data: hold } = await db
+        const { data: holds } = await db
           .from("lead_events")
-          .select("detail")
+          .select("event, detail")
           .eq("lead_id", fixture.leadId)
-          .eq("event", "claim_guard_hold")
-          .maybeSingle();
-        if (hold) console.log(`CLAIM GUARD HOLD:\n${JSON.stringify(hold.detail, null, 2)}`);
-        assert(`${fixture.leadId} touch exists`, false, `state=${lead?.state}`);
+          .in("event", ["claim_guard_hold", "sequence_shape_invalid", "template_variable_missing"]);
+        for (const hold of holds ?? []) console.log(`${(hold.event ?? "hold").toUpperCase()}:\n${JSON.stringify(hold.detail, null, 2)}`);
+        assert(`${fixture.leadId} touches exist`, false, `state=${lead?.state}`);
         continue;
       }
 
-      const body = touch.draft_body ?? "";
-      const modelBody = body.includes(complianceFooter.trim())
-        ? body.replace(`\n\n${complianceFooter.trim()}`, "").trim()
-        : body.split("\n\nZyndix, MB")[0]?.trim() ?? body;
-      const wc = wordCount(modelBody);
-
       console.log(`\n[${fixture.companyName}] lead=${fixture.leadId}`);
-      console.log(`SUBJECT: ${touch.subject ?? ""}`);
-      console.log(`BODY — model (${wc} words):\n${modelBody}`);
-      console.log(`FULL (${wordCount(body)} words total with signature)`);
-
-      // U6b: the ledger the writer returned, and the guard re-run on it.
-      const ledger = claimLedgerSchema.safeParse(touch.claim_ledger);
-      console.log(`CLAIMS (${ledger.success ? ledger.data.length : "invalid"}):`);
-      for (const claim of ledger.success ? ledger.data : []) {
-        console.log(`  [${claim.kind}] "${claim.span}" ← ${claim.evidence_ids.join(",") || "—"}`);
-      }
-      assert(`${fixture.leadId} claim ledger stored`, ledger.success && ledger.data.length > 0);
-      if (ledger.success) {
-        const ctx = await loadClaimContext(db, settings.getActiveSetting, fixture.leadId);
-        const verdict = runClaimCheck(ctx, { subject: touch.subject ?? "", body, claims: ledger.data });
-        assert(
-          `${fixture.leadId} claim guard re-check passes`,
-          verdict.ok,
-          verdict.ok ? "" : formatViolations(verdict.violations).join(" | "),
-        );
-      }
-
+      assert(
+        `${fixture.leadId} 3 touches, steps 1–3 (U6c)`,
+        leadTouches.map((t) => t.step_no).join() === sequence.steps.map((st) => st.step_no).join(),
+        leadTouches.map((t) => t.step_no).join(),
+      );
       assert(`${fixture.leadId} → pending_approval`, lead?.state === "pending_approval", lead?.state);
-      assert(`${fixture.leadId} touch exists`, true);
-      assert(
-        `${fixture.leadId} touch status pending_approval`,
-        touch.status === "pending_approval",
-        touch.status ?? "missing",
-      );
-      assert(`${fixture.leadId} draft_body set`, Boolean(touch.draft_body?.trim()));
-      assert(`${fixture.leadId} body null`, touch.body === null, String(touch.body));
-      assert(
-        `${fixture.leadId} prompt_version recorded`,
-        typeof touch.prompt_version === "number" && touch.prompt_version > 0,
-        String(touch.prompt_version),
-      );
-      assert(`${fixture.leadId} model body ≤120 words`, wc <= 120, String(wc));
+      assert(`${fixture.leadId} only step 1 has a subject`, Boolean(leadTouches[0]?.subject?.trim()) && leadTouches.slice(1).every((t) => t.subject === null));
 
-      const bodyLower = modelBody.toLowerCase();
-      for (const phrase of BANNED_PHRASES) {
-        assert(`${fixture.leadId} no banned phrase "${phrase}"`, !bodyLower.includes(phrase));
-      }
+      const stepDrafts = [];
+      for (const touch of leadTouches) {
+        const spec = sequence.steps.find((st) => st.step_no === touch.step_no);
+        const source = spec?.source ?? "writer";
+        const body = touch.draft_body ?? "";
+        const modelBody = body.includes(complianceFooter.trim())
+          ? body.replace(`\n\n${complianceFooter.trim()}`, "").trim()
+          : body.split("\n\nZyndix, MB")[0]?.trim() ?? body;
+        const wc = wordCount(modelBody);
+        const label = `${fixture.leadId} step ${touch.step_no}`;
 
-      const qual = qualByLead.get(fixture.leadId);
-      if (qual) {
-        const tools = Array.isArray(qual.visible_tools)
-          ? qual.visible_tools.filter((t): t is string => typeof t === "string")
-          : [];
-        const evidence = Array.isArray(qual.evidence)
-          ? qual.evidence
-              .filter(
-                (item): item is { observation: string } =>
-                  typeof item === "object" &&
-                  item !== null &&
-                  "observation" in item &&
-                  typeof (item as { observation: unknown }).observation === "string",
-              )
-              .map((item) => ({ observation: item.observation }))
-          : [];
-        const segmentKey = qual.segment ?? "us-realestate";
-        const proofPoint = proofPoints[segmentKey] ?? null;
+        console.log(`\n  STEP ${touch.step_no} (${source}, day ${spec ? sequence.steps.filter((x) => x.step_no <= spec.step_no).reduce((n, x) => n + x.delay, 0) : "?"})`);
+        console.log(`  SUBJECT: ${touch.subject ?? `(none — Instantly renders "Re: ${leadTouches[0]?.subject ?? ""}")`}`);
+        console.log(`  BODY — model (${wc} words):\n${modelBody.replace(/^/gm, "    ")}`);
 
-        const guard = checkGenericDraft({
-          body: modelBody,
-          problemHypothesis: qual.problem_hypothesis,
-          companyName: fixture.companyName,
-          companyDomain: null,
-          visibleTools: tools,
-          evidence,
-          proofPoint,
-          numberSourceTexts: [
-            qual.problem_hypothesis,
-            ...evidence.map((e) => e.observation),
-            proofPoint ?? "",
-          ],
-        });
-        assert(
-          `${fixture.leadId} generic guard`,
-          guard.ok,
-          guard.ok ? guard.matched : guard.reason,
-        );
+        const ledger = claimLedgerSchema.safeParse(touch.claim_ledger);
+        console.log(`  CLAIMS (${ledger.success ? ledger.data.length : "invalid"}):`);
+        for (const claim of ledger.success ? ledger.data : []) {
+          console.log(`    [${claim.kind}] "${claim.span}" ← ${claim.evidence_ids.join(",") || "—"}`);
+        }
+        assert(`${label} claim ledger stored`, ledger.success && (source === "template" || ledger.data.length > 0));
+        stepDrafts.push({ step_no: touch.step_no ?? 0, source, subject: touch.subject, body, claims: ledger.success ? ledger.data : [] });
 
-        if (!proofPoint) {
-          for (const pattern of CLIENT_CLAIM_PATTERNS) {
-            assert(
-              `${fixture.leadId} no client claim "${pattern}" without proof`,
-              !bodyLower.includes(pattern),
-            );
+        assert(`${label} touch status pending_approval`, touch.status === "pending_approval", touch.status ?? "missing");
+        assert(`${label} draft_body set`, Boolean(touch.draft_body?.trim()));
+        assert(`${label} body null`, touch.body === null, String(touch.body));
+        assert(`${label} prompt_version recorded`, typeof touch.prompt_version === "number" && touch.prompt_version > 0, String(touch.prompt_version));
+        assert(`${label} model body ≤120 words`, wc <= 120, String(wc));
+
+        const bodyLower = modelBody.toLowerCase();
+        for (const phrase of BANNED_PHRASES) {
+          assert(`${label} no banned phrase "${phrase}"`, !bodyLower.includes(phrase));
+        }
+
+        const qual = qualByLead.get(fixture.leadId);
+        if (qual && source === "writer") {
+          const tools = Array.isArray(qual.visible_tools)
+            ? qual.visible_tools.filter((t): t is string => typeof t === "string")
+            : [];
+          const evidence = Array.isArray(qual.evidence)
+            ? qual.evidence
+                .filter(
+                  (item): item is { observation: string } =>
+                    typeof item === "object" &&
+                    item !== null &&
+                    "observation" in item &&
+                    typeof (item as { observation: unknown }).observation === "string",
+                )
+                .map((item) => ({ observation: item.observation }))
+            : [];
+          const segmentKey = qual.segment ?? "us-realestate";
+          const proofPoint = proofPoints[segmentKey] ?? null;
+
+          const guard = checkGenericDraft({
+            body: modelBody,
+            problemHypothesis: qual.problem_hypothesis,
+            companyName: fixture.companyName,
+            companyDomain: null,
+            visibleTools: tools,
+            evidence,
+            proofPoint,
+            numberSourceTexts: [qual.problem_hypothesis, ...evidence.map((e) => e.observation), proofPoint ?? ""],
+          });
+          assert(`${label} generic guard`, guard.ok, guard.ok ? guard.matched : guard.reason);
+
+          if (!proofPoint) {
+            for (const pattern of CLIENT_CLAIM_PATTERNS) {
+              assert(`${label} no client claim "${pattern}" without proof`, !bodyLower.includes(pattern));
+            }
           }
         }
 
         // Session 12: the footer carries address + opt-out only; the mailbox
         // signature is added at send, so the body must not sign itself.
-        assert(
-          `${fixture.leadId} compliance footer appended`,
-          body.includes("Gerosios Vilties") && /reply stop/i.test(body),
-          body.slice(-160),
-        );
-        assert(`${fixture.leadId} body does not sign itself (Session 12)`, findSignOff(body) === null, findSignOff(body) ?? "");
-        assert(
-          `${fixture.leadId} no fake Dallas placeholder`,
-          !body.includes("1234 Example St") && !body.includes("Dallas, TX"),
-        );
+        assert(`${label} compliance footer appended`, body.includes("Gerosios Vilties") && /reply stop/i.test(body), body.slice(-160));
+        assert(`${label} body does not sign itself (Session 12)`, findSignOff(body) === null, findSignOff(body) ?? "");
+        assert(`${label} no fake Dallas placeholder`, !body.includes("1234 Example St") && !body.includes("Dallas, TX"));
       }
+
+      // U6b/U6c: the guard re-run over the whole sequence (per-step freshness, template mode).
+      const ctx = await loadClaimContext(db, settings.getActiveSetting, fixture.leadId);
+      const verdict = checkSequenceClaims(ctx, stepDrafts, sequence);
+      assert(
+        `${fixture.leadId} claim guard re-check passes (every step)`,
+        verdict.ok,
+        verdict.ok ? "" : formatStepViolations(verdict.failures).join(" | "),
+      );
     }
 
     // --- Telegram ✅ path, driven against the fixture touch -----------------
@@ -522,7 +516,7 @@ async function main(): Promise<void> {
     // sendMessage branch instead of editMessage, which would need a real
     // Telegram message_id that sendApproval does not return.
     console.log("\n--- Telegram approve path (fixture touch) ---");
-    const firstTouch = (touches ?? []).find((t) => t.lead_id === fixtures[0]?.leadId);
+    const firstTouch = (touches ?? []).find((t) => t.lead_id === fixtures[0]?.leadId && t.step_no === 1);
     const approverId = Number.parseInt(allowedIds[0] ?? "", 10);
 
     if (firstTouch && Number.isFinite(approverId)) {
@@ -555,48 +549,40 @@ async function main(): Promise<void> {
         { skipStore: true },
       );
 
-      const { data: approvedTouch } = await db
-        .from("touches")
-        .select("status, body, draft_body")
-        .eq("id", firstTouch.id)
-        .single();
       const approvedLead = await state.getLead(fixtures[0]!.leadId);
-
-      assert(
-        "approve → touch status approved",
-        approvedTouch?.status === "approved",
-        approvedTouch?.status ?? "missing",
-      );
-      assert(
-        "approve → body copied from draft_body",
-        Boolean(approvedTouch?.body) && approvedTouch?.body === approvedTouch?.draft_body,
-      );
-      assert(
-        "approve → lead state approved",
-        approvedLead.state === "approved",
-        approvedLead.state,
-      );
-
-      // U5: the approval is bound to the exact content and recipient.
-      const { data: binding } = await (db as unknown as SupabaseClient<DatabaseWithSending>)
+      // U5/U6c: the approval is bound to every step's exact content, the
+      // recipient, the sender and its signature, under ONE sequence hash.
+      const { data: bindings } = await (db as unknown as SupabaseClient<DatabaseWithSending>)
         .from("touches")
-        .select("id, step_no, channel, subject, body, prompt_version, approval_hash, approved_by, approved_at, send_account_id, claim_ledger")
-        .eq("id", firstTouch.id)
-        .single();
+        .select("id, step_no, channel, subject, body, draft_body, prompt_version, status, approval_hash, approved_by, approved_at, send_account_id, claim_ledger")
+        .eq("lead_id", fixtures[0]!.leadId)
+        .order("step_no");
+      const all = bindings ?? [];
+      const binding = all[0];
+
+      assert("approve → all 3 touches approved (U6c)", all.length === 3 && all.every((t) => t.status === "approved"), all.map((t) => t.status).join(","));
+      assert("approve → body copied from draft_body", all.every((t) => Boolean(t.body) && t.body === t.draft_body));
+      assert("approve → lead state approved", approvedLead.state === "approved", approvedLead.state);
+
       // Session 12: approval fixes the sender, and the hash covers its signature.
       const { data: boundSender } = binding?.send_account_id
         ? await (db as unknown as SupabaseClient<DatabaseWithSending>)
             .from("send_accounts")
-            .select("id, signature_text")
+            .select("id, signature_text, instantly_campaign_id")
             .eq("id", binding.send_account_id)
             .single()
         : { data: null };
-      const expectedHash = binding
-        ? approvalHash(buildApprovalSnapshot(binding, { id: approvedLead.id, email: approvedLead.email }, boundSender))
+      const expectedHash = boundSender
+        ? recomputeSequenceHash({
+            lead: { id: approvedLead.id, email: approvedLead.email },
+            sender: boundSender,
+            sequence: { version: sequenceSetting.version, value: sequence },
+            touches: all,
+          })
         : null;
       assert(
-        "approve → approval_hash binds subject/body/recipient (U5)",
-        Boolean(binding?.approval_hash) && binding?.approval_hash === expectedHash,
+        "approve → one sequence hash binds every step, recipient, sender (U5/U6c)",
+        new Set(all.map((t) => t.approval_hash)).size === 1 && Boolean(binding?.approval_hash) && binding?.approval_hash === expectedHash,
       );
       assert(
         "approve → sender fixed at approval with a signature (Session 12)",

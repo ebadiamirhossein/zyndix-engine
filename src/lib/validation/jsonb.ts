@@ -210,6 +210,98 @@ export const evidencePolicySchema = z
   .strict();
 
 /**
+ * email_sequence (09 §U6c): the steps of one outbound email sequence. Step 1
+ * is enrolled by the engine; steps >= 2 are Instantly campaign steps.
+ *
+ * `delay` is the wait AFTER THE PREVIOUS STEP (step 1 = 0), so v1's 0/7/7
+ * means days 0/7/14. Instantly's own step `delay` is the wait before the NEXT
+ * email, so S20 maps engine step N's delay onto Instantly step N-1 (06 §6).
+ *
+ * Production rule (operator, Session 17): every delay is whole days and a
+ * multiple of 7, so each follow-up lands on step 1's weekday and local time
+ * on the unchanged 24/7 schedule. Drill minute-delays are never stored here.
+ */
+export const EMAIL_SEQUENCE_SOURCES = ["writer", "template"] as const;
+
+export const emailSequenceStepSchema = z
+  .object({
+    step_no: z.number().int().positive(),
+    delay: z.number().int().nonnegative(),
+    delay_unit: z.enum(["minutes", "hours", "days"]),
+    source: z.enum(EMAIL_SEQUENCE_SOURCES),
+  })
+  .strict();
+
+export const emailSequenceSchema = z
+  .object({
+    steps: z.array(emailSequenceStepSchema).min(1),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    let templateSeen = false;
+    data.steps.forEach((step, i) => {
+      const path = ["steps", i];
+      if (step.step_no !== i + 1) {
+        ctx.addIssue({ code: "custom", message: `step_no must be contiguous from 1 (got ${step.step_no} at position ${i + 1})`, path: [...path, "step_no"] });
+      }
+      if (step.delay_unit !== "days") {
+        ctx.addIssue({ code: "custom", message: `production delays are whole days (step ${step.step_no} uses ${step.delay_unit})`, path: [...path, "delay_unit"] });
+      }
+      if (step.delay % 7 !== 0) {
+        ctx.addIssue({ code: "custom", message: `production delay must be a multiple of 7 days (step ${step.step_no}: ${step.delay})`, path: [...path, "delay"] });
+      }
+      if (i === 0 && step.delay !== 0) {
+        ctx.addIssue({ code: "custom", message: "step 1 has delay 0 (it goes out when enrolled)", path: [...path, "delay"] });
+      }
+      if (i > 0 && step.delay === 0) {
+        ctx.addIssue({ code: "custom", message: `follow-up step ${step.step_no} needs a delay > 0`, path: [...path, "delay"] });
+      }
+      if (i === 0 && step.source !== "writer") {
+        ctx.addIssue({ code: "custom", message: "step 1 is written by the writer", path: [...path, "source"] });
+      }
+      if (step.source === "template") templateSeen = true;
+      else if (templateSeen) {
+        ctx.addIssue({ code: "custom", message: "writer steps come before template steps", path: [...path, "source"] });
+      }
+    });
+  });
+
+/** Placeholders a follow-up template may use; anything else is refused. */
+export const FOLLOWUP_TEMPLATE_PLACEHOLDERS = ["first_name"] as const;
+
+export const followupTemplateSchema = z
+  .object({
+    step_no: z.number().int().min(2),
+    id: z.string().min(1),
+    body: z.string().min(1),
+  })
+  .strict()
+  .superRefine((template, ctx) => {
+    for (const m of template.body.matchAll(/\{([^{}]*)\}/g)) {
+      if (!(FOLLOWUP_TEMPLATE_PLACEHOLDERS as readonly string[]).includes(m[1]!)) {
+        ctx.addIssue({ code: "custom", message: `unknown placeholder {${m[1]}} (allowed: {first_name})`, path: ["body"] });
+      }
+    }
+    if (/[{}]/.test(template.body.replace(/\{first_name\}/g, ""))) {
+      ctx.addIssue({ code: "custom", message: "stray brace in template body", path: ["body"] });
+    }
+  });
+
+/** followup_templates (09 §U6c): fixed, operator-written step texts. */
+export const followupTemplatesSchema = z
+  .object({
+    templates: z.array(followupTemplateSchema).min(1),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    const seen = new Set<number>();
+    for (const t of data.templates) {
+      if (seen.has(t.step_no)) ctx.addIssue({ code: "custom", message: `duplicate template for step ${t.step_no}`, path: ["templates"] });
+      seen.add(t.step_no);
+    }
+  });
+
+/**
  * send_policy (09 §U5): the thresholds preflight judges against. A versioned
  * settings record, not code, so tightening or loosening one is a new version
  * with a change note. A missing key holds every send (never defaulted).

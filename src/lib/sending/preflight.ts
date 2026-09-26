@@ -1,8 +1,14 @@
 import type { z } from "zod";
 
 import { nextSendWindow, type SendWindow } from "@/lib/scheduler/windows";
-import { approvalHash, buildApprovalSnapshot, normalizeSignature } from "@/lib/sending/approval";
+import { approvalHash, buildApprovalSnapshot, normalizeSignature, threadedSubject } from "@/lib/sending/approval";
 import { checkSenderDomain } from "@/lib/sending/guard";
+import {
+  isSequenceSnapshot,
+  recomputeSequenceHash,
+  type EmailSequence,
+  type SequenceTouch,
+} from "@/lib/sending/sequence-approval";
 import { resolveRecipientTimezone, type ResolvedTimezone } from "@/lib/sending/timezone";
 import type { sendPolicySchema, sendWindowsSchema } from "@/lib/validation/jsonb";
 import { PREFLIGHT_REFUSALS, type LeadState, type PreflightRefusal } from "@/types/enums";
@@ -31,7 +37,16 @@ export type PreflightContext = {
     approval_hash: string | null;
     /** 0009c (09 §U6b): in the approval snapshot, so a changed ledger is stale. */
     claim_ledger?: unknown;
+    /** The stored snapshot: its `kind` says whether the touch was approved as a sequence (09 §U6c). */
+    approval_snapshot?: unknown;
   };
+  /**
+   * 09 §U6c: for a touch approved as part of a sequence, every step's touch
+   * (same approval hash) and the ACTIVE email_sequence setting. The hash is
+   * rebuilt from these, so a changed step, delay, sender or signature is
+   * stale. Null/absent for a sequence-approved touch → stale (fail closed).
+   */
+  sequence?: { touches: SequenceTouch[]; setting: { version: number; value: EmailSequence } } | null;
   lead: {
     id: string;
     state: LeadState;
@@ -80,11 +95,7 @@ const REPLY_STATES: readonly LeadState[] = ["replied", "classifying", "human_rev
 const BOOKING_STATES: readonly LeadState[] = ["meeting_booked", "handed_off"];
 const DAY_MS = 86_400_000;
 
-/** "Re: <subject>", without stacking prefixes. */
-export function threadedSubject(subject: string): string {
-  const s = subject.trim();
-  return /^re:/i.test(s) ? s : `Re: ${s}`;
-}
+export { threadedSubject };
 
 export function preflight(ctx: PreflightContext): PreflightResult {
   const verdicts: PreflightVerdict[] = [];
@@ -119,7 +130,13 @@ export function preflight(ctx: PreflightContext): PreflightResult {
   // Approval bound to content + recipient.
   // The sender and its signature are in the snapshot (Session 12): a touch
   // approved for another mailbox, or a signature edited since, is stale.
-  const recomputedHash = approvalHash(buildApprovalSnapshot({ ...ctx.touch, id: ctx.touch.id }, ctx.lead, ctx.sender));
+  // Session 19 (09 §U6c): a sequence-approved touch carries ONE hash over
+  // every step; it is rebuilt from all the steps, never from this touch alone.
+  const recomputedHash = isSequenceSnapshot(ctx.touch.approval_snapshot)
+    ? ((ctx.sequence
+        ? recomputeSequenceHash({ lead: ctx.lead, sender: ctx.sender, sequence: ctx.sequence.setting, touches: ctx.sequence.touches })
+        : null) ?? "sequence_not_rebuildable")
+    : approvalHash(buildApprovalSnapshot({ ...ctx.touch, id: ctx.touch.id }, ctx.lead, ctx.sender));
   if (ctx.touch.status !== "approved" || !ctx.touch.approval_hash || ctx.touch.approval_hash !== recomputedHash) {
     add("stale_approval", {
       touch_status: ctx.touch.status,

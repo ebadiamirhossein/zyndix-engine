@@ -69,6 +69,21 @@ export type ClaimCheckInput = {
   contradictions: Contradiction[];
   /** Extra texts whose lowercase words mark a sentence-initial capital as a common word (hypothesis). */
   contextTexts?: string[];
+  /**
+   * 09 §U6c. "template": a fixed, operator-written follow-up that cites no
+   * evidence — `no_cited_evidence` is skipped; every other rule applies, so a
+   * fact token, a timing, an asset claim or an offer outside the approved
+   * line is still refused. Default "writer".
+   */
+  mode?: "writer" | "template";
+  /**
+   * 09 §U6c per-step freshness (operator, Session 17): this step goes out
+   * this many days after approval, so its cited evidence must satisfy
+   * age + offsetDays <= maxAgeDays. Default 0 (step 1).
+   */
+  offsetDays?: number;
+  /** For violation details ("step 2: 24d + 7d > 30d"). */
+  stepNo?: number;
 };
 
 export type ClaimCheckResult = { ok: true } | { ok: false; violations: ClaimViolation[] };
@@ -464,21 +479,28 @@ export function checkClaims(input: ClaimCheckInput): ClaimCheckResult {
       }
     }
   }
-  if (!groundedClaim) {
+  if (!groundedClaim && (input.mode ?? "writer") === "writer") {
     add({ reason: "no_cited_evidence", detail: "no prospect_fact or inference claim cites this lead's evidence" });
   }
 
-  // Freshness (interim: one fetch date per lead).
+  // Freshness (interim: one fetch date per lead). A step that goes out
+  // offsetDays after approval must still be fresh on the day it is sent.
+  // A step citing no evidence is exempt.
   if (citesEvidence) {
+    const offset = input.offsetDays ?? 0;
+    const stepLabel = input.stepNo !== undefined && input.stepNo > 1 ? `step ${input.stepNo}: ` : "";
     if (!input.evidenceFetchedAt) {
-      add({ reason: "stale_evidence", detail: "evidence fetch date is unknown" });
+      add({ reason: "stale_evidence", detail: `${stepLabel}evidence fetch date is unknown` });
     } else {
       const fetched = new Date(input.evidenceFetchedAt);
       const ageDays = (input.now.getTime() - fetched.getTime()) / 86_400_000;
-      if (!Number.isFinite(ageDays) || ageDays > input.maxAgeDays) {
+      if (!Number.isFinite(ageDays) || ageDays + offset > input.maxAgeDays) {
         add({
           reason: "stale_evidence",
-          detail: `evidence fetched ${input.evidenceFetchedAt.slice(0, 10)}, ${Math.floor(ageDays)} days old (max ${input.maxAgeDays})`,
+          detail:
+            offset > 0
+              ? `${stepLabel}${Math.floor(ageDays)}d + ${offset}d > ${input.maxAgeDays}d (evidence fetched ${input.evidenceFetchedAt.slice(0, 10)}, sent ${offset} days after approval)`
+              : `${stepLabel}evidence fetched ${input.evidenceFetchedAt.slice(0, 10)}, ${Math.floor(ageDays)} days old (max ${input.maxAgeDays})`,
         });
       }
     }

@@ -120,6 +120,12 @@ export function approvalHash(snapshot: ApprovalSnapshot): string {
   return createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
 }
 
+/** "Re: <subject>", without stacking prefixes (how a threaded follow-up's subject renders). */
+export function threadedSubject(subject: string): string {
+  const s = subject.trim();
+  return /^re:/i.test(s) ? s : `Re: ${s}`;
+}
+
 /** The stable dispatch key for one approved version of a touch. */
 export function sendIdempotencyKey(touchId: string, hash: string): string {
   return `send:${touchId}:${hash}`;

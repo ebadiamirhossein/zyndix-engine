@@ -14,22 +14,33 @@ import {
   interpolateWriterPrompt,
 } from "@/lib/settings/cta";
 import { findSignOff } from "@/lib/sending/approval";
+import { cumulativeOffsetDays, type EmailSequence } from "@/lib/sending/sequence-approval";
 import { getSegmentProofPoint } from "@/lib/settings/proof";
 import { createStateStore } from "@/lib/state/core";
-import type {
-  cadenceDefaultSchema,
-  ctaVariantsSchema,
-  proofPointsSchema,
+import {
+  emailSequenceSchema,
+  followupTemplatesSchema,
+  type cadenceDefaultSchema,
+  type ctaVariantsSchema,
+  type proofPointsSchema,
 } from "@/lib/validation/jsonb";
-import { writerOutputSchema } from "@/lib/validation/llm";
+import { sequenceShapeIssues, writerSequenceOutputSchema } from "@/lib/validation/llm";
 import type { Database, Json } from "@/types/database";
 import type { DatabaseWithSending } from "@/types/database-extensions";
 
-import { formatViolations, type ClaimViolation } from "./claims";
-import { loadClaimContext, runClaimCheck, toClaimEvidence, type ClaimContext } from "./claims-context";
+import { loadClaimContext, toClaimEvidence, type ClaimContext } from "./claims-context";
 import { checkGenericDraft, wordCount } from "./guard";
+import {
+  checkSequenceClaims,
+  formatStepViolations,
+  renderFollowupTemplate,
+  sequenceConfigIssues,
+  writerStepNos,
+  type FollowupTemplates,
+  type SequenceStepDraft,
+  type StepViolations,
+} from "./sequence";
 
-type WriterOutput = z.infer<typeof writerOutputSchema>;
 type CadenceDefault = z.infer<typeof cadenceDefaultSchema>;
 type CtaVariants = z.infer<typeof ctaVariantsSchema>;
 type ProofPoints = z.infer<typeof proofPointsSchema>;
@@ -128,9 +139,10 @@ function asEvidence(value: unknown): { observation: string }[] {
 
 function buildWriterInput(
   lead: LeadPick,
-  cadenceStep: CadenceDefault["steps"][number],
+  sequence: EmailSequence,
   proofPoint: string | null,
 ): Record<string, unknown> {
+  const offsets = cumulativeOffsetDays(sequence);
   return {
     qualification: {
       problem_hypothesis: lead.qualification.problem_hypothesis,
@@ -149,49 +161,70 @@ function buildWriterInput(
       domain: lead.company.domain,
     },
     proof_point: proofPoint,
-    cadence_step: {
-      step: cadenceStep.step,
-      wait_days: cadenceStep.wait_days,
-      channel: cadenceStep.channel,
-      hint: cadenceStep.hint,
-      requires_approval: cadenceStep.requires_approval,
-    },
+    // 09 §U6c: the writer steps and the day each goes out (step 1 = day 0).
+    sequence: sequence.steps
+      .filter((step) => step.source === "writer")
+      .map((step) => ({ step_no: step.step_no, day: offsets.get(step.step_no) ?? 0 })),
     geo: {
       country: lead.company.country,
     },
   };
 }
 
+/**
+ * v10 output: keep only the documented keys. A follow-up's empty or null
+ * subject is dropped (it means "no subject"); a non-empty one is kept so the
+ * shape check refuses it.
+ */
 function normalizeWriterRaw(raw: unknown): unknown {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return raw;
   }
   const obj = raw as Record<string, unknown>;
+  if (!Array.isArray(obj.steps)) return { steps: obj.steps };
   return {
-    subject: obj.subject,
-    body: obj.body,
-    claims: obj.claims,
+    steps: obj.steps.map((step: unknown) => {
+      if (typeof step !== "object" || step === null || Array.isArray(step)) return step;
+      const s = step as Record<string, unknown>;
+      const subject = typeof s.subject === "string" && s.subject.trim() === "" ? undefined : (s.subject ?? undefined);
+      return { step_no: s.step_no, ...(subject === undefined ? {} : { subject }), body: s.body, claims: s.claims };
+    }),
   };
 }
 
 const RETURN_SHAPE =
-  'Return ONLY {"subject":"...","body":"...","claims":[{"span":"...","kind":"...","evidence_ids":["E1"]}]}.';
+  'Return ONLY {"steps":[{"step_no":1,"subject":"...","body":"...","claims":[{"span":"...","kind":"...","evidence_ids":["E1"]}]},{"step_no":2,"body":"...","claims":[...]}]}.';
 
-function isWordCountSchemaError(error: unknown): boolean {
+function wordCountIssueSteps(error: unknown): number[] {
   if (!error || typeof error !== "object" || !("issues" in error)) {
-    return false;
+    return [];
   }
-  const issues = (error as { issues: { message?: string; path?: unknown[] }[] })
-    .issues;
-  return issues.some(
-    (issue) =>
-      issue.path?.includes("body") &&
-      typeof issue.message === "string" &&
-      issue.message.includes("≤120 words"),
-  );
+  const issues = (error as { issues: { message?: string; path?: unknown[] }[] }).issues;
+  const steps = new Set<number>();
+  for (const issue of issues) {
+    const path = issue.path ?? [];
+    if (path[0] === "steps" && typeof path[1] === "number" && path.includes("body") && issue.message?.includes("≤120 words")) {
+      steps.add(path[1]);
+    }
+  }
+  return [...steps];
 }
 
-async function writeDraftWithGuard(
+type HoldReason = "claim_guard" | "sequence_shape_invalid" | "template_variable_missing";
+
+type SequenceWriteResult =
+  | { ok: true; steps: SequenceStepDraft[]; tokens: number; cost: number }
+  | {
+      ok: false;
+      rejections: string[];
+      /** Hold (not park): malformed/misshapen output, a missing template variable, or the claim guard refused twice. */
+      hold: boolean;
+      holdReason?: HoldReason;
+      failures?: StepViolations[];
+      lastDraft?: unknown;
+    };
+
+async function writeSequenceWithGuard(
   deps: DraftDeps,
   lead: LeadPick,
   systemPrompt: string,
@@ -201,17 +234,9 @@ async function writeDraftWithGuard(
   complianceFooter: string,
   ctaText: string,
   claimContext: ClaimContext,
-): Promise<
-  | { ok: true; output: WriterOutput; tokens: number; cost: number }
-  | {
-      ok: false;
-      rejections: string[];
-      /** Hold (not park): malformed output, or the claim guard refused twice. */
-      hold: boolean;
-      violations?: ClaimViolation[];
-      lastDraft?: unknown;
-    }
-> {
+  sequence: EmailSequence,
+  templates: FollowupTemplates,
+): Promise<SequenceWriteResult> {
   const rejections: string[] = [];
   let totalTokens = 0;
   let totalCost = 0;
@@ -219,8 +244,12 @@ async function writeDraftWithGuard(
   let guardRetryHint: string | null = null;
   let signOffRetryHint: string | null = null;
   let claimRetryHint: string | null = null;
-  let lastFailure: "nonjson" | "schema" | "signoff" | "generic" | "claims" | null = null;
+  let shapeRetryHint: string | null = null;
+  let lastFailure: "nonjson" | "shape" | "signoff" | "generic" | "claims" | null = null;
+  let lastFailures: StepViolations[] | undefined;
+  let lastDraft: unknown;
   const evidence = asEvidence(lead.qualification.evidence);
+  const expectedWriterSteps = writerStepNos(sequence);
 
   const numberSourceTexts = [
     lead.qualification.problem_hypothesis,
@@ -232,19 +261,17 @@ async function writeDraftWithGuard(
     lead.title ?? "",
   ].filter(Boolean);
 
+  const shapeHint = (problem: string) =>
+    [
+      `REVISION REQUIRED (sequence_shape_invalid): ${problem}.`,
+      `Return exactly the steps [${expectedWriterSteps.join(", ")}], in order. Only step 1 has a subject; later steps have no subject key.`,
+      RETURN_SHAPE,
+    ].join(" ");
+
   for (let attempt = 1; attempt <= 2; attempt++) {
     const userParts: string[] = [];
-    if (guardRetryHint) {
-      userParts.push(guardRetryHint);
-    }
-    if (wordCountRetryHint) {
-      userParts.push(wordCountRetryHint);
-    }
-    if (signOffRetryHint) {
-      userParts.push(signOffRetryHint);
-    }
-    if (claimRetryHint) {
-      userParts.push(claimRetryHint);
+    for (const hint of [shapeRetryHint, guardRetryHint, wordCountRetryHint, signOffRetryHint, claimRetryHint]) {
+      if (hint) userParts.push(hint);
     }
     userParts.push(JSON.stringify(writerInput, null, 2));
 
@@ -253,7 +280,7 @@ async function writeDraftWithGuard(
       user: userParts.join("\n\n"),
       model,
       temperature: draftTemperature(),
-      maxTokens: 1024,
+      maxTokens: 2048,
     });
 
     totalTokens += completion.inputTokens + completion.outputTokens;
@@ -264,58 +291,62 @@ async function writeDraftWithGuard(
       raw = normalizeWriterRaw(parseJsonText(completion.text));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      rejections.push(`attempt ${attempt}: non-json: ${message.slice(0, 120)}`);
+      rejections.push(`attempt ${attempt}: sequence_shape_invalid: non-json: ${message.slice(0, 120)}`);
       lastFailure = "nonjson";
       console.warn(`[draft] non-JSON response for lead ${lead.id}: ${message.slice(0, 120)}`);
       continue;
     }
+    lastDraft = raw;
 
-    const parsed = writerOutputSchema.safeParse(raw);
+    const parsed = writerSequenceOutputSchema.safeParse(raw);
 
     if (!parsed.success) {
-      const rawBody =
-        typeof raw === "object" &&
-        raw !== null &&
-        "body" in raw &&
-        typeof (raw as { body: unknown }).body === "string"
-          ? (raw as { body: string }).body
-          : "";
-
-      if (isWordCountSchemaError(parsed.error) && !wordCountRetryHint) {
-        const count = wordCount(rawBody);
+      const longSteps = wordCountIssueSteps(parsed.error);
+      if (longSteps.length > 0 && !wordCountRetryHint) {
+        const rawSteps = (raw as { steps?: { body?: unknown }[] }).steps ?? [];
+        const counts = longSteps.map((i) => `step ${i + 1}: ${wordCount(String(rawSteps[i]?.body ?? ""))} words`);
         wordCountRetryHint = [
-          `REVISION REQUIRED: your previous body was ${count} words.`,
-          "Cut it to ≤120 words.",
+          `REVISION REQUIRED: body too long (${counts.join(", ")}).`,
+          "Cut every body to ≤120 words.",
           RETURN_SHAPE,
         ].join(" ");
-        console.warn(
-          `[draft] word-count rejection for lead ${lead.id} (${count} words) — retrying`,
-        );
+        console.warn(`[draft] word-count rejection for lead ${lead.id} (${counts.join(", ")}) — retrying`);
         attempt -= 1;
         continue;
       }
 
-      const reason = parsed.error.issues
-        .map((issue) => issue.message)
-        .join("; ");
-      rejections.push(`attempt ${attempt}: schema: ${reason}`);
-      lastFailure = "schema";
-      console.warn(`[draft] schema rejected lead ${lead.id}: ${reason}`);
+      const reason = parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
+      rejections.push(`attempt ${attempt}: sequence_shape_invalid: ${reason}`);
+      lastFailure = "shape";
+      console.warn(`[draft] sequence_shape_invalid for lead ${lead.id}: ${reason}`);
+      if (!shapeRetryHint) shapeRetryHint = shapeHint(reason.slice(0, 300));
       continue;
     }
 
-    const output = parsed.data;
+    const shapeIssues = sequenceShapeIssues(parsed.data, expectedWriterSteps);
+    if (shapeIssues.length > 0) {
+      rejections.push(`attempt ${attempt}: sequence_shape_invalid: ${shapeIssues.join("; ")}`);
+      lastFailure = "shape";
+      console.warn(`[draft] sequence_shape_invalid for lead ${lead.id}: ${shapeIssues.join("; ")}`);
+      if (!shapeRetryHint) shapeRetryHint = shapeHint(shapeIssues.join("; "));
+      continue;
+    }
 
-    // writer_prompt_email v8 forbids a sign-off (the mailbox signature is
+    const writerSteps = parsed.data.steps;
+
+    // writer_prompt_email v8+ forbids a sign-off (the mailbox signature is
     // appended at send); approval refuses a self-signed body, so catch it here.
-    const signOff = findSignOff(output.body);
-    if (signOff) {
-      rejections.push(`attempt ${attempt}: signs itself (${JSON.stringify(signOff)})`);
+    const signed = writerSteps
+      .map((step) => ({ step: step.step_no, signOff: findSignOff(step.body) }))
+      .filter((x): x is { step: number; signOff: string } => x.signOff !== null);
+    if (signed.length > 0) {
+      const what = signed.map((x) => `step ${x.step} (${JSON.stringify(x.signOff)})`).join(", ");
+      rejections.push(`attempt ${attempt}: signs itself: ${what}`);
       lastFailure = "signoff";
       console.warn(`[draft] sign-off rejection for lead ${lead.id} — ${signOffRetryHint ? "no retry left" : "retrying"}`);
       if (!signOffRetryHint) {
         signOffRetryHint = [
-          `REVISION REQUIRED: your previous body ended with a sign-off (${JSON.stringify(signOff)}).`,
+          `REVISION REQUIRED: these bodies ended with a sign-off: ${what}.`,
           "Do NOT sign off and do NOT write any name at the end; the signature is added separately.",
           RETURN_SHAPE,
         ].join(" ");
@@ -324,83 +355,110 @@ async function writeDraftWithGuard(
       continue;
     }
 
-    const guard = checkGenericDraft({
-      body: output.body,
-      problemHypothesis: lead.qualification.problem_hypothesis,
-      companyName: lead.company.name,
-      companyDomain: lead.company.domain,
-      visibleTools: asStringArray(lead.qualification.visible_tools),
-      evidence,
-      proofPoint,
-      numberSourceTexts,
-    });
-
-    if (guard.ok) {
-      // Claim guard (09 §U6b): deterministic, on the pre-footer text.
-      const claimCheck = runClaimCheck(claimContext, output);
-      if (claimCheck.ok) {
-        const bodyWithFooter = appendComplianceFooter(output.body, complianceFooter);
-        return {
-          ok: true,
-          output: {
-            subject: output.subject,
-            body: bodyWithFooter,
-            claims: output.claims,
-          },
-          tokens: totalTokens,
-          cost: totalCost,
-        };
+    let genericFailure: { step: number; reason: string; offendingNumbers?: string[] } | null = null;
+    for (const step of writerSteps) {
+      const guard = checkGenericDraft({
+        body: step.body,
+        problemHypothesis: lead.qualification.problem_hypothesis,
+        companyName: lead.company.name,
+        companyDomain: lead.company.domain,
+        visibleTools: asStringArray(lead.qualification.visible_tools),
+        evidence,
+        proofPoint,
+        numberSourceTexts,
+      });
+      if (!guard.ok) {
+        genericFailure = { step: step.step_no, reason: guard.reason, offendingNumbers: guard.offendingNumbers };
+        break;
       }
+    }
 
-      const lines = formatViolations(claimCheck.violations);
-      rejections.push(`attempt ${attempt}: claim guard: ${lines.join(" | ")}`);
-      lastFailure = "claims";
-      console.warn(`[draft] claim guard rejected lead ${lead.id} — ${claimRetryHint ? "no retry left, holding" : "retrying"}`);
-      if (claimRetryHint) {
-        return { ok: false, rejections, hold: true, violations: claimCheck.violations, lastDraft: output };
+    if (genericFailure) {
+      const reason = `step ${genericFailure.step}: ${genericFailure.reason}`;
+      rejections.push(`attempt ${attempt}: ${reason}`);
+      lastFailure = "generic";
+      console.warn(`[draft] generic guard rejected lead ${lead.id} (${reason})`);
+
+      const isNumberRejection =
+        genericFailure.reason.includes("invented number") || genericFailure.reason.includes("invented statistic");
+      if (isNumberRejection && !guardRetryHint) {
+        const nums = genericFailure.offendingNumbers?.join(", ") ?? genericFailure.reason;
+        guardRetryHint = [
+          `REVISION REQUIRED: step ${genericFailure.step} used numbers or statistics not in the evidence.`,
+          `Problem: ${nums}.`,
+          "Remove ALL invented numbers, percentages, time thresholds, and stat phrases.",
+          "Convey urgency by describing the mechanism only.",
+          RETURN_SHAPE,
+        ].join(" ");
+        attempt -= 1;
       }
-      claimRetryHint = [
-        "REVISION REQUIRED: the claim guard refused your draft:",
-        ...lines.map((line) => `- ${line}`),
-        "Fix every item. Remove any fact you cannot cite; never state weekdays or times of day;",
-        "never say you have prepared or mapped out anything; end with the approved line verbatim.",
-        "Every claim span must be copied verbatim from the subject or body.",
-        RETURN_SHAPE,
-      ].join("\n");
-      attempt -= 1;
       continue;
     }
 
-    const reason = guard.reason;
-    rejections.push(`attempt ${attempt}: ${reason}`);
-    lastFailure = "generic";
-    console.warn(
-      `[draft] generic guard rejected lead ${lead.id} (${reason})`,
-    );
-
-    const isNumberRejection =
-      reason.includes("invented number") || reason.includes("invented statistic");
-    if (isNumberRejection && !guardRetryHint) {
-      const nums =
-        "offendingNumbers" in guard && guard.offendingNumbers
-          ? guard.offendingNumbers.join(", ")
-          : reason;
-      guardRetryHint = [
-        "REVISION REQUIRED: you used numbers or statistics not in the evidence.",
-        `Problem: ${nums}.`,
-        "Remove ALL invented numbers, percentages, time thresholds, and stat phrases.",
-        "Convey urgency by describing the mechanism only.",
-        RETURN_SHAPE,
-      ].join(" ");
-      attempt -= 1;
+    // Assemble every step of the sequence: writer steps, then template steps.
+    // The compliance footer goes on every step (each is its own email).
+    const steps: SequenceStepDraft[] = [];
+    for (const spec of sequence.steps) {
+      if (spec.source === "writer") {
+        const w = writerSteps.find((step) => step.step_no === spec.step_no)!;
+        steps.push({
+          step_no: spec.step_no,
+          source: "writer",
+          subject: spec.step_no === 1 ? (w.subject ?? "").trim() : null,
+          body: appendComplianceFooter(w.body, complianceFooter),
+          claims: w.claims,
+        });
+        continue;
+      }
+      const template = templates.templates.find((t) => t.step_no === spec.step_no)!;
+      const text = renderFollowupTemplate(template.body, { first_name: lead.first_name });
+      if (text === null) {
+        rejections.push(`step ${spec.step_no}: template_variable_missing: {first_name} has no value`);
+        return { ok: false, rejections, hold: true, holdReason: "template_variable_missing", lastDraft: raw };
+      }
+      steps.push({
+        step_no: spec.step_no,
+        source: "template",
+        subject: null,
+        body: appendComplianceFooter(text, complianceFooter),
+        claims: [],
+      });
     }
+
+    // Claim guard (09 §U6b, per step 09 §U6c): deterministic, on the pre-footer text.
+    const claimCheck = checkSequenceClaims(claimContext, steps, sequence);
+    if (claimCheck.ok) {
+      return { ok: true, steps, tokens: totalTokens, cost: totalCost };
+    }
+
+    const lines = formatStepViolations(claimCheck.failures);
+    rejections.push(`attempt ${attempt}: claim guard: ${lines.join(" | ")}`);
+    lastFailure = "claims";
+    lastFailures = claimCheck.failures;
+    // A refused template step cannot be fixed by the writer: hold at once.
+    const writerCanFix = claimCheck.failures.some((f) => sequence.steps.find((s) => s.step_no === f.step)?.source === "writer");
+    console.warn(`[draft] claim guard rejected lead ${lead.id} — ${claimRetryHint || !writerCanFix ? "holding" : "retrying"}`);
+    if (claimRetryHint || !writerCanFix) {
+      return { ok: false, rejections, hold: true, holdReason: "claim_guard", failures: claimCheck.failures, lastDraft: raw };
+    }
+    claimRetryHint = [
+      "REVISION REQUIRED: the claim guard refused your draft:",
+      ...lines.map((line) => `- ${line}`),
+      "Fix every item. Remove any fact you cannot cite; never state weekdays or times of day;",
+      "never say you have prepared or mapped out anything; any offer is the approved line verbatim.",
+      "Every claim span must be copied verbatim from that step's subject or body.",
+      RETURN_SHAPE,
+    ].join("\n");
+    attempt -= 1;
   }
 
-  return {
-    ok: false,
-    rejections,
-    hold: lastFailure === "claims" || lastFailure === "schema" || lastFailure === "nonjson",
-  };
+  if (lastFailure === "claims") {
+    return { ok: false, rejections, hold: true, holdReason: "claim_guard", failures: lastFailures, lastDraft };
+  }
+  if (lastFailure === "shape" || lastFailure === "nonjson") {
+    return { ok: false, rejections, hold: true, holdReason: "sequence_shape_invalid", lastDraft };
+  }
+  return { ok: false, rejections, hold: false };
 }
 
 async function pickDraftingLeads(
@@ -483,21 +541,30 @@ export async function runDraftStage(
     est_cost_usd: 0,
   };
 
-  const [writerSetting, cadenceSetting, ctaSetting, proofSetting, footerSetting] =
+  const [writerSetting, cadenceSetting, ctaSetting, proofSetting, footerSetting, sequenceSetting, templatesSetting] =
     await Promise.all([
       deps.getActiveSetting("writer_prompt_email"),
       deps.getActiveSetting("cadence_default"),
       deps.getActiveSetting("cta_variants"),
       deps.getActiveSetting("proof_points"),
       deps.getActiveSetting("compliance_footer"),
+      deps.getActiveSetting("email_sequence"),
+      deps.getActiveSetting("followup_templates"),
     ]);
+
+  // 09 §U6c: the sequence and its templates must agree before any lead is
+  // touched; a mismatch is a configuration error, not a per-lead hold.
+  const sequence = emailSequenceSchema.parse(sequenceSetting.value);
+  const templates = followupTemplatesSchema.parse(templatesSetting.value);
+  const configIssues = sequenceConfigIssues(sequence, templates);
+  if (configIssues.length > 0) {
+    throw new Error(`draft stage refused: ${configIssues.join("; ")}`);
+  }
 
   const cadence = cadenceSetting.value as CadenceDefault;
   const ctaVariants = ctaSetting.value as CtaVariants;
   const proofPoints = proofSetting.value as ProofPoints;
   const complianceFooter = String(footerSetting.value);
-  const cadenceStep =
-    cadence.steps.find((step) => step.step === 1) ?? cadence.steps[0]!;
   const promptWithCta = interpolateWriterPrompt(
     String(writerSetting.value),
     getActiveCtaText(ctaVariants),
@@ -509,6 +576,7 @@ export async function runDraftStage(
   const ctaText = getActiveCtaText(ctaVariants);
   const promptVersion = writerSetting.version;
   const model = await resolveModel(deps.getActiveSetting);
+  const offsets = cumulativeOffsetDays(sequence);
 
   const leads = await pickDraftingLeads(deps.db, limit, options?.leadIds);
   summary.leads_picked = leads.length;
@@ -529,8 +597,8 @@ export async function runDraftStage(
       }
 
       const claimContext = await loadClaimContext(deps.db, deps.getActiveSetting, lead.id);
-      const writerInput = buildWriterInput(lead, cadenceStep, proofPoint);
-      const result = await writeDraftWithGuard(
+      const writerInput = buildWriterInput(lead, sequence, proofPoint);
+      const result = await writeSequenceWithGuard(
         deps,
         lead,
         systemPrompt,
@@ -540,26 +608,41 @@ export async function runDraftStage(
         complianceFooter,
         ctaText,
         claimContext,
+        sequence,
+        templates,
       );
 
       if (!result.ok && result.hold) {
-        // 09 §U6b: one revision retry, then hold. No touch is written, so
+        // 09 §U6b/§U6c: one revision retry, then hold. No touch is written, so
         // nothing reaches approval; the refused draft is kept on the event.
-        await deps.transition(lead.id, "drafting", "manual_hold", "claim_guard_hold", {
+        const holdReason = result.holdReason ?? "claim_guard";
+        const event = holdReason === "claim_guard" ? "claim_guard_hold" : holdReason;
+        const failures = result.failures ?? [];
+        await deps.transition(lead.id, "drafting", "manual_hold", event, {
           rejections: result.rejections,
-          violations: result.violations ?? [],
+          // Flat, each tagged with its step (U6b readers use this list) …
+          violations: failures.flatMap((f) => f.violations.map((v) => ({ ...v, step: f.step }))),
+          // … and grouped per step (09 §U6c: claim_guard_hold {step, reasons}).
+          steps: failures.map((f) => ({
+            step: f.step,
+            reasons: [...new Set(f.violations.map((v) => v.reason))],
+            violations: f.violations,
+          })),
           draft: result.lastDraft ?? null,
           prompt_version: promptVersion,
+          sequence_setting_version: sequenceSetting.version,
           evidence_policy_version: claimContext.evidencePolicyVersion,
         });
         summary.claim_held += 1;
-        const reasons = [...new Set((result.violations ?? []).map((v) => v.reason))].join(", ") || "malformed writer output";
+        const reasons =
+          failures.map((f) => `step ${f.step}: ${[...new Set(f.violations.map((v) => v.reason))].join(", ")}`).join("; ") ||
+          (holdReason === "claim_guard" ? "malformed writer output" : holdReason);
         try {
           await deps.telegram.sendAlert(
-            `⛔ Claim guard hold — lead ${lead.id} (${lead.company.name}): ${reasons}. No draft reached approval.`,
+            `⛔ Draft hold (${event}) — lead ${lead.id} (${lead.company.name}): ${reasons}. No draft reached approval.`,
           );
         } catch (error) {
-          console.warn(`[draft] claim-hold alert failed for lead ${lead.id}:`, error);
+          console.warn(`[draft] hold alert failed for lead ${lead.id}:`, error);
         }
         continue;
       }
@@ -574,46 +657,73 @@ export async function runDraftStage(
         continue;
       }
 
-      const { output } = result;
+      const { steps } = result;
       summary.tokens_used += result.tokens;
       summary.est_cost_usd += result.cost;
 
+      // One statement inserts every step (atomic): all N or none.
+      // Follow-ups have no subject of their own (they continue step 1's
+      // thread); a null subject also keeps the retired emails/reply preflight
+      // check refusing them.
       const sendDb = deps.db as unknown as SupabaseClient<DatabaseWithSending>;
-      const { data: touch, error: touchError } = await sendDb
+      const { data: touches, error: touchError } = await sendDb
         .from("touches")
-        .insert({
-          lead_id: lead.id,
-          sequence_id: sequenceId,
-          step_no: 1,
-          channel: "email",
-          direction: "outbound",
-          status: "pending_approval",
-          subject: output.subject,
-          draft_body: output.body,
-          body: null,
-          prompt_version: promptVersion,
-          claim_ledger: output.claims as unknown as Json,
-        })
-        .select("*")
-        .single();
+        .insert(
+          steps.map((step) => ({
+            lead_id: lead.id,
+            sequence_id: sequenceId,
+            step_no: step.step_no,
+            channel: "email",
+            direction: "outbound",
+            status: "pending_approval",
+            subject: step.step_no === 1 ? step.subject : null,
+            draft_body: step.body,
+            body: null,
+            prompt_version: promptVersion,
+            claim_ledger: step.claims as unknown as Json,
+          })),
+        )
+        .select("*");
 
-      if (touchError || !touch) {
+      if (touchError || !touches || touches.length !== steps.length) {
         throw new Error(
-          `Failed to insert touch for ${lead.id}: ${touchError?.message ?? "no row"}`,
+          `Failed to insert the ${steps.length} touches for ${lead.id}: ${touchError?.message ?? `got ${touches?.length ?? 0} rows`}`,
         );
       }
+      const ordered = [...touches].sort((a, b) => (a.step_no ?? 0) - (b.step_no ?? 0));
+      const first = ordered[0]!;
 
       await deps.transition(lead.id, "drafting", "pending_approval", "drafted", {
-        touch_id: touch.id,
-        subject: output.subject,
-        word_count: wordCount(output.body),
-        claims_count: output.claims.length,
+        touch_id: first.id,
+        touch_ids: ordered.map((t) => t.id),
+        steps: steps.length,
+        subject: first.subject,
+        word_counts: steps.map((step) => wordCount(step.body)),
+        claims_count: steps.reduce((n, step) => n + step.claims.length, 0),
         prompt_version: promptVersion,
+        sequence_setting_version: sequenceSetting.version,
         model,
       });
 
-      const telegramResult = await deps.telegram.sendApproval(
-        touch,
+      const telegramResult = await deps.telegram.sendSequenceApproval(
+        {
+          steps: ordered.map((touch) => {
+            const spec = sequence.steps.find((s) => s.step_no === touch.step_no)!;
+            const drafted = steps.find((s) => s.step_no === touch.step_no)!;
+            return {
+              touch_id: touch.id,
+              step_no: spec.step_no,
+              source: spec.source,
+              delay: spec.delay,
+              delay_unit: spec.delay_unit,
+              offset_days: offsets.get(spec.step_no) ?? 0,
+              subject: touch.subject,
+              body: touch.draft_body ?? "",
+              claims: drafted.claims,
+            };
+          }),
+          sequence_setting_version: sequenceSetting.version,
+        },
         {
           id: lead.id,
           first_name: lead.first_name,
@@ -627,7 +737,6 @@ export async function runDraftStage(
           problem_hypothesis: lead.qualification.problem_hypothesis,
           evidence: claimContext.evidence,
           recommended_angle: lead.qualification.recommended_angle,
-          claims: output.claims,
           evidence_fetched_at: claimContext.evidenceFetchedAt,
           evidence_policy_version: claimContext.evidencePolicyVersion,
           max_age_days: claimContext.maxAgeDays,

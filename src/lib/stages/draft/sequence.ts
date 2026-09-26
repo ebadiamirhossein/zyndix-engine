@@ -1,0 +1,91 @@
+// Email sequence drafting rules (09 §U6c). Pure: no model, no I/O.
+//
+// A sequence is the steps of the active email_sequence setting. Writer steps
+// (1–2) come from one writer call; template steps (3) from followup_templates.
+// The claim guard runs on EVERY step, identically at draft and at approval:
+//   - step 1 with its subject; later steps with subject "" (their subject is
+//     step 1's, already checked, rendered "Re: …" by Instantly);
+//   - template steps in template mode (no `no_cited_evidence` requirement,
+//     every other rule applies);
+//   - per-step freshness: evidence age + the step's cumulative delay must
+//     stay within evidence_policy.max_age_days (operator, Session 17).
+
+import type { z } from "zod";
+
+import { cumulativeOffsetDays, type EmailSequence } from "@/lib/sending/sequence-approval";
+import type { Claim } from "@/lib/validation/llm";
+import type { followupTemplatesSchema } from "@/lib/validation/jsonb";
+
+import { formatViolations, type ClaimViolation } from "./claims";
+import { runClaimCheck, type ClaimContext } from "./claims-context";
+
+export type FollowupTemplates = z.infer<typeof followupTemplatesSchema>;
+
+export type SequenceStepDraft = {
+  step_no: number;
+  source: "writer" | "template";
+  /** Step 1 only; null for follow-ups. */
+  subject: string | null;
+  /** Body as it will be approved (the compliance footer may be appended). */
+  body: string;
+  claims: Claim[];
+};
+
+export type StepViolations = { step: number; violations: ClaimViolation[] };
+
+export type SequenceCheckResult = { ok: true } | { ok: false; failures: StepViolations[] };
+
+/** The writer steps of a sequence, in order (e.g. [1, 2]). */
+export function writerStepNos(sequence: EmailSequence): number[] {
+  return sequence.steps.filter((s) => s.source === "writer").map((s) => s.step_no);
+}
+
+/**
+ * Checks that every template step has exactly one template. A mismatch is a
+ * configuration error: the draft stage refuses to run before touching a lead.
+ */
+export function sequenceConfigIssues(sequence: EmailSequence, templates: FollowupTemplates): string[] {
+  const issues: string[] = [];
+  for (const step of sequence.steps.filter((s) => s.source === "template")) {
+    if (!templates.templates.some((t) => t.step_no === step.step_no)) {
+      issues.push(`email_sequence step ${step.step_no} is a template step but followup_templates has no template for it`);
+    }
+  }
+  return issues;
+}
+
+/** Fills {first_name}. Null when a used variable has no value (never "Hi ,"). */
+export function renderFollowupTemplate(body: string, vars: { first_name: string | null }): string | null {
+  if (body.includes("{first_name}")) {
+    const name = (vars.first_name ?? "").trim();
+    if (!name) return null;
+    return body.replace(/\{first_name\}/g, name);
+  }
+  return body;
+}
+
+/** Runs the claim guard on every step (see header). */
+export function checkSequenceClaims(
+  ctx: ClaimContext,
+  steps: SequenceStepDraft[],
+  sequence: EmailSequence,
+  now: Date = new Date(),
+): SequenceCheckResult {
+  const offsets = cumulativeOffsetDays(sequence);
+  const failures: StepViolations[] = [];
+  for (const step of steps) {
+    const result = runClaimCheck(
+      ctx,
+      { subject: step.step_no === 1 ? (step.subject ?? "") : "", body: step.body, claims: step.claims },
+      now,
+      { mode: step.source, offsetDays: offsets.get(step.step_no) ?? 0, stepNo: step.step_no },
+    );
+    if (!result.ok) failures.push({ step: step.step_no, violations: result.violations });
+  }
+  return failures.length === 0 ? { ok: true } : { ok: false, failures };
+}
+
+/** One line per violation, prefixed with its step. */
+export function formatStepViolations(failures: StepViolations[], max = 12): string[] {
+  return failures.flatMap((f) => formatViolations(f.violations, max).map((line) => `step ${f.step}: ${line}`));
+}

@@ -229,16 +229,28 @@ const draftAnthropic = {
     return completion(
       // Claim-compliant under writer v9 (09 §U6b): no timing, no asset claim,
       // the approved offer line verbatim, every sentence claimed against E1.
+      // Session 19 (09 §U6c): the v10 shape — steps 1 and 2; the stage adds
+      // the step-3 template.
       JSON.stringify({
-        subject: "Quote requests",
-        body:
-          `Hi Tess,\n\nOn the ${name} contact page, quote requests are answered the next business day. ` +
-          `A homeowner who asks for a quote often books whoever replies first.\n\n` +
-          `Happy to write up what I'd change, if that's useful.`,
-        claims: [
-          { span: `On the ${name} contact page, quote requests are answered the next business day`, kind: "prospect_fact", evidence_ids: ["E1"] },
-          { span: "A homeowner who asks for a quote often books whoever replies first", kind: "inference", evidence_ids: ["E1"] },
-          { span: "Happy to write up what I'd change, if that's useful.", kind: "offer", evidence_ids: [] },
+        steps: [
+          {
+            step_no: 1,
+            subject: "Quote requests",
+            body:
+              `Hi Tess,\n\nOn the ${name} contact page, quote requests are answered the next business day. ` +
+              `A homeowner who asks for a quote often books whoever replies first.\n\n` +
+              `Happy to write up what I'd change, if that's useful.`,
+            claims: [
+              { span: `On the ${name} contact page, quote requests are answered the next business day`, kind: "prospect_fact", evidence_ids: ["E1"] },
+              { span: "A homeowner who asks for a quote often books whoever replies first", kind: "inference", evidence_ids: ["E1"] },
+              { span: "Happy to write up what I'd change, if that's useful.", kind: "offer", evidence_ids: [] },
+            ],
+          },
+          {
+            step_no: 2,
+            body: `Hi Tess,\n\nOne more thought on ${name}: every quote request waits for the next business day.`,
+            claims: [{ span: "every quote request waits for the next business day", kind: "inference", evidence_ids: ["E1"] }],
+          },
         ],
       }),
     );
@@ -270,9 +282,9 @@ const millionverifier = {
 } as unknown as MillionVerifierClient;
 
 const telegram = {
-  async sendApproval() {
+  async sendSequenceApproval() {
     mock.telegram.push("sendApproval");
-    return { sent: [1], failed: [] };
+    return { sent: 1, failed: [] };
   },
   async sendMessage() {
     mock.telegram.push("sendMessage");
@@ -367,7 +379,25 @@ const instantly = {
 // Send-related settings come from seed content (as in test-u5-send): the
 // fixture senders are not in the live send_policy's assignable list. Every
 // other key is the live active version (read-only).
-const SEED: Record<string, unknown> = { send_policy, send_windows, capacity_defaults };
+// Session 19: the U6c sequence settings are pinned to their v1 values, so the
+// suite does not depend on when they are applied live.
+const email_sequence = {
+  steps: [
+    { step_no: 1, delay: 0, delay_unit: "days", source: "writer" },
+    { step_no: 2, delay: 7, delay_unit: "days", source: "writer" },
+    { step_no: 3, delay: 7, delay_unit: "days", source: "template" },
+  ],
+};
+const followup_templates = {
+  templates: [
+    {
+      step_no: 3,
+      id: "honest_close",
+      body: "Hi {first_name},\n\nI haven't heard back, so I'll assume now isn't the right time and won't follow up again.\n\nIf it becomes a priority later, just reply to this email.",
+    },
+  ],
+};
+const SEED: Record<string, unknown> = { send_policy, send_windows, capacity_defaults, email_sequence, followup_templates };
 async function getActiveSetting(k: string): Promise<{ version: number; value: unknown }> {
   if (k in SEED) return { version: 1, value: SEED[k] };
   const s = await settings.getActiveSetting(k as never);
@@ -511,6 +541,7 @@ async function stepOneTouch(leadId: string) {
     .select("id, status, approval_hash")
     .eq("lead_id", leadId)
     .eq("direction", "outbound")
+    .eq("step_no", 1)
     .order("created_at", { ascending: false })
     .limit(1);
   return data?.[0] ?? null;
