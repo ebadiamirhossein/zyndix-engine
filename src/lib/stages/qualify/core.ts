@@ -3,11 +3,19 @@ import type { z } from "zod";
 
 import type { AnthropicClient } from "@/lib/integrations/anthropic";
 import { parseJsonText } from "@/lib/integrations/anthropic";
+import {
+  loadResearchEvidenceRows,
+  selectResearchEvidence,
+  toStoredEvidenceItem,
+  type ResearchEvidenceRow,
+} from "@/lib/research/evidence";
+import { loadResearchPolicy } from "@/lib/research/run";
 import { createStateStore } from "@/lib/state/core";
 import { parseOrThrow } from "@/lib/validation";
-import { EVIDENCE_SOURCES } from "@/lib/validation/jsonb";
+import { EVIDENCE_SOURCES, evidencePolicySchema, type StoredEvidenceItem } from "@/lib/validation/jsonb";
 import { qualifierOutputSchema } from "@/lib/validation/llm";
 import type { Database, Json } from "@/types/database";
+import type { DatabaseWithWave1 } from "@/types/database-extensions";
 
 type QualifierOutput = z.infer<typeof qualifierOutputSchema>;
 
@@ -242,10 +250,27 @@ export function __testOnly_selectMostRecentNonErrorPayloadsBySource(
   return selectMostRecentNonErrorPayloadsBySource(rows);
 }
 
+/**
+ * 09 §UR: dated, source-linked research items for the prompt. Each excerpt
+ * is verbatim from its source; the key is present only when there are items,
+ * so a lead without research gets the same input as before.
+ */
+function researchPromptItems(research: ResearchEvidenceRow[]): Record<string, unknown>[] {
+  return research.map((r) => ({
+    source_type: r.source_type,
+    url: r.source_url,
+    title: r.title,
+    published_at: r.published_at,
+    fetched_at: r.fetched_at,
+    excerpt: r.excerpt,
+  }));
+}
+
 function buildLeadInput(
   lead: LeadPick,
   grouped: Record<string, unknown>,
   maxSiteChars: number,
+  research: ResearchEvidenceRow[] = [],
 ): { userJson: string; siteTruncated: boolean } {
   const sitePayload = grouped[ENRICHMENT_SOURCES.site];
   const siteRaw = extractSiteText(sitePayload);
@@ -286,6 +311,7 @@ function buildLeadInput(
     },
     website,
     linkedin: grouped[ENRICHMENT_SOURCES.li_posts] ?? null,
+    ...(research.length > 0 ? { research: researchPromptItems(research) } : {}),
   };
 
   return { userJson: JSON.stringify(input, null, 2), siteTruncated: truncated };
@@ -402,13 +428,17 @@ async function writeQualification(
   output: QualifierOutput,
   promptVersion: number,
   model: string,
+  researchEvidence: StoredEvidenceItem[] = [],
 ): Promise<void> {
+  // 09 §UR: the model's own evidence first, then the research items appended
+  // deterministically (positional E-ids E1…En stay stable over this array).
+  const evidence: StoredEvidenceItem[] = [...output.evidence, ...researchEvidence];
   const row = {
     lead_id: leadId,
     fit_score: output.fit_score,
     segment: output.segment,
     problem_hypothesis: problemHypothesisForDb(output),
-    evidence: output.evidence as Json,
+    evidence: evidence as unknown as Json,
     triggers: output.triggers as Json,
     visible_tools: output.visible_tools as Json,
     recommended_angle: output.recommended_angle,
@@ -478,6 +508,21 @@ export async function runQualifyStage(
     resolveModel(deps.getActiveSetting),
   ]);
 
+  // 09 §UR research evidence: loaded only when research_policy exists. Items
+  // must be fetched within evidence_policy.max_age_days (older ones would only
+  // make the claim guard refuse the draft as stale_evidence) and published
+  // within research_policy.max_item_age_days.
+  const researchPolicy = (await loadResearchPolicy(deps.getActiveSetting)).policy;
+  let maxFetchedAgeDays = researchPolicy?.max_item_age_days ?? 0;
+  if (researchPolicy) {
+    try {
+      const evidencePolicy = evidencePolicySchema.safeParse((await deps.getActiveSetting("evidence_policy")).value);
+      if (evidencePolicy.success) maxFetchedAgeDays = evidencePolicy.data.max_age_days;
+    } catch {
+      // no evidence_policy: fall back to max_item_age_days
+    }
+  }
+
   const systemPrompt = buildSystemPrompt(
     String(qualifierSetting.value),
     String(icpSetting.value),
@@ -541,7 +586,32 @@ export async function runQualifyStage(
       }
 
       const grouped = selectMostRecentNonErrorPayloadsBySource(payloadRows);
-      const { userJson } = buildLeadInput(lead, grouped, maxSiteChars);
+
+      let research: ResearchEvidenceRow[] = [];
+      if (researchPolicy) {
+        try {
+          const rows = await loadResearchEvidenceRows(
+            deps.db as unknown as SupabaseClient<DatabaseWithWave1>,
+            lead.id,
+            lead.company_id,
+          );
+          research = selectResearchEvidence(rows, {
+            now: new Date(),
+            maxItemAgeDays: researchPolicy.max_item_age_days,
+            maxFetchedAgeDays,
+          });
+        } catch (researchError) {
+          // Missing research is missing information: qualify without it.
+          console.error(
+            `[qualify] lead ${lead.id}: research evidence unavailable: ${researchError instanceof Error ? researchError.message : String(researchError)}`,
+          );
+        }
+      }
+      const researchEvidence = research
+        .map(toStoredEvidenceItem)
+        .filter((item): item is StoredEvidenceItem => item !== null);
+
+      const { userJson } = buildLeadInput(lead, grouped, maxSiteChars, research);
 
       const completion = await deps.anthropic.complete({
         system: systemPrompt,
@@ -567,6 +637,7 @@ export async function runQualifyStage(
         output,
         qualifierSetting.version,
         completion.model,
+        researchEvidence,
       );
 
       await deps.db.from("lead_events").insert({
@@ -580,6 +651,7 @@ export async function runQualifyStage(
           input_tokens: completion.inputTokens,
           output_tokens: completion.outputTokens,
           est_cost_usd: completion.estCostUsd,
+          research_evidence_appended: researchEvidence.length,
         },
       });
 

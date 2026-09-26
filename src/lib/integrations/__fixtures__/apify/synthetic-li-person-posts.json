@@ -1,0 +1,83 @@
+[
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "type": "post",
+    "id": "7300000000000000001",
+    "linkedinUrl": "https://www.linkedin.com/posts/pat-fixture_activity-7300000000000000001-abcd",
+    "content": "We are hiring a Transaction Coordinator in Houston. Our inbox has doubled since spring and we need help keeping up.",
+    "postedAt": {
+      "timestamp": 1757505600000,
+      "date": "2026-09-10T12:00:00.000Z",
+      "postedAgoShort": "16d"
+    },
+    "author": {
+      "publicIdentifier": "pat-fixture",
+      "name": "Pat Fixture",
+      "linkedinUrl": "https://www.linkedin.com/in/pat-fixture?miniProfileUrn=urn%3Ali%3Afsd_profile%3AFIXTURE"
+    }
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "type": "post",
+    "id": "7300000000000000002",
+    "linkedinUrl": "https://www.linkedin.com/posts/someone-else_activity-7300000000000000002-efgh",
+    "content": "A repost-like item from another author that must never count as Pat's.",
+    "postedAt": {
+      "date": "2026-09-01T12:00:00.000Z"
+    },
+    "author": {
+      "linkedinUrl": "https://www.linkedin.com/in/someone-else"
+    }
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "type": "post",
+    "id": "7300000000000000003",
+    "content": "A post with no URL.",
+    "postedAt": {
+      "date": "2026-09-02T12:00:00.000Z"
+    },
+    "author": {
+      "linkedinUrl": "https://www.linkedin.com/in/pat-fixture"
+    }
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "type": "post",
+    "id": "7300000000000000004",
+    "linkedinUrl": "https://www.linkedin.com/posts/pat-fixture_activity-7300000000000000004-ijkl",
+    "content": "   ",
+    "postedAt": {
+      "date": "2026-09-03T12:00:00.000Z"
+    },
+    "author": {
+      "linkedinUrl": "https://www.linkedin.com/in/pat-fixture"
+    }
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "type": "post",
+    "id": "7300000000000000005",
+    "linkedinUrl": "https://www.linkedin.com/posts/pat-fixture_activity-7300000000000000005-mnop",
+    "content": "An old post from early 2025 about our office move.",
+    "postedAt": {
+      "date": "2025-01-05T12:00:00.000Z"
+    },
+    "author": {
+      "linkedinUrl": "https://www.linkedin.com/in/pat-fixture"
+    }
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "type": "post",
+    "id": "7300000000000000006",
+    "linkedinUrl": "https://www.linkedin.com/posts/pat-fixture_activity-7300000000000000006-qrst",
+    "content": "We just closed our busiest quarter at Acme Test Realty. We just closed our busiest quarter at Acme Test Realty. We just closed our busiest quarter at Acme Test Realty. We just closed our busiest quarter at Acme Test Realty. We just closed our busiest quarter at Acme Test Realty. Our team answered every buyer inquiry within the hour this summer. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. Thanks to everyone who worked late to make it happen. More soon.",
+    "postedAt": {
+      "date": "2026-08-20T12:00:00.000Z"
+    },
+    "author": {
+      "linkedinUrl": "https://www.linkedin.com/in/pat-fixture/"
+    }
+  }
+]

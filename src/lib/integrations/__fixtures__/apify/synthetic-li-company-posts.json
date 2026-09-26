@@ -1,0 +1,29 @@
+[
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "type": "post",
+    "id": "7310000000000000001",
+    "linkedinUrl": "https://www.linkedin.com/posts/acme-test-realty_activity-7310000000000000001-aaaa",
+    "content": "Acme Test Realty now serves Katy and Sugar Land. Book a showing through our website.",
+    "postedAt": {
+      "date": "2026-09-05T15:30:00.000Z"
+    },
+    "author": {
+      "universalName": "acme-test-realty",
+      "linkedinUrl": "https://www.linkedin.com/company/acme-test-realty/posts"
+    }
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "type": "post",
+    "id": "7310000000000000002",
+    "linkedinUrl": "https://www.linkedin.com/posts/other-brokerage_activity-7310000000000000002-bbbb",
+    "content": "Another brokerage's post.",
+    "postedAt": {
+      "date": "2026-09-05T15:30:00.000Z"
+    },
+    "author": {
+      "linkedinUrl": "https://www.linkedin.com/company/other-brokerage/"
+    }
+  }
+]

@@ -347,3 +347,91 @@ describe("operator edits (DoD 10 shape)", () => {
     assert.ok(r.includes("uncovered_fact"));
   });
 });
+
+// 09 §UR: research items appended by qualify carry a verbatim excerpt, a URL
+// and their own fetch date.
+describe("research evidence (09 §UR)", () => {
+  const JOB: ClaimEvidence = {
+    id: "E4",
+    source: "jobs",
+    observation: "Acme Test Realty is looking for a Transaction Coordinator to manage contracts and respond to client emails.",
+    source_type: "job_post",
+    evidence_item_id: "00000000-0000-4000-8000-0000000000e4",
+    url: "https://www.linkedin.com/jobs/view/4400000001",
+    title: "Transaction Coordinator",
+    published_at: daysAgo(14),
+    fetched_at: daysAgo(2),
+  };
+  const withJob = (sentence: string, span: string, extra: Partial<ClaimCheckInput> = {}, job: ClaimEvidence = JOB) => {
+    const evidence = [...EVIDENCE, job];
+    return input({
+      evidence,
+      contradictions: detectContradictions({ evidence, techSignals: { hasChatWidget: false }, siteText: SITE }),
+      ...withSentence(sentence, [{ span, kind: "prospect_fact", evidence_ids: ["E4"] }]),
+      ...extra,
+    });
+  };
+
+  test("a claim supported by the research excerpt passes", () => {
+    const s = "you are hiring a Transaction Coordinator to respond to client emails";
+    assert.deepEqual(violations(withJob(`Right now ${s}.`, s)), []);
+  });
+
+  test("a fact not in the excerpt → unsupported_prospect_fact", () => {
+    const s = "you are hiring a Marketing Director";
+    const v = violations(withJob(`Right now ${s}.`, s));
+    assert.ok(v.some((x) => x.reason === "unsupported_prospect_fact" && x.token === "Marketing"));
+  });
+
+  test("a paraphrase item cannot carry a fact the research excerpt lacks", () => {
+    // E5 is a qualifier paraphrase (website) that mentions the role; the page text does not.
+    const evidence = [...EVIDENCE, JOB, { id: "E5", source: "website", observation: "They also post a Marketing Director role." }];
+    const s = "you are hiring a Marketing Director";
+    const v = violations(
+      input({
+        evidence,
+        contradictions: [],
+        ...withSentence(`Right now ${s}.`, [{ span: s, kind: "inference", evidence_ids: ["E4", "E5"] }]),
+      }),
+    );
+    assert.ok(
+      v.some((x) => x.reason === "unsupported_prospect_fact" && /cited source excerpt \(E4\): "Marketing"/.test(x.detail)),
+      JSON.stringify(v),
+    );
+  });
+
+  test("a quoted fragment must be in the excerpt", () => {
+    const ok = 'your job post asks for someone to "respond to client emails"';
+    assert.deepEqual(violations(withJob(`I read that ${ok}.`, ok)), []);
+    const bad = 'your job post asks for someone to "answer every call"';
+    const v = violations(withJob(`I read that ${bad}.`, bad));
+    assert.ok(v.some((x) => x.reason === "unsupported_prospect_fact" && x.token === "answer every call"), JSON.stringify(v));
+  });
+
+  test("a stale research item fails stale_evidence even when the site crawl is fresh", () => {
+    const s = "you are hiring a Transaction Coordinator to respond to client emails";
+    const v = violations(withJob(`Right now ${s}.`, s, { evidenceFetchedAt: daysAgo(1) }, { ...JOB, fetched_at: daysAgo(31) }));
+    assert.deepEqual(
+      v.map((x) => [x.reason, x.evidence_id]),
+      [["stale_evidence", "E4"]],
+    );
+    assert.match(v[0]!.detail, /^E4 fetched \d{4}-\d{2}-\d{2}, 31 days old \(max 30\)$/);
+  });
+
+  test("per-item freshness uses the item's own date, not the lead-level proxy", () => {
+    const s = "you are hiring a Transaction Coordinator to respond to client emails";
+    // Only E4 is cited in this claim, but CLEAN claims cite E1/E2 (lead-level): a stale crawl still fails for those.
+    const v = violations(withJob(`Right now ${s}.`, s, { evidenceFetchedAt: daysAgo(40) }));
+    assert.ok(v.some((x) => x.reason === "stale_evidence" && x.evidence_id === undefined));
+    assert.ok(!v.some((x) => x.reason === "stale_evidence" && x.evidence_id === "E4"));
+    // A step 7 days out: 25 + 7 > 30 for the research item.
+    const later = violations(withJob(`Right now ${s}.`, s, { offsetDays: 7, stepNo: 2 }, { ...JOB, fetched_at: daysAgo(25) }));
+    assert.ok(later.some((x) => x.reason === "stale_evidence" && /^step 2: E4: 25d \+ 7d > 30d/.test(x.detail)), JSON.stringify(later));
+  });
+
+  test("a research excerpt that says 'unavailable' is not a failed crawl", () => {
+    const job = { ...JOB, observation: `${JOB.observation} Parking is unavailable on site.` };
+    const s = "you are hiring a Transaction Coordinator to respond to client emails";
+    assert.ok(!reasons(withJob(`Right now ${s}.`, s, {}, job)).includes("failed_crawl_evidence"));
+  });
+});

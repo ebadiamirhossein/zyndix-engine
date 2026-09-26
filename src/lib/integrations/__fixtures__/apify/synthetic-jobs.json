@@ -1,0 +1,41 @@
+[
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "id": "4400000001",
+    "title": "Transaction Coordinator",
+    "companyName": "Acme Test Realty",
+    "companyUrl": "https://www.linkedin.com/company/acme-test-realty",
+    "publishedAt": "2026-09-12",
+    "jobUrl": "https://www.linkedin.com/jobs/view/4400000001",
+    "description": "Acme Test Realty is looking for a Transaction Coordinator to manage contracts and respond to client emails. You will own the shared inbox."
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "id": "4400000002",
+    "title": "Agent",
+    "companyName": "Other Brokerage",
+    "companyUrl": "https://www.linkedin.com/company/other-brokerage",
+    "publishedAt": "2026-09-12",
+    "jobUrl": "https://www.linkedin.com/jobs/view/4400000002",
+    "description": "Other brokerage job."
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "id": "4400000003",
+    "title": "Office Manager",
+    "companyName": "Acme Test Realty",
+    "companyUrl": "https://www.linkedin.com/company/acme-test-realty",
+    "publishedAt": "2026-09-01",
+    "description": "No job URL on this one."
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "id": "4400000004",
+    "title": "Listing Agent",
+    "companyName": "Acme Test Realty",
+    "companyUrl": "https://www.linkedin.com/company/acme-test-realty",
+    "publishedAt": "2024-01-15",
+    "jobUrl": "https://www.linkedin.com/jobs/view/4400000004",
+    "description": "A job posted long ago."
+  }
+]

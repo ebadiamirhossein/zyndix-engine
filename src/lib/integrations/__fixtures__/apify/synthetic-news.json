@@ -1,0 +1,24 @@
+[
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "title": "Acme Test Realty opens second office in Katy - Houston Fixture News",
+    "url": "https://news.example.com/acme-test-realty-katy",
+    "source": "Houston Fixture News",
+    "publishedAt": "2026-09-15T08:00:00.000Z",
+    "description": "Acme Test Realty opened a second office in Katy this month, the brokerage said."
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "title": "Houston home prices rise again",
+    "url": "https://news.example.com/prices",
+    "source": "Houston Fixture News",
+    "publishedAt": "2026-09-14T08:00:00.000Z",
+    "description": "Prices rose across the metro area."
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "title": "Acme Test Realty sponsors a fixture 5K",
+    "source": "Fixture Weekly",
+    "publishedAt": "2026-09-13T08:00:00.000Z"
+  }
+]

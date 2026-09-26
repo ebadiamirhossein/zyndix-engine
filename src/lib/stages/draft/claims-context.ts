@@ -41,19 +41,31 @@ type GetSetting = (key: string) => Promise<{ version: number; value: unknown }>;
 /**
  * Interim evidence ids (until U15): E1…En index the lead's
  * qualification.evidence items that carry an observation, in stored order.
- * The writer sees exactly these ids.
+ * The writer sees exactly these ids. 09 §UR research items (appended by
+ * qualify after the model's own items) also carry their url, dates, source
+ * type and evidence_item_id; those keys are copied only when present, so an
+ * item without them looks exactly as before.
  */
 export function toClaimEvidence(value: unknown): ClaimEvidence[] {
   if (!Array.isArray(value)) return [];
   const items = value.filter(
-    (item): item is { observation: string; source?: unknown } =>
+    (item): item is Record<string, unknown> & { observation: string } =>
       typeof item === "object" && item !== null && typeof (item as { observation?: unknown }).observation === "string",
   );
-  return items.map((item, i) => ({
-    id: `E${i + 1}`,
-    source: typeof item.source === "string" ? item.source : null,
-    observation: item.observation,
-  }));
+  return items.map((item, i) => {
+    const out: ClaimEvidence = {
+      id: `E${i + 1}`,
+      source: typeof item.source === "string" ? item.source : null,
+      observation: item.observation,
+    };
+    if (typeof item.source_type === "string") out.source_type = item.source_type;
+    if (typeof item.evidence_item_id === "string") out.evidence_item_id = item.evidence_item_id;
+    if (typeof item.url === "string") out.url = item.url;
+    if (typeof item.title === "string") out.title = item.title;
+    if (typeof item.published_at === "string") out.published_at = item.published_at;
+    if (typeof item.fetched_at === "string" && Number.isFinite(Date.parse(item.fetched_at))) out.fetched_at = item.fetched_at;
+    return out;
+  });
 }
 
 function isErrorPayload(payload: unknown): boolean {

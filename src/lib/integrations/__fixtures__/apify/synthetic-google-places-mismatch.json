@@ -1,0 +1,17 @@
+[
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "title": "Acme Test Realty Group",
+    "placeId": "ChIJFIXTURE0002",
+    "url": "https://www.google.com/maps/place/?q=place_id:ChIJFIXTURE0002",
+    "website": "https://other-business.example.org/",
+    "reviews": [
+      {
+        "text": "Reviews of a different business with a similar name.",
+        "stars": 1,
+        "publishedAtDate": "2026-09-01T10:00:00.000Z",
+        "reviewId": "FIXREV9"
+      }
+    ]
+  }
+]

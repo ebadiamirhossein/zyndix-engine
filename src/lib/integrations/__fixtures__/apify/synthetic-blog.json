@@ -1,0 +1,43 @@
+[
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "url": "https://acme-test.example.com/blog/spring-update",
+    "crawl": {
+      "loadedTime": "2026-09-26T11:00:00.000Z",
+      "depth": 1
+    },
+    "metadata": {
+      "title": "Spring update | Acme Test Realty"
+    },
+    "text": "Spring update. We added online showing requests to every listing page in April.",
+    "markdown": "# Spring update\n\nWe added online showing requests to every listing page in April."
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "url": "https://medium.example.net/acme-copy",
+    "metadata": {
+      "title": "Off-site copy"
+    },
+    "text": "A page on another host."
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "url": "https://acme-test.example.com/news",
+    "metadata": {
+      "title": "News"
+    },
+    "text": ""
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "url": "https://acme-test.example.com/news/",
+    "crawl": {
+      "httpStatusCode": 404,
+      "depth": 0
+    },
+    "metadata": {
+      "title": "Page not found"
+    },
+    "text": "Sorry, this page does not exist."
+  }
+]

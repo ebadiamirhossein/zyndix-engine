@@ -39,7 +39,28 @@ export type ClaimViolation = {
   evidence_id?: string;
 };
 
-export type ClaimEvidence = { id: string; source: string | null; observation: string };
+export type ClaimEvidence = {
+  id: string;
+  source: string | null;
+  observation: string;
+  /**
+   * 09 §UR research items (appended to qualification.evidence by qualify)
+   * carry their provenance: `observation` is then the VERBATIM excerpt of
+   * `url`, and `fetched_at` is the item's own fetch date (per-item freshness,
+   * replacing the lead-level proxy for that item).
+   */
+  url?: string;
+  fetched_at?: string;
+  published_at?: string | null;
+  source_type?: string;
+  evidence_item_id?: string;
+  title?: string | null;
+};
+
+/** A research item (09 §UR): stored with its own id and source type. */
+export function isResearchEvidence(item: ClaimEvidence): boolean {
+  return Boolean(item.evidence_item_id || item.source_type);
+}
 
 export type ContradictionAttribute = "chat" | "booking" | "contact_form";
 
@@ -57,7 +78,10 @@ export type ClaimCheckInput = {
   evidence: ClaimEvidence[];
   /** Raw crawled page text (newest non-error apify_site), or null when none exists. */
   siteText: string | null;
-  /** Interim evidence age: the lead's latest non-error enrichment fetch. */
+  /**
+   * Interim evidence age: the lead's latest non-error enrichment fetch. Used
+   * for every cited item WITHOUT its own `fetched_at` (09 §UR items have one).
+   */
   evidenceFetchedAt: string | null;
   now: Date;
   maxAgeDays: number;
@@ -474,7 +498,9 @@ export function checkClaims(input: ClaimCheckInput): ClaimCheckResult {
       }
       citesEvidence = true;
       if ((claim.kind === "prospect_fact" || claim.kind === "inference")) groundedClaim = true;
-      if (describesFailedFetch(item.observation)) {
+      // A research item exists only because its fetch succeeded; its excerpt is
+      // the source's own words ("currently unavailable" in a review is not a failed crawl).
+      if (!isResearchEvidence(item) && describesFailedFetch(item.observation)) {
         add({ reason: "failed_crawl_evidence", detail: `${id} describes a failed or missing fetch`, span: claim.span, evidence_id: id });
       }
     }
@@ -483,24 +509,45 @@ export function checkClaims(input: ClaimCheckInput): ClaimCheckResult {
     add({ reason: "no_cited_evidence", detail: "no prospect_fact or inference claim cites this lead's evidence" });
   }
 
-  // Freshness (interim: one fetch date per lead). A step that goes out
-  // offsetDays after approval must still be fresh on the day it is sent.
-  // A step citing no evidence is exempt.
+  // Freshness. A cited item with its own fetched_at (09 §UR research) is aged
+  // by that date; every other cited item by the lead-level proxy (the lead's
+  // latest non-error enrichment fetch, U6b). A step that goes out offsetDays
+  // after approval must still be fresh on the day it is sent. A step citing no
+  // evidence is exempt.
   if (citesEvidence) {
     const offset = input.offsetDays ?? 0;
     const stepLabel = input.stepNo !== undefined && input.stepNo > 1 ? `step ${input.stepNo}: ` : "";
-    if (!input.evidenceFetchedAt) {
-      add({ reason: "stale_evidence", detail: `${stepLabel}evidence fetch date is unknown` });
-    } else {
-      const fetched = new Date(input.evidenceFetchedAt);
-      const ageDays = (input.now.getTime() - fetched.getTime()) / 86_400_000;
+    const citedIds = [...new Set(located.flatMap((l) => l.claim.evidence_ids))];
+    const cited = citedIds.map((id) => evidenceIndex(id, input.evidence)).filter((e): e is ClaimEvidence => e !== null);
+    const usesLeadProxy = cited.some((e) => !e.fetched_at);
+    if (usesLeadProxy) {
+      if (!input.evidenceFetchedAt) {
+        add({ reason: "stale_evidence", detail: `${stepLabel}evidence fetch date is unknown` });
+      } else {
+        const fetched = new Date(input.evidenceFetchedAt);
+        const ageDays = (input.now.getTime() - fetched.getTime()) / 86_400_000;
+        if (!Number.isFinite(ageDays) || ageDays + offset > input.maxAgeDays) {
+          add({
+            reason: "stale_evidence",
+            detail:
+              offset > 0
+                ? `${stepLabel}${Math.floor(ageDays)}d + ${offset}d > ${input.maxAgeDays}d (evidence fetched ${input.evidenceFetchedAt.slice(0, 10)}, sent ${offset} days after approval)`
+                : `${stepLabel}evidence fetched ${input.evidenceFetchedAt.slice(0, 10)}, ${Math.floor(ageDays)} days old (max ${input.maxAgeDays})`,
+          });
+        }
+      }
+    }
+    for (const item of cited) {
+      if (!item.fetched_at) continue;
+      const ageDays = (input.now.getTime() - Date.parse(item.fetched_at)) / 86_400_000;
       if (!Number.isFinite(ageDays) || ageDays + offset > input.maxAgeDays) {
         add({
           reason: "stale_evidence",
+          evidence_id: item.id,
           detail:
             offset > 0
-              ? `${stepLabel}${Math.floor(ageDays)}d + ${offset}d > ${input.maxAgeDays}d (evidence fetched ${input.evidenceFetchedAt.slice(0, 10)}, sent ${offset} days after approval)`
-              : `${stepLabel}evidence fetched ${input.evidenceFetchedAt.slice(0, 10)}, ${Math.floor(ageDays)} days old (max ${input.maxAgeDays})`,
+              ? `${stepLabel}${item.id}: ${Number.isFinite(ageDays) ? Math.floor(ageDays) : "?"}d + ${offset}d > ${input.maxAgeDays}d (fetched ${item.fetched_at.slice(0, 10)}, sent ${offset} days after approval)`
+              : `${stepLabel}${item.id} fetched ${item.fetched_at.slice(0, 10)}, ${Number.isFinite(ageDays) ? Math.floor(ageDays) : "?"} days old (max ${input.maxAgeDays})`,
         });
       }
     }
@@ -538,7 +585,11 @@ export function checkClaims(input: ClaimCheckInput): ClaimCheckResult {
   for (const { claim, ranges } of located) {
     if (claim.kind === "offer" || ranges.length === 0) continue;
     const cited = claim.evidence_ids.map((id) => evidenceIndex(id, input.evidence)).filter((e): e is ClaimEvidence => e !== null);
-    const supportTexts = [...cited.map((e) => e.observation), ...allowTexts];
+    // A research item's title (a job title, a headline) is verbatim from its source too.
+    const supportTexts = [
+      ...cited.flatMap((e) => (isResearchEvidence(e) && e.title ? [e.observation, e.title] : [e.observation])),
+      ...allowTexts,
+    ];
     const supportLower = supportTexts.join("\n").toLowerCase();
     const inClaim = tokens.filter((t) => t.kind !== "timing" && within(t, ranges));
     const ids = claim.evidence_ids.join(",") || "none";
@@ -551,6 +602,46 @@ export function checkClaims(input: ClaimCheckInput): ClaimCheckResult {
           token: token.text,
           span: claim.span,
         });
+      }
+    }
+
+    // 09 §UR: a claim that cites a research item must be carried by the
+    // verbatim sources behind its citations, not by a paraphrase: each
+    // research item's excerpt (+ title), the page text for a cited website
+    // item, and any other cited item's text. Its fact tokens and quoted
+    // fragments must appear there.
+    if ((claim.kind === "prospect_fact" || claim.kind === "inference") && cited.some(isResearchEvidence)) {
+      const researchIds = cited.filter(isResearchEvidence).map((e) => e.id).join(",");
+      const verbatim = [
+        ...cited.flatMap((e) => {
+          if (isResearchEvidence(e)) return e.title ? [e.observation, e.title] : [e.observation];
+          if (e.source === "website" && input.siteText) return [input.siteText];
+          return [e.observation];
+        }),
+        ...allowTexts,
+      ];
+      const verbatimLower = verbatim.join("\n").toLowerCase();
+      const verbatimLoose = looseCanon(verbatim.join("\n"));
+      for (const token of inClaim) {
+        if (token.kind === "name" && allow.has(token.value)) continue;
+        if (!tokenSupported(token, verbatim, verbatimLower)) {
+          add({
+            reason: "unsupported_prospect_fact",
+            detail: `not in the cited source excerpt (${researchIds}): "${token.text}"`,
+            token: token.text,
+            span: claim.span,
+          });
+        }
+      }
+      for (const frag of new Set(quotedFragments(claim.span, 2))) {
+        if (!verbatimLoose.includes(looseCanon(frag))) {
+          add({
+            reason: "unsupported_prospect_fact",
+            detail: `not in the cited source excerpt (${researchIds}): "${frag}"`,
+            token: frag,
+            span: claim.span,
+          });
+        }
       }
     }
 

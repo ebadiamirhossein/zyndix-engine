@@ -1,0 +1,30 @@
+[
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "title": "Acme Test Realty",
+    "placeId": "ChIJFIXTURE0001",
+    "url": "https://www.google.com/maps/place/?q=place_id:ChIJFIXTURE0001",
+    "website": "https://www.acme-test.example.com/",
+    "totalScore": 4.2,
+    "reviews": [
+      {
+        "text": "Called twice about a listing and nobody called back for three days.",
+        "stars": 2,
+        "publishedAtDate": "2026-08-30T10:00:00.000Z",
+        "reviewId": "FIXREV1"
+      },
+      {
+        "text": null,
+        "stars": 5,
+        "publishedAtDate": "2026-08-01T10:00:00.000Z",
+        "reviewId": "FIXREV2"
+      },
+      {
+        "text": "Great agent, sold our house in 2023.",
+        "stars": 5,
+        "publishedAtDate": "2023-06-01T10:00:00.000Z",
+        "reviewId": "FIXREV3"
+      }
+    ]
+  }
+]

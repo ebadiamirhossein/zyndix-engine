@@ -1,0 +1,37 @@
+[
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "id": "FIXTUREPROFILE1",
+    "publicIdentifier": "pat-fixture",
+    "linkedinUrl": "https://www.linkedin.com/in/pat-fixture",
+    "firstName": "Pat",
+    "lastName": "Fixture",
+    "headline": "Broker/Owner at Acme Test Realty | Houston homes since 2004",
+    "about": "I run a small brokerage in Houston. Every inquiry reaches me or one of two agents directly.",
+    "currentPosition": [
+      {
+        "companyName": "Acme Test Realty"
+      }
+    ],
+    "experience": [
+      {
+        "position": "Broker/Owner",
+        "companyName": "Acme Test Realty",
+        "startDate": {
+          "year": 2004
+        },
+        "description": "Leads a four-agent residential team."
+      },
+      {
+        "position": "Agent",
+        "companyName": "Old Brokerage",
+        "description": "Residential sales."
+      }
+    ]
+  },
+  {
+    "_fixture": "SYNTHETIC FIXTURE (09 \u00a7UR tests) \u2014 invented data, not from any real person, company or Apify run",
+    "linkedinUrl": "https://www.linkedin.com/in/someone-else",
+    "headline": "Not the lead"
+  }
+]

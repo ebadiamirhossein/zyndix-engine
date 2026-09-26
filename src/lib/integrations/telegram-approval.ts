@@ -31,7 +31,8 @@ type QualificationContext = {
   fit_score: number | null;
   segment: string | null;
   problem_hypothesis: string;
-  evidence: { id?: string; observation: string }[];
+  /** 09 §UR: a research item carries its own fetch (and publication) date. */
+  evidence: { id?: string; observation: string; fetched_at?: string; published_at?: string | null }[];
   recommended_angle: string | null;
   /** The claim ledger the guard accepted (09 §U6b). */
   claims?: Claim[];
@@ -52,6 +53,18 @@ export type ApprovalCompanyContext = CompanyContext;
 const MAX_CLAIMS_SHOWN = 8;
 const EXCERPT_CHARS = 140;
 
+type CardEvidence = QualificationContext["evidence"][number];
+
+/**
+ * The date line of one cited item (09 §UR): its own fetch date when it has
+ * one, else the lead-level fetch date; plus its publication date if known.
+ */
+function evidenceDates(item: CardEvidence, leadFetchedAt: string | null | undefined, fetchedLabel: boolean): string {
+  const fetched = (item.fetched_at ?? leadFetchedAt)?.slice(0, 10) ?? "unknown";
+  const published = item.published_at ? ` · published ${item.published_at.slice(0, 10)}` : "";
+  return `${fetchedLabel ? "fetched " : ""}${fetched}${published}`;
+}
+
 function excerpt(text: string): string {
   return text.length <= EXCERPT_CHARS ? text : `${text.slice(0, EXCERPT_CHARS - 1)}…`;
 }
@@ -59,7 +72,6 @@ function excerpt(text: string): string {
 /** Each claim with the evidence it cites: id, fetch date, excerpt (09 §U6b). */
 export function formatClaimLines(qualification: QualificationContext): string[] {
   const claims = qualification.claims ?? [];
-  const fetched = qualification.evidence_fetched_at?.slice(0, 10) ?? "unknown";
   const lines: string[] = [];
   for (const claim of claims.slice(0, MAX_CLAIMS_SHOWN)) {
     lines.push(`• [${claim.kind}] “${escapeTelegramHtml(excerpt(claim.span))}”`);
@@ -67,7 +79,7 @@ export function formatClaimLines(qualification: QualificationContext): string[] 
       const item = qualification.evidence.find((e) => e.id === id);
       lines.push(
         item
-          ? `   ← ${id} · fetched ${fetched} · <i>${escapeTelegramHtml(excerpt(item.observation))}</i>`
+          ? `   ← ${id} · ${evidenceDates(item, qualification.evidence_fetched_at, true)} · <i>${escapeTelegramHtml(excerpt(item.observation))}</i>`
           : `   ← ${id} · (not found)`,
       );
     }
@@ -217,7 +229,6 @@ function unitLabel(n: number, unit: string): string {
 }
 
 function sequenceClaimLines(claims: Claim[], qualification: QualificationContext, level: CardLevel): string[] {
-  const fetched = qualification.evidence_fetched_at?.slice(0, 10) ?? "unknown";
   const lines: string[] = [];
   for (const claim of claims.slice(0, level.maxClaims)) {
     lines.push(`• [${claim.kind}] “${escapeTelegramHtml(cut(claim.span, level.spanChars))}”`);
@@ -225,8 +236,10 @@ function sequenceClaimLines(claims: Claim[], qualification: QualificationContext
       const item = qualification.evidence.find((e) => e.id === id);
       if (!item) lines.push(`   ← ${id} · (not found)`);
       else if (level.excerptChars > 0) {
-        lines.push(`   ← ${id} · ${fetched} · <i>${escapeTelegramHtml(cut(item.observation, level.excerptChars))}</i>`);
-      } else lines.push(`   ← ${id} · ${fetched}`);
+        lines.push(
+          `   ← ${id} · ${evidenceDates(item, qualification.evidence_fetched_at, false)} · <i>${escapeTelegramHtml(cut(item.observation, level.excerptChars))}</i>`,
+        );
+      } else lines.push(`   ← ${id} · ${evidenceDates(item, qualification.evidence_fetched_at, false)}`);
     }
   }
   if (claims.length > level.maxClaims) lines.push(`• … ${claims.length - level.maxClaims} more claims`);
@@ -245,6 +258,7 @@ function formatSequenceStepBlock(
   qualification: QualificationContext,
   level: CardLevel,
   ageDays: number | null,
+  now: Date,
 ): string[] {
   const header =
     step.step_no === 1
@@ -253,14 +267,20 @@ function formatSequenceStepBlock(
   const subject = step.step_no === 1 ? firstSubject : `Re: ${firstSubject.replace(/^re:\s*/i, "")}`;
   const cites = step.claims.some((c) => c.evidence_ids.length > 0);
   const max = qualification.max_age_days;
+  // 09 §UR: the step's age is its OLDEST cited item (each aged by its own fetch date when it has one).
+  const citedAges = [...new Set(step.claims.flatMap((c) => c.evidence_ids))].map((id) => {
+    const item = qualification.evidence.find((e) => e.id === id);
+    return item?.fetched_at ? evidenceAgeDays(item.fetched_at, now) : ageDays;
+  });
+  const stepAge = citedAges.length === 0 ? ageDays : citedAges.some((a) => a === null) ? null : Math.max(...(citedAges as number[]));
   const freshness =
     !cites
       ? step.source === "template"
         ? "template · cites no evidence"
         : "cites no evidence"
-      : ageDays === null || max === undefined
+      : stepAge === null || max === undefined
         ? "freshness: unknown"
-        : `freshness: ${ageDays}d + ${step.offset_days}d ≤ ${max}d`;
+        : `freshness: ${stepAge}d + ${step.offset_days}d ≤ ${max}d`;
   const lines = [
     header,
     `<i>${freshness}</i>`,
@@ -307,7 +327,7 @@ export function formatSequenceApprovalMessages(
 
   let blocks: string[][] = [];
   for (const level of CARD_LEVELS) {
-    blocks = steps.map((step) => ["──────────", ...formatSequenceStepBlock(step, firstSubject, qualification, level, ageDays)]);
+    blocks = steps.map((step) => ["──────────", ...formatSequenceStepBlock(step, firstSubject, qualification, level, ageDays, now)]);
     const whole = [...head, ...blocks.flat(), ...tail].join("\n");
     if (telegramVisibleLength(whole) <= TELEGRAM_TEXT_LIMIT) return [whole];
   }

@@ -1,9 +1,17 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { ApifyClient, ApifyRunWithItems } from "@/lib/integrations/apify";
+import {
+  loadResearchPolicy,
+  researchCoversPersonPosts,
+  runResearchForLeads,
+  type ResearchSummary,
+} from "@/lib/research/run";
+import type { ResearchTarget } from "@/lib/research/types";
 import { createStateStore } from "@/lib/state/core";
 import type { ApifyActorTemplates } from "@/lib/validation/jsonb";
 import type { Database, Json } from "@/types/database";
+import type { DatabaseWithWave1 } from "@/types/database-extensions";
 
 export const ENRICHMENT_SOURCE = {
   site: "apify_site",
@@ -22,6 +30,12 @@ export type EnrichStageSummary = {
   sources_failed: number;
   leads_to_qualifying: number;
   leads_parked: number;
+  /**
+   * 09 §UR research over this batch (per-lead detail is in each lead's
+   * `research_completed` event). null when research_policy is missing or
+   * disabled — then zero Apify research calls were made.
+   */
+  research: Omit<ResearchSummary, "leads"> | null;
 };
 
 type RunSummary = {
@@ -38,6 +52,12 @@ type LeadPick = {
   company_id: string;
   linkedin_url: string | null;
   domain: string;
+  company: {
+    name: string;
+    linkedin_url: string | null;
+    city: string | null;
+    country: string | null;
+  };
 };
 
 type EnrichDeps = {
@@ -288,6 +308,7 @@ export async function runEnrichStage(
     sources_failed: 0,
     leads_to_qualifying: 0,
     leads_parked: 0,
+    research: null,
   };
 
   const templatesSetting = await deps.getActiveSetting("apify_actor_templates");
@@ -298,7 +319,7 @@ export async function runEnrichStage(
   // Prefer retries first (enriching + due), then fill with sourced.
   let retryQuery = deps.db
     .from("leads")
-    .select("id, linkedin_url, company_id, companies!inner(domain)")
+    .select("id, linkedin_url, company_id, companies!inner(domain, name, linkedin_url, city, country)")
     .eq("state", "enriching")
     .lte("next_action_at", nowIso);
   if (options?.leadIds) retryQuery = retryQuery.in("id", options.leadIds);
@@ -313,7 +334,7 @@ export async function runEnrichStage(
   const remaining = Math.max(0, batchCap - (retryRows?.length ?? 0));
   let sourcedQuery = deps.db
     .from("leads")
-    .select("id, linkedin_url, company_id, companies!inner(domain)")
+    .select("id, linkedin_url, company_id, companies!inner(domain, name, linkedin_url, city, country)")
     .eq("state", "sourced");
   if (options?.leadIds) sourcedQuery = sourcedQuery.in("id", options.leadIds);
   const { data: sourcedRows, error: sourcedError } =
@@ -330,7 +351,13 @@ export async function runEnrichStage(
   const rows = [...(retryRows ?? []), ...(sourcedRows ?? [])];
 
   const leads: LeadPick[] = rows.map((row) => {
-    const company = row.companies as { domain: string | null };
+    const company = row.companies as {
+      domain: string | null;
+      name: string;
+      linkedin_url: string | null;
+      city: string | null;
+      country: string | null;
+    };
     if (!company?.domain) {
       throw new Error(`Lead ${row.id} company has no domain`);
     }
@@ -339,6 +366,12 @@ export async function runEnrichStage(
       company_id: row.company_id!,
       linkedin_url: row.linkedin_url,
       domain: company.domain,
+      company: {
+        name: company.name,
+        linkedin_url: company.linkedin_url,
+        city: company.city,
+        country: company.country,
+      },
     };
   });
 
@@ -387,18 +420,50 @@ export async function runEnrichStage(
   assertBatchCap(domains.length, "site+tech");
   assertBatchCap(linkedinUrls.length, "li_posts");
 
-  const [siteOutcome, techOutcome, liOutcome] = await Promise.all([
+  // 09 §UR: research runs alongside the site/tech crawls. When its person-posts
+  // source is on, it runs the same actor per lead, so the legacy batched
+  // li_posts run is skipped (never pay twice) and the apify_li_posts payload
+  // is built from the research run's items. Research never fails this stage.
+  const researchPolicy = (await loadResearchPolicy(deps.getActiveSetting)).policy;
+  const researchOn = Boolean(researchPolicy?.enabled);
+  const skipLegacyLiPosts = researchCoversPersonPosts(researchPolicy);
+  const researchPromise: Promise<ResearchSummary | null> = researchOn
+    ? runResearchForLeads(
+        {
+          db: deps.db as unknown as SupabaseClient<DatabaseWithWave1>,
+          apify: deps.apify,
+          getActiveSetting: deps.getActiveSetting,
+        },
+        leads.map(toResearchTarget),
+      ).catch((error: unknown) => {
+        console.error(`[enrich] research failed (enrich continues): ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      })
+    : Promise.resolve(null);
+
+  const [siteOutcome, techOutcome, liOutcome, research] = await Promise.all([
     runActorSlot(deps.apify, templates.site, buildSiteInput(templates.site, domains), domains.length),
     runActorSlot(deps.apify, templates.tech, buildTechInput(templates.tech, domains), domains.length),
-    linkedinUrls.length > 0
+    linkedinUrls.length > 0 && !skipLegacyLiPosts
       ? runActorSlot(
           deps.apify,
           templates.li_posts,
           buildLiInput(templates.li_posts, linkedinUrls),
           linkedinUrls.length,
         )
-      : Promise.resolve({ ok: false, error: "no_linkedin_urls_in_batch", urlsSubmitted: 0 } satisfies ActorOutcome),
+      : Promise.resolve({
+          ok: false,
+          error: skipLegacyLiPosts ? "replaced_by_research" : "no_linkedin_urls_in_batch",
+          urlsSubmitted: 0,
+        } satisfies ActorOutcome),
+    researchPromise,
   ]);
+
+  if (research) {
+    const { leads: _perLead, ...totals } = research;
+    void _perLead;
+    summary.research = totals;
+  }
 
   summary.runs.site = runSummaryFromOutcome("site", templates, siteOutcome);
   summary.runs.tech = runSummaryFromOutcome("tech", templates, techOutcome);
@@ -450,6 +515,11 @@ export async function runEnrichStage(
       let liPayload: unknown;
       if (!lead.linkedin_url) {
         liPayload = { error: "no_linkedin_url" };
+      } else if (skipLegacyLiPosts) {
+        const posts = research?.leads[lead.id]?.person_posts;
+        liPayload = posts?.ok
+          ? liPostsForProfile(posts.items, lead.linkedin_url, [lead.linkedin_url])
+          : { error: posts?.error ?? "research_unavailable" };
       } else if (liOutcome.ok) {
         liPayload = liPostsForProfile(liItems, lead.linkedin_url, linkedinUrls);
       } else {
@@ -517,6 +587,21 @@ export async function runEnrichStage(
   }
 
   return summary;
+}
+
+function toResearchTarget(lead: LeadPick): ResearchTarget {
+  return {
+    leadId: lead.id,
+    companyId: lead.company_id,
+    leadLinkedinUrl: lead.linkedin_url,
+    company: {
+      name: lead.company.name,
+      domain: lead.domain,
+      linkedinUrl: lead.company.linkedin_url,
+      city: lead.company.city,
+      country: lead.company.country,
+    },
+  };
 }
 
 async function runActorSlot(

@@ -50,6 +50,39 @@ export type ApifyRunWithItems = {
 
 export type ApifyClient = ReturnType<typeof createApifyClient>;
 
+/**
+ * Run options passed as query parameters of `POST /v2/acts/{actorId}/runs`
+ * (https://docs.apify.com/api/v2/act-runs-post, read 2026-09-26):
+ *   - maxItems: "Specifies the maximum number of dataset items that will be
+ *     charged for pay-per-result Actors."
+ *   - maxTotalChargeUsd: "Specifies the maximum total cost of the run. Use it
+ *     to cap the total amount charged for all pricing models."
+ * 09 §UR: every research run passes both (the provider-side hard cap).
+ */
+export type ApifyRunOptions = {
+  maxItems?: number;
+  maxTotalChargeUsd?: number;
+};
+
+/** Query string for the run options; "" when none are set. Exported for tests. */
+export function runOptionsQuery(options?: ApifyRunOptions): string {
+  const params = new URLSearchParams();
+  if (options?.maxItems !== undefined) {
+    if (!Number.isInteger(options.maxItems) || options.maxItems < 1) {
+      throw new Error(`apify: maxItems must be a positive integer, got ${options.maxItems}`);
+    }
+    params.set("maxItems", String(options.maxItems));
+  }
+  if (options?.maxTotalChargeUsd !== undefined) {
+    if (!Number.isFinite(options.maxTotalChargeUsd) || options.maxTotalChargeUsd <= 0) {
+      throw new Error(`apify: maxTotalChargeUsd must be > 0, got ${options.maxTotalChargeUsd}`);
+    }
+    params.set("maxTotalChargeUsd", String(options.maxTotalChargeUsd));
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 function requireToken(): string {
   const token = process.env.APIFY_TOKEN;
   if (!token) {
@@ -147,9 +180,13 @@ function parseRunEnvelope(json: unknown, label: string): ApifyRun {
 }
 
 export function createApifyClient() {
-  async function startRun(actorId: string, input: Record<string, unknown>): Promise<string> {
+  async function startRun(
+    actorId: string,
+    input: Record<string, unknown>,
+    runOptions?: ApifyRunOptions,
+  ): Promise<string> {
     const encoded = encodeActorId(actorId);
-    const json = await apifyFetch(`/acts/${encoded}/runs`, {
+    const json = await apifyFetch(`/acts/${encoded}/runs${runOptionsQuery(runOptions)}`, {
       method: "POST",
       body: input,
     });
@@ -185,9 +222,10 @@ export function createApifyClient() {
     actorId: string,
     input: Record<string, unknown>,
     timeoutMs?: number,
+    runOptions?: ApifyRunOptions,
   ): Promise<ApifyRunWithItems> {
     const startedAt = Date.now();
-    const runId = await startRun(actorId, input);
+    const runId = await startRun(actorId, input, runOptions);
     const run = await waitForRun(runId, timeoutMs);
     const durationMs = Date.now() - startedAt;
 
